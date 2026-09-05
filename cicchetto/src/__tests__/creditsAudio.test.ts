@@ -4,6 +4,8 @@ import {
   BAR_S,
   type CreditsEvent,
   creditsBar,
+  creditsCadence,
+  creditsManifestoBar,
   MOVEMENT_COUNT,
   PEAK_GAIN,
   PHRASE_S,
@@ -45,6 +47,13 @@ type StubParam = {
   setValueAtTime: ReturnType<typeof vi.fn>;
   exponentialRampToValueAtTime: ReturnType<typeof vi.fn>;
   setTargetAtTime: ReturnType<typeof vi.fn>;
+  // #1931 — the crossfade's two verbs. A LINEAR ramp, not the exponential one
+  // the note envelopes use: a crossfade needs a definite end (the point both
+  // ramps have to share), and `setTargetAtTime` only ever approaches its
+  // target. `cancelScheduledValues` is what a teardown mid-fade has to reach
+  // for, so the stub has to model it or the case cannot be tested at all.
+  linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+  cancelScheduledValues: ReturnType<typeof vi.fn>;
 };
 
 type StubOscillator = {
@@ -73,12 +82,20 @@ type StubBufferSource = {
 };
 
 function stubParam(): StubParam {
-  return {
+  const param: StubParam = {
     value: 0,
-    setValueAtTime: vi.fn(),
+    setValueAtTime: vi.fn((next: number) => {
+      // The stub tracks `value` through `setValueAtTime` because the crossfade
+      // reads a bus's CURRENT level to start its ramp from, and a stub whose
+      // value never moves would let a fade-from-the-wrong-level pass.
+      param.value = next;
+    }),
     exponentialRampToValueAtTime: vi.fn(),
     setTargetAtTime: vi.fn(),
+    linearRampToValueAtTime: vi.fn(),
+    cancelScheduledValues: vi.fn(),
   };
+  return param;
 }
 
 /**
@@ -743,5 +760,208 @@ describe("the credits suite (#1920)", () => {
 
     expect(oscillators.length).toBeGreaterThan(0);
     expect(oscillators.every((osc) => osc.type === "square" || osc.type === "triangle")).toBe(true);
+  });
+});
+
+describe("the soundtrack's three pieces, crossfaded (#1931)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  /** The per-piece buses, in creation order under the master at `gains[0]`. */
+  const buses = (gains: { gain: StubParam }[]) => ({
+    master: gains[0],
+    suite: gains[1],
+    manifesto: gains[2],
+    cadence: gains[3],
+  });
+
+  it("opens on the suite, with the other two buses silent", () => {
+    // Three buses under one master rather than one bus retargeted: a crossfade
+    // needs both pieces audible AT THE SAME TIME, which a single gain cannot
+    // express. The positive half of the assertion matters as much as the
+    // negative — all-zero buses would pass a "the others are silent" check and
+    // ship a mute easter egg.
+    const { ctx, gains } = makeCtx();
+
+    startCreditsArpeggio(ctx, false);
+
+    const bus = buses(gains);
+    expect(bus.suite?.gain.value).toBe(1);
+    expect(bus.manifesto?.gain.value).toBe(0);
+    expect(bus.cadence?.gain.value).toBe(0);
+  });
+
+  it("dissolves between pieces instead of cutting, over ONE shared window", () => {
+    // vjt: "musichette crossfade". The two ramps have to END AT THE SAME
+    // INSTANT, or the pair is a dip to silence and back rather than a
+    // dissolve — and a dip is exactly what the abrupt teardown already did.
+    const { ctx, gains } = makeCtx();
+    const arpeggio = startCreditsArpeggio(ctx, false);
+
+    arpeggio.setPiece("manifesto");
+
+    const bus = buses(gains);
+    const out = bus.suite?.gain.linearRampToValueAtTime.mock.calls ?? [];
+    const inn = bus.manifesto?.gain.linearRampToValueAtTime.mock.calls ?? [];
+    expect(out.length).toBe(1);
+    expect(inn.length).toBe(1);
+    expect(out[0]?.[0]).toBe(0);
+    expect(inn[0]?.[0]).toBe(1);
+    // Same end time, and it is genuinely LATER than now — a ramp landing at
+    // `currentTime` is a cut written in three lines.
+    expect(out[0]?.[1]).toBe(inn[0]?.[1]);
+    expect(out[0]?.[1]).toBeGreaterThan(ctx.currentTime);
+  });
+
+  it("keeps both pieces sounding through the dissolve", () => {
+    // The outgoing piece's already-armed notes ring on their own bus while it
+    // fades, and the incoming enters AT ONCE rather than at the next bar line
+    // — otherwise the fade runs out over silence and the "crossfade" is a gap.
+    const { ctx, oscillators } = makeCtx();
+    const arpeggio = startCreditsArpeggio(ctx, false);
+    const before = oscillators.length;
+    expect(before).toBeGreaterThan(0);
+
+    arpeggio.setPiece("manifesto");
+
+    expect(oscillators.length).toBeGreaterThan(before);
+  });
+
+  it("is idempotent: asking for the piece already playing fades nothing", () => {
+    const { ctx, gains } = makeCtx();
+    const arpeggio = startCreditsArpeggio(ctx, false);
+
+    arpeggio.setPiece("suite");
+
+    expect(buses(gains).suite?.gain.linearRampToValueAtTime).not.toHaveBeenCalled();
+  });
+
+  it("MUTES cleanly mid-dissolve", () => {
+    // 🔴 The hard constraint. The mute is the reader's only defence and it has
+    // to work at the one moment two pieces are sounding at once. It acts on
+    // the MASTER, which is why it does — a mute implemented per-bus would have
+    // to fight the crossfade's own ramps on those same params.
+    const { ctx, gains } = makeCtx();
+    const arpeggio = startCreditsArpeggio(ctx, false);
+    arpeggio.setPiece("cadence");
+
+    arpeggio.setMuted(true);
+
+    const calls = buses(gains).master?.gain.setTargetAtTime.mock.calls ?? [];
+    expect(calls[calls.length - 1]?.[0]).toBe(0);
+  });
+
+  it("TEARS DOWN cleanly mid-dissolve, cancelling the ramps still to come", () => {
+    // 🔴 The other half. A close during the fade leaves ramps scheduled into
+    // the future on three buses; without cancelling them the graph is being
+    // told to come back up while it is being dismantled. Closing the context
+    // would mask it — which is exactly why this asserts the cancel and not
+    // just the close.
+    const { ctx, gains, oscillators, close } = makeCtx();
+    const arpeggio = startCreditsArpeggio(ctx, false);
+    arpeggio.setPiece("cadence");
+
+    arpeggio.stop();
+
+    const bus = buses(gains);
+    for (const [name, node] of [
+      ["suite", bus.suite],
+      ["manifesto", bus.manifesto],
+      ["cadence", bus.cadence],
+    ] as const) {
+      expect(node?.gain.cancelScheduledValues, `${name} bus`).toHaveBeenCalled();
+    }
+    expect(oscillators.every((osc) => osc.stop.mock.calls.length > 0)).toBe(true);
+    expect(close).toHaveBeenCalled();
+  });
+
+  it("stops arming once the cadence has played: it is an ending, not a loop", () => {
+    // The suite loops for as long as the modal is open. The cadence is the
+    // last thing heard, so a cadence on a loop would turn the ending into a
+    // ringtone — the exact defect #1916 was filed for.
+    const { ctx, oscillators } = makeCtx();
+    const arpeggio = startCreditsArpeggio(ctx, false);
+    arpeggio.setPiece("cadence");
+    vi.advanceTimersByTime(BAR_S * 1000);
+    const afterOneBar = oscillators.length;
+
+    vi.advanceTimersByTime(BAR_S * 6 * 1000);
+
+    expect(oscillators.length).toBe(afterOneBar);
+  });
+
+  it("plays a cadence of four or five notes, and no percussion", () => {
+    // The issue's own shape: "four or five notes ... that reads as an ending
+    // without quoting one". Drums would make it a bar of the suite.
+    const lead = creditsCadence().filter((event) => event.voice === "lead");
+    expect(lead.length).toBeGreaterThanOrEqual(4);
+    expect(lead.length).toBeLessThanOrEqual(5);
+    expect(creditsCadence().some((event) => event.voice === "hat")).toBe(false);
+    expect(creditsCadence().some((event) => event.voice === "snare")).toBe(false);
+  });
+
+  it("rises and then falls, so it lands rather than stops", () => {
+    // What makes four notes an ENDING. Asserted on the contour rather than on
+    // the pitches: any transposition of it still has to go up and come back.
+    const hz = creditsCadence()
+      .filter((event) => event.voice === "lead")
+      .sort((a, b) => a.at - b.at)
+      .map((event) => event.hz ?? 0);
+    const peak = hz.indexOf(Math.max(...hz));
+    expect(peak, "the cadence never rises").toBeGreaterThan(0);
+    expect(peak, "the cadence never comes back down").toBeLessThan(hz.length - 1);
+    expect(hz[hz.length - 1]).toBeLessThan(Math.max(...hz));
+  });
+
+  it("gives the manifesto music of its own, not a movement of the suite", () => {
+    // "un pezzo SUO, distinto sia dall'arpeggio del roll sia dalla cadenza
+    // finale". Compared as the RENDERED bar, so a manifesto that merely
+    // renamed a movement would still be caught.
+    const fingerprint = (events: readonly CreditsEvent[]): string =>
+      events
+        .map((e) => `${e.voice}@${e.at.toFixed(3)}:${(e.hz ?? 0).toFixed(1)}`)
+        .sort()
+        .join("|");
+
+    const manifesto = fingerprint(creditsManifestoBar(0));
+    for (let movement = 0; movement < MOVEMENT_COUNT; movement += 1) {
+      for (let bar = 0; bar < BAR_COUNT; bar += 1) {
+        expect(manifesto, `movement ${movement} bar ${bar}`).not.toBe(
+          fingerprint(creditsBar(bar, movement)),
+        );
+      }
+    }
+    expect(manifesto).not.toBe(fingerprint(creditsCadence()));
+  });
+
+  it("keeps the new pieces inside the gain budget the suite already respects", () => {
+    // The ceiling is not per-piece: during a crossfade two buses sound at once,
+    // so the worst instant is bounded by the LOUDEST piece only while the
+    // fade is what keeps their sum in hand. This pins the per-piece half —
+    // that neither newcomer is louder than a bar of the suite.
+    const worst = (events: readonly CreditsEvent[]): number => {
+      const edges = events.flatMap((e) => [e.at, e.at + e.decayS]);
+      return Math.max(
+        ...edges.map((t) =>
+          events
+            .filter((e) => e.at <= t && t < e.at + e.decayS)
+            .reduce((sum, e) => sum + e.peak, 0),
+        ),
+      );
+    };
+    const suiteWorst = Math.max(
+      ...Array.from({ length: MOVEMENT_COUNT }, (_, m) =>
+        Math.max(...Array.from({ length: BAR_COUNT }, (_, b) => worst(creditsBar(b, m)))),
+      ),
+    );
+    expect(worst(creditsManifestoBar(0))).toBeLessThanOrEqual(suiteWorst);
+    expect(worst(creditsCadence())).toBeLessThanOrEqual(suiteWorst);
+    expect(PEAK_GAIN).toBe(0.06);
   });
 });

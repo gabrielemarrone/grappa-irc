@@ -100,10 +100,47 @@
 // the worst instant is the same lead + second channel + bass + snare it was.
 // The test that measures it walks the score, so it re-measures this by itself.
 
-/** A running soundtrack. Both verbs are idempotent. */
+// #1931 — the soundtrack becomes a SEQUENCE, because the credits now end.
+//
+// Three pieces, in the order the modal walks them: the `suite` above under the
+// roll and the prose, a `manifesto` theme under the block that precedes the
+// ending, and a one-shot `cadence` under the pulsing heart. vjt asked for the
+// joins to be "musichette crossfade" — dissolved, not cut, which is what the
+// old teardown-and-restart did.
+//
+// That is why there are now THREE gain buses under the master rather than one.
+// A crossfade needs both pieces audible at the same instant, and one bus
+// retargeted cannot express that: it can only dip to silence and come back,
+// which is the cut with extra steps. The pieces' notes are scheduled onto
+// their own bus at arm time, so the outgoing piece's already-armed bar keeps
+// ringing while its bus ramps down and the incoming enters AT ONCE — not at
+// the next bar line, which would run the fade out over silence.
+//
+// The MASTER is untouched by all of this, and that is the load-bearing part of
+// the design rather than an accident of layering: `setMuted` and `stop` have
+// to work mid-dissolve, when two buses are sounding and three carry ramps
+// scheduled into the future. Mute acts on the master, so it silences whatever
+// the crossfade happens to be doing without having to fight it on the same
+// params; the teardown cancels the pending ramps on every bus before it drops
+// the graph, so nothing is being told to come back up while it is dismantled.
+// Both cases are pinned by tests, at the exact moment of the fade.
+//
+// The cadence is ONE-SHOT. The suite loops for as long as the modal is open;
+// an ending on a loop is a ringtone, which is the defect #1916 was filed for.
+
+/** Which piece of the sequence is playing. */
+export type CreditsPiece = "suite" | "manifesto" | "cadence";
+
+/** A running soundtrack. Every verb is idempotent. */
 export type CreditsArpeggio = {
   /** Fade to silence (or back), without tearing down the graph. */
   readonly setMuted: (muted: boolean) => void;
+  /**
+   * Dissolve to another piece. Asking for the piece already playing does
+   * nothing — the modal drives this from a signal that re-fires for reasons of
+   * its own, and a re-fire must not restart the music.
+   */
+  readonly setPiece: (piece: CreditsPiece) => void;
   /** Silence it, drop every node, and CLOSE the context handed to `start`. */
   readonly stop: () => void;
 };
@@ -505,6 +542,70 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
 ];
 
 /**
+ * The manifesto's own theme (#1931).
+ *
+ * Deliberately not a fifth movement of the suite: it plays under ~570 words
+ * somebody is READING, so it has to stay out of the way in a manner none of
+ * the four does. Quarter-note grid with every note held through three of the
+ * four slots, the thinnest pulse in the file, and — the thing that separates
+ * it at a glance — NO PERCUSSION AT ALL. Nothing marching under the text.
+ *
+ * The progression is the Andalusian descent the "descent" movement also walks,
+ * because it is the one shape in A minor that reads as gravity rather than as
+ * a loop; what makes this a different piece is everything else — no drums, no
+ * second channel, one note a bar in the lead and a bass that never restrikes.
+ */
+const MANIFESTO_MOVEMENT: Movement = {
+  name: "manifesto",
+  duty: 0.125,
+  second: "none",
+  secondDuty: 0.125,
+  // One slot, empty: the type wants a non-empty tuple, and this is how "no
+  // percussion" is spelled in it rather than by making the field optional.
+  drums: [null],
+  bars: [
+    { lead: ["A4", "-", "-", "E4"], bass: ["A2", "-", "-", "-"], chord: ["A", "C", "E"] },
+    { lead: ["G4", "-", "-", "D4"], bass: ["G2", "-", "-", "-"], chord: ["G", "B", "D"] },
+    { lead: ["F4", "-", "-", "C4"], bass: ["F2", "-", "-", "-"], chord: ["F", "A", "C"] },
+    // The V wants its major third in a minor key — the same G# the suite's
+    // "descent" leans on, and the reason this stops rather than circles.
+    { lead: ["E4", "-", "-", "B3"], bass: ["E3", "-", "-", "-"], chord: ["E", "G#", "B"] },
+  ],
+};
+
+/**
+ * The closing cadence (#1931) — ONE bar, five notes, played once.
+ *
+ * 🔴 ORIGINAL, and that is a licence constraint rather than a stylistic one.
+ * The Looney Tunes outro is "The Merry-Go-Round Broke Down" (1937), whose US
+ * copyright runs to 2033, and "That's all Folks!" is a Warner Bros. TRADEMARK,
+ * which does not expire at all. So this quotes nothing: what it borrows is the
+ * SHAPE an ending has — rise, turn, land — which is not anybody's property.
+ *
+ * A4 → C5 → E5 up, D5 → A4 back down, the last note held through two slots so
+ * it settles instead of stopping. The bass walks the plagal iv–i underneath
+ * (F2 under the turn, A2 under the landing), which is the "amen" motion and is
+ * why four rising notes read as finished rather than as interrupted.
+ *
+ * No drums, for the reason the manifesto has none: a backbeat here would make
+ * it bar five of the suite.
+ */
+const CADENCE_BAR: Movement = {
+  name: "cadence",
+  duty: 0.5,
+  second: "none",
+  secondDuty: 0.25,
+  drums: [null],
+  bars: [
+    {
+      lead: ["A4", "C5", "E5", "-", "D5", "-", "A4", "-"],
+      bass: ["A2", null, "E3", null, "F2", null, "A2", "-"],
+      chord: ["A", "C", "E"],
+    },
+  ],
+};
+
+/**
  * One eighth note. 0.24 s ⇒ 125 BPM, unchanged from #1773.
  *
  * Since #1922 this is no longer the note length — each line divides `BAR_S` by
@@ -576,6 +677,15 @@ const SNARE_PEAK = 0.12;
 
 /** Ramp constant for the mute toggle. An instant gain jump clicks. */
 const MUTE_RAMP_S = 0.02;
+/**
+ * How long one piece takes to dissolve into the next (#1931).
+ *
+ * Just under half a bar. Long enough to hear as a dissolve rather than as a
+ * cut, short enough that the outgoing bar — already armed, and at most one bar
+ * long — is still sounding for the whole of it, which is what makes the
+ * overlap real instead of a fade into a gap.
+ */
+const CROSSFADE_S = 0.9;
 /** Exponential ramps cannot reach zero; this is the working silence. */
 const GAIN_FLOOR = 0.0001;
 /** Fraction of a note spent decaying — the rest is the gap that articulates it. */
@@ -672,7 +782,34 @@ function movementAtIndex(index: number): Movement {
  * Pure: the scheduler renders these, and the test measures them.
  */
 export function creditsBar(index: number, movement = 0): readonly CreditsEvent[] {
-  const score = movementAtIndex(movement);
+  return barEvents(movementAtIndex(movement), index);
+}
+
+/**
+ * Bar `index` of the manifesto's theme (#1931). Wraps, like the suite's: the
+ * text takes as long as it takes to read, so the piece under it loops.
+ */
+export function creditsManifestoBar(index: number): readonly CreditsEvent[] {
+  return barEvents(MANIFESTO_MOVEMENT, index);
+}
+
+/**
+ * The closing cadence (#1931), in full. Takes no index because it does not
+ * loop — that is the whole point of it, and a parameter would invite one.
+ */
+export function creditsCadence(): readonly CreditsEvent[] {
+  return barEvents(CADENCE_BAR, 0);
+}
+
+/**
+ * One bar of any score, expanded to events. Pure: the scheduler renders these
+ * and the tests measure them.
+ *
+ * Split out of `creditsBar` by #1931 so the manifesto theme and the cadence
+ * are rendered by the SAME code as the suite rather than by a second copy of
+ * it — the copy that drifts is the one nobody listens to.
+ */
+function barEvents(score: Movement, index: number): readonly CreditsEvent[] {
   const bar = score.bars[wrap(index, score.bars.length)] ?? score.bars[0];
   const events: CreditsEvent[] = [];
   const leadPeak = score.second === "none" ? LEAD_SOLO_PEAK : LEAD_PEAK;
@@ -778,6 +915,28 @@ const PUMP_MS = 100;
  */
 const PULSE_HARMONICS = 24;
 
+/**
+ * Ramp one bus to `to`, arriving `CROSSFADE_S` after `now` (#1931).
+ *
+ * The three lines are the standard "freeze where you are, then ramp" idiom and
+ * the order matters: the CURRENT value is read first (the `AudioParam` getter
+ * reports the live automated value, not the last one anybody assigned), then
+ * the future is cleared, then that value is pinned at `now` so the new ramp
+ * has a defined starting point. Skipping the pin makes the ramp start from
+ * whatever the last scheduled event left behind, which mid-dissolve is not
+ * where the bus actually is — the fade would jump before it slid.
+ *
+ * `linearRampToValueAtTime`, not the `setTargetAtTime` the mute uses:
+ * `setTargetAtTime` approaches its target asymptotically and never arrives, so
+ * two of them cannot share the instant that makes a pair of ramps a crossfade.
+ */
+function fadeBus(bus: GainNode, to: number, now: number): void {
+  const from = bus.gain.value;
+  bus.gain.cancelScheduledValues(now);
+  bus.gain.setValueAtTime(from, now);
+  bus.gain.linearRampToValueAtTime(to, now + CROSSFADE_S);
+}
+
 function makeNoiseBuffer(ctx: AudioContext): AudioBuffer {
   const frames = Math.max(1, Math.floor(ctx.sampleRate * NOISE_S));
   const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
@@ -829,6 +988,19 @@ export function startCreditsArpeggio(
   master.gain.value = muted ? 0 : PEAK_GAIN;
   master.connect(ctx.destination);
 
+  // #1931 — one bus per piece, all under the master. Unit gains: the master
+  // owns the volume (and therefore the mute), these own only WHO is heard, so
+  // a crossfade never has to know what the level is.
+  const buses: Record<CreditsPiece, GainNode> = {
+    suite: ctx.createGain(),
+    manifesto: ctx.createGain(),
+    cadence: ctx.createGain(),
+  };
+  for (const [name, bus] of Object.entries(buses) as [CreditsPiece, GainNode][]) {
+    bus.gain.value = name === "suite" ? 1 : 0;
+    bus.connect(master);
+  }
+
   // Every source is kept so `stop()` can silence one scheduled a beat into the
   // future — `onended` cannot be relied on for that, because a note that has
   // not started yet never ends.
@@ -840,6 +1012,7 @@ export function startCreditsArpeggio(
   let barIndex = 0;
   let movement = 0;
   let nextBarAt = 0;
+  let piece: CreditsPiece = "suite";
 
   // Built once per width and cached: a `PeriodicWave` is immutable and shared
   // by every oscillator that uses it, so making one per note would be a few
@@ -866,7 +1039,7 @@ export function startCreditsArpeggio(
     };
   };
 
-  const scheduleEvent = (event: CreditsEvent, base: number): void => {
+  const scheduleEvent = (event: CreditsEvent, base: number, bus: GainNode): void => {
     const at = base + event.at;
     // A browser that refused the buffer gets no percussion; the tuned voices
     // still play. Checked BEFORE the gain node so the refusal costs no node.
@@ -878,7 +1051,10 @@ export function startCreditsArpeggio(
     env.gain.setValueAtTime(GAIN_FLOOR, at);
     env.gain.exponentialRampToValueAtTime(event.peak, at + Math.min(ATTACK_S, event.durS * 0.2));
     env.gain.exponentialRampToValueAtTime(GAIN_FLOOR, at + event.decayS);
-    env.connect(master);
+    // The bus of the piece that ARMED this note, captured by the caller — not
+    // whichever piece happens to be current when it sounds. That is what lets
+    // the outgoing piece ring on through its own fade.
+    env.connect(bus);
 
     if (event.hz === null && noise !== null) {
       const burst = ctx.createBufferSource();
@@ -933,16 +1109,31 @@ export function startCreditsArpeggio(
     // and it is exactly the case the gain budget above cannot defend against.
     if (nextBarAt < ctx.currentTime) nextBarAt = ctx.currentTime;
     while (nextBarAt < ctx.currentTime + LOOKAHEAD_S) {
-      // Read the roll's pass HERE, one bar before it is heard: the movement
-      // can therefore only change on a bar line, never mid-phrase. Restarting
-      // `barIndex` is what makes the new movement enter at its OWN first bar
-      // instead of wherever the outgoing one had got to.
-      const wanted = wrap(readMovement(), MOVEMENT_COUNT);
-      if (wanted !== movement) {
-        movement = wanted;
-        barIndex = 0;
+      // #1931 — the cadence is one bar and then silence. `break` rather than
+      // `return` so the timer below stays alive: it costs nothing and it keeps
+      // the pump answerable if a piece is ever selected after this one.
+      if (piece === "cadence" && barIndex > 0) break;
+
+      let events: readonly CreditsEvent[];
+      if (piece === "suite") {
+        // Read the roll's pass HERE, one bar before it is heard: the movement
+        // can therefore only change on a bar line, never mid-phrase.
+        // Restarting `barIndex` is what makes the new movement enter at its
+        // OWN first bar instead of wherever the outgoing one had got to.
+        const wanted = wrap(readMovement(), MOVEMENT_COUNT);
+        if (wanted !== movement) {
+          movement = wanted;
+          barIndex = 0;
+        }
+        events = creditsBar(barIndex, movement);
+      } else if (piece === "manifesto") {
+        events = creditsManifestoBar(barIndex);
+      } else {
+        events = creditsCadence();
       }
-      for (const event of creditsBar(barIndex, movement)) scheduleEvent(event, nextBarAt);
+
+      const bus = buses[piece];
+      for (const event of events) scheduleEvent(event, nextBarAt, bus);
       barIndex += 1;
       nextBarAt += BAR_S;
     }
@@ -962,13 +1153,47 @@ export function startCreditsArpeggio(
   return {
     setMuted: (next: boolean): void => {
       if (stopped) return;
+      // On the MASTER, deliberately: it sits above every bus, so this silences
+      // a crossfade in flight without touching — or being fought by — the
+      // ramps the crossfade has scheduled on the buses themselves.
       master.gain.setTargetAtTime(next ? 0 : PEAK_GAIN, ctx.currentTime, MUTE_RAMP_S);
     },
+
+    setPiece: (next: CreditsPiece): void => {
+      if (stopped || next === piece) return;
+      const now = ctx.currentTime;
+      // Both ramps land on the SAME instant, which is what makes the pair a
+      // dissolve rather than a dip to silence and back.
+      fadeBus(buses[piece], 0, now);
+      fadeBus(buses[next], 1, now);
+
+      piece = next;
+      barIndex = 0;
+      // The incoming piece enters AT ONCE rather than at the next bar line,
+      // which can be most of a bar away — the fade would otherwise run out
+      // over silence. The outgoing bar is already armed on its own bus and
+      // keeps ringing, so the two genuinely overlap.
+      nextBarAt = now;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      pump();
+    },
+
     stop: (): void => {
       if (stopped) return;
       stopped = true;
       if (timer !== null) clearTimeout(timer);
       timer = null;
+      // Cancel BEFORE dropping the graph. Mid-dissolve there are ramps
+      // scheduled into the future on three buses, and leaving them in place
+      // tells the graph to come back up while it is being dismantled. Closing
+      // the context would mask it in practice — which is exactly why this is
+      // explicit and has a test of its own.
+      const at = ctx.currentTime;
+      master.gain.cancelScheduledValues(at);
+      for (const bus of Object.values(buses)) {
+        bus.gain.cancelScheduledValues(at);
+      }
       for (const voice of voices) {
         try {
           voice.stop();
@@ -979,6 +1204,7 @@ export function startCreditsArpeggio(
       }
       voices.length = 0;
       waves.clear();
+      for (const bus of Object.values(buses)) bus.disconnect();
       master.disconnect();
       void ctx.close();
     },

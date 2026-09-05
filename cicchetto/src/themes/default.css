@@ -14647,6 +14647,17 @@ audio.media-viewer-media {
   flex-direction: inherit;
   align-items: inherit;
   gap: inherit;
+}
+
+/* #1931 split the FADE off the block's layout, and it is not tidiness: the
+   block comes back for the finale, and the fade is a one-shot with `forwards`,
+   so a re-mounted element carrying it would dissolve the ending the reader is
+   being shown. Two classes is how "the same box, but this time it stays" is
+   said without a second box.
+
+   It also keeps `creditsRain.blockIsFading` honest for free — the finale's
+   block has no animation on it at all, so the reader has nothing to misread. */
+.credits-block-fading {
   animation: credits-block-fade 34s linear 1 forwards;
 }
 
@@ -14861,4 +14872,128 @@ audio.media-viewer-media {
     animation: none;
     padding: max(3rem, var(--safe-area-inset-top)) 1.5rem max(3rem, var(--safe-area-inset-bottom));
   }
+
+  /* #1931 — the heart pulses, so it is motion and it stops here with the
+     rest. A `<3` that merely sits there is still the joke. */
+  .credits-heart {
+    animation: none;
+  }
+}
+
+/* #1931 — THE END OF THE SEQUENCE, and it is the reduced-motion posture reused
+   rather than a new one: a static, scrollable column.
+
+   The reason is the close button. Everything in this modal travels, and a
+   button that scrolls off the top is a button you wait 34s for — so when the
+   ending arrives the roll STOPS, and the way to stop it that already exists in
+   this stylesheet is the one the media query above uses.
+
+   Stopping it also settles the rain with no code at all: both readers in
+   `creditsRain` ask the roll's animation what phase it is in, and an element
+   with `animation: none` reports none, which they already answer "steady" to
+   (pinned by `creditsRain.test.ts`'s no-animation case). That is how the rain
+   is kept from fighting the heart WITHOUT a third clock.
+
+   ⚠️ These two rules deliberately carry the same declarations as the media
+   query above. CSS has no way to share them across a media boundary, so
+   `creditsFinale.css.test.ts` pins that the pair agrees rather than a comment
+   asking the next reader to keep them in step. */
+.credits-viewport-ended {
+  overflow-y: auto;
+  pointer-events: auto;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.credits-roll-ended {
+  position: static;
+  animation: none;
+  padding: max(3rem, var(--safe-area-inset-top)) 1.5rem max(3rem, var(--safe-area-inset-bottom));
+}
+
+/* The heart. Big, ASCII, and beating — the pulse is what makes `<3` read as a
+   heart rather than as two characters. `ease-in-out` with a rest between beats
+   rather than a sine: a continuous throb reads as a loading spinner. */
+.credits-heart {
+  margin: 2rem 0 0.5rem;
+  font-family: var(--font-mono);
+  font-size: min(4rem, 18vw);
+  line-height: 1;
+  color: var(--accent);
+  text-shadow: 0 0 1.5rem var(--accent);
+  animation: credits-heart-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes credits-heart-pulse {
+  0%,
+  60%,
+  100% {
+    transform: scale(1);
+  }
+
+  15% {
+    transform: scale(1.18);
+  }
+
+  30% {
+    transform: scale(1.02);
+  }
+
+  45% {
+    transform: scale(1.12);
+  }
+}
+
+.credits-finale-line {
+  margin: 0 0 1.5rem;
+  max-width: min(58ch, 88vw);
+  font-size: 1.1em;
+  color: var(--fg);
+}
+
+/* A real `button`, styled to sit in the roll: the ending is reachable by
+   keyboard and announced as a control, which a clickable `div` is not. */
+.credits-close-cta {
+  margin: 0 0 2rem;
+  padding: 0.6rem 1.4rem;
+  font: inherit;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.credits-close-cta:hover,
+.credits-close-cta:focus-visible {
+  color: var(--bg);
+  background: var(--accent);
+}
+
+/* The manifesto's own screen. LEFT-aligned and capped in `ch` for the reason
+   `.credits-prose` records: it is the longest thing in the modal by a factor
+   of four, and a centred wall of it costs the reader the start of every
+   line. */
+.credits-manifesto {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: min(64ch, 88vw);
+  text-align: left;
+  font-size: 0.95em;
+  line-height: 1.6;
+}
+
+.credits-manifesto-text {
+  margin: 0;
+  white-space: pre-wrap;
+  color: var(--fg);
+}
+
+/* Quieter than the text and never omitted — see `creditsFinale.ts`. */
+.credits-manifesto-attribution {
+  margin: 0;
+  font-size: 0.85em;
+  font-style: italic;
+  color: var(--muted);
 }

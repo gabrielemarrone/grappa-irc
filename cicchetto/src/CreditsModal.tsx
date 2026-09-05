@@ -9,8 +9,15 @@ import {
 } from "solid-js";
 import { buildCredits, creditsDateLabel } from "./lib/buildCredits";
 import { bootBundleVersionAccessor } from "./lib/bundleHash";
-import { type CreditsArpeggio, startCreditsArpeggio } from "./lib/creditsAudio";
+import { type CreditsArpeggio, type CreditsPiece, startCreditsArpeggio } from "./lib/creditsAudio";
 import { CREDITS_COW, CREDITS_SPECIAL_THANKS } from "./lib/creditsBlock";
+import {
+  CREDITS_CLOSE_LABEL,
+  CREDITS_FINALE_LINE,
+  CREDITS_HEART,
+  CREDITS_MANIFESTO,
+  CREDITS_MANIFESTO_ATTRIBUTION,
+} from "./lib/creditsFinale";
 import {
   closeCreditsModal,
   creditsModalOpen,
@@ -48,6 +55,22 @@ import MatrixRain from "./MatrixRain";
 // no git — the AUR source tarball and the release image both do — and a roll
 // that renders an empty line there reads as a bug in the modal rather than as
 // the truth about the build.
+
+/**
+ * Where the credits are in their sequence (#1931).
+ *
+ * A closed set rather than a number: "the deck is spent" and "this is the
+ * ending" are states, not counts, and expressing them as arithmetic on the
+ * pass index would make two different facts share one variable.
+ */
+type CreditsStage = "block" | "prose" | "manifesto" | "finale";
+
+/** Which piece of the soundtrack belongs under each stage. */
+function pieceFor(stage: CreditsStage): CreditsPiece {
+  if (stage === "manifesto") return "manifesto";
+  if (stage === "finale") return "cadence";
+  return "suite";
+}
 
 const CreditsModal: Component = () => {
   createOverlayLock(() => creditsModalOpen(), ".credits-modal", closeCreditsModal);
@@ -93,16 +116,65 @@ const CreditsModal: Component = () => {
   const deck = createProseDeck();
   const [prose, setProse] = createSignal<ProseSet | null>(null);
 
-  // Which pass is on screen, for the ONE thing that needs to know: the names
-  // are shown once and never again (vjt, #grappa 2026-09-05 — "mostriamo i
-  // credits una volta sola, chi se ne frega di ri-vederli"). Every later pass
-  // is prose alone.
+  // ── the sequence, and where in it we are (#1931) ────────────────────────
+  // vjt's order, end to end: the block (names, cow, thanks) → prose sets until
+  // the deck has dealt every one → the manifesto → the credits once more, with
+  // a pulsing heart, a closing line and a button. The roll's own
+  // `animationiteration` walks it; there is no clock here.
   //
-  // Set from `creditsRollPass`, i.e. from the animation's own
-  // `currentIteration`, rather than incremented here. The event is the TRIGGER
-  // and the animation stays the VALUE — a counter of my own would be a second
-  // tally that can disagree with the clock everything else reads.
-  const [pass, setPass] = createSignal(0);
+  // A STAGE rather than the pass counter this replaces. The pass number could
+  // say "show the names" (pass zero) and nothing else: it cannot express "the
+  // deck is spent", which is the trigger the ending hangs off, and it cannot
+  // tell the manifesto from the finale. Both of those would have become
+  // arithmetic on a number that means something else.
+  const [stage, setStage] = createSignal<CreditsStage>("block");
+
+  // The deck reported its bag empty and the ending has not run yet.
+  //
+  // Session-scoped (a plain `let` in a component Shell mounts once), for the
+  // same reason the deck itself is: vjt wants the ending reachable ACROSS
+  // several viewings, so closing the modal one set short must not throw the
+  // progress away. It is a pending NOTIFICATION and not a copy of
+  // `deck.exhausted()` — the deck reports an edge on the draw that empties the
+  // bag, and the ending is two turnovers later, so something has to hold it in
+  // between. Cleared when the finale arrives, which is what lets a NEW opening
+  // after a completed run start a fresh run instead of ending immediately.
+  let endingDue = false;
+
+  /**
+   * One turn of the roll. The ORDER of these branches is the guarantee vjt
+   * asked for — that the ending can never appear before the last set.
+   *
+   * The finale holds: once it is up, later turnovers do nothing, because the
+   * roll is stopped and there is nothing after the end.
+   */
+  const advance = (): void => {
+    const now = stage();
+    if (now === "finale") return;
+    if (now === "manifesto") {
+      setStage("finale");
+      // Consumed HERE and not on the way in: while it is set, a reopening
+      // resumes the ending rather than restarting the sequence. Clearing it
+      // is what tells the next opening that this run is over.
+      endingDue = false;
+      return;
+    }
+    if (endingDue) {
+      // No draw. The bag is spent, and drawing here would refill it and hand
+      // out a seventeenth set nobody asked for, one turn before the end.
+      setStage("manifesto");
+      return;
+    }
+    setProse(deck.draw());
+    setStage("prose");
+    // Read AFTER the draw, which is the only moment the edge exists: the deck
+    // reports the bag empty for exactly the window between this draw and the
+    // next one.
+    if (deck.exhausted()) endingDue = true;
+  };
+
+  /** Is the sequence over? The roll stops, and the rain settles with it. */
+  const ended = (): boolean => stage() === "finale";
 
   createEffect(() => {
     // #1929 — CLEARED on open, not drawn. The first pass is the block (names,
@@ -111,11 +183,15 @@ const CreditsModal: Component = () => {
     // replaces it before it is ever on screen. Drawing lazily is what keeps
     // the deck's no-repeat promise honest.
     //
-    // The pass resets with it: `Show` builds a fresh element on every open, so
-    // its animation genuinely starts over, and carrying the old count would
+    // The stage resets with it: `Show` builds a fresh element on every open, so
+    // its animation genuinely starts over, and carrying the old stage would
     // hide the block from the second viewing onwards.
+    //
+    // #1931 — `endingDue` deliberately does NOT reset here. That flag is the
+    // deck's progress, and the deck is session-scoped precisely so the ending
+    // can be reached across several openings.
     if (creditsModalOpen()) {
-      setPass(0);
+      setStage("block");
       setProse(null);
     }
   });
@@ -158,6 +234,19 @@ const CreditsModal: Component = () => {
   createEffect(() => {
     const muted = creditsMuted();
     arpeggio?.setMuted(muted);
+  });
+
+  // #1931 — the soundtrack follows the SEQUENCE, and this one is a signal
+  // rather than the thunk `movementAt` is. The distinction is real: the roll's
+  // pass lives in a CSS animation Solid cannot observe, so reading it has to
+  // be a poll from the scheduler's own pump; the stage is Solid state that
+  // changes exactly when the sequence moves, so an effect is the honest
+  // mechanism and a poll would be the invented clock.
+  //
+  // `setPiece` is idempotent, which is what makes this safe against the
+  // re-runs an effect gets for reasons of its own.
+  createEffect(() => {
+    arpeggio?.setPiece(pieceFor(stage()));
   });
 
   // A logout unmounts Shell with the modal still open; without this the
@@ -213,9 +302,10 @@ const CreditsModal: Component = () => {
             #1807 lengthened the cycle and parked the translate before its
             end; that tail IS the interlude, and it is read back off this
             element rather than counted a second time in JS. */}
-        <div class="credits-viewport">
+        <div class="credits-viewport" classList={{ "credits-viewport-ended": ended() }}>
           <div
             class="credits-roll"
+            classList={{ "credits-roll-ended": ended() }}
             data-testid="credits-roll"
             ref={(node) => {
               roll = node;
@@ -230,8 +320,7 @@ const CreditsModal: Component = () => {
               // turn the paragraph over on its own schedule.
               node.addEventListener("animationiteration", (event) => {
                 if (event.target !== node) return;
-                setPass(creditsRollPass(node));
-                setProse(deck.draw());
+                advance();
               });
             }}
           >
@@ -252,10 +341,19 @@ const CreditsModal: Component = () => {
                 The DOM swap still rides `animationiteration`, i.e. it lands a
                 full interlude after the fade has finished: by then the block
                 is transparent AND parked off the top, so what is removed has
-                been invisible twice over. */}
-            <Show when={pass() === 0}>
+                been invisible twice over.
+
+                #1931 — and the block COMES BACK for the finale, which is why
+                the condition is a stage and not a pass number. It comes back
+                WITHOUT `credits-block-fading`: the fade is a one-shot with
+                `forwards`, so a re-mounted element would restart it and
+                dissolve the ending the reader is being shown. That is also
+                what keeps `creditsRain.blockIsFading` answering "no" here —
+                there is no animation on the element to read. */}
+            <Show when={stage() === "block" || ended()}>
               <div
                 class="credits-block"
+                classList={{ "credits-block-fading": !ended() }}
                 data-testid="credits-block"
                 ref={(node) => {
                   block = node;
@@ -350,6 +448,50 @@ const CreditsModal: Component = () => {
                 <p class="credits-coda">
                   an always-on IRC bouncer, and a client that looks like irssi
                 </p>
+
+                {/* #1931 — the ending, INSIDE the block that came back rather
+                    than beside it: vjt's sequence is "credits di nuovo + cuore
+                    + riga + bottone", one last screen and not two. */}
+                <Show when={ended()}>
+                  <p class="credits-heart" data-testid="credits-heart" aria-hidden="true">
+                    {CREDITS_HEART}
+                  </p>
+                  <p class="credits-finale-line" data-testid="credits-finale-line">
+                    {CREDITS_FINALE_LINE}
+                  </p>
+                  {/* Closes through `closeCreditsModal`, the SAME function the
+                      overlay lock is given and the ✕ in the chrome calls. A
+                      second closing path would be a second place for the
+                      scroll-lock refcount to be got wrong, which is the live
+                      #1772 bug this modal already had once. */}
+                  <button
+                    type="button"
+                    class="credits-close-cta"
+                    data-testid="credits-close-cta"
+                    onClick={closeCreditsModal}
+                  >
+                    {CREDITS_CLOSE_LABEL}
+                  </button>
+                </Show>
+              </div>
+            </Show>
+
+            {/* #1931 — the manifesto, between the last set and the ending.
+                Its own block rather than a seventeenth prose set: it is ~570
+                words against a 150-word cap, and the cheap way to fit it would
+                be to raise the cap, which would silently un-bound all sixteen
+                sets the cap exists to keep readable.
+
+                🔴 The TEXT is a placeholder pending vjt's written licence
+                clearance — see `creditsFinale.ts`. The attribution renders
+                beside it now rather than later, because a credit added in a
+                follow-up is a credit that never ships. */}
+            <Show when={stage() === "manifesto"}>
+              <div class="credits-manifesto" data-testid="credits-manifesto">
+                <p class="credits-manifesto-text">{CREDITS_MANIFESTO}</p>
+                <p class="credits-manifesto-attribution" data-testid="credits-manifesto-credit">
+                  {CREDITS_MANIFESTO_ATTRIBUTION}
+                </p>
               </div>
             </Show>
 
@@ -358,10 +500,16 @@ const CreditsModal: Component = () => {
 
                 #1929 — but NOT during the first pass any more. The block is
                 the first thing and the prose is what comes after it, so the
-                gate is on the pass and not merely on there being a set: the
+                gate is on the stage and not merely on there being a set: the
                 two used to share the column, and the block would otherwise be
-                trailed by a paragraph it is supposed to hand over to. */}
-            <Show when={pass() > 0 && prose()}>
+                trailed by a paragraph it is supposed to hand over to.
+
+                #1931 — the same gate now also keeps the last set off the
+                manifesto's screen and off the ending's. `prose()` outlives the
+                stage that drew it, on purpose: it is what the reader was last
+                shown, and clearing it would be state kept for the benefit of
+                a condition that can already read the stage. */}
+            <Show when={stage() === "prose" && prose()}>
               {(set) => (
                 <div class="credits-prose" data-testid="credits-prose">
                   <h3 class="credits-prose-title" data-testid="credits-prose-title">

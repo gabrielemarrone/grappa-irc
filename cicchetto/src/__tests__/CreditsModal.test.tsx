@@ -4,11 +4,18 @@ import CreditsModal from "../CreditsModal";
 import type { BuildCredits } from "../lib/buildCredits";
 import { CREDITS_SPECIAL_THANKS } from "../lib/creditsBlock";
 import {
+  CREDITS_FINALE_LINE,
+  CREDITS_HEART,
+  CREDITS_MANIFESTO_ATTRIBUTION,
+} from "../lib/creditsFinale";
+import {
   closeCreditsModal,
+  creditsModalOpen,
   creditsMuted,
   openCreditsModal,
   toggleCreditsMuted,
 } from "../lib/creditsModal";
+import { CREDITS_PROSE } from "../lib/creditsProse";
 import { __resetForTest, overlayCount, runTopmostOverlayEscape } from "../lib/overlayScrollLock";
 
 // #1773 — the credits easter egg.
@@ -59,6 +66,12 @@ class StubAudioContext {
         setValueAtTime: (): void => {},
         exponentialRampToValueAtTime: (): void => {},
         setTargetAtTime: (): void => {},
+        // #1931 — the crossfade's verbs. This stub exists to let the modal's
+        // lifecycle run, so it models whatever the real `AudioParam` has that
+        // `creditsAudio` reaches for; the crossfade's BEHAVIOUR is measured in
+        // `creditsAudio.test.ts`, against the stub that records calls.
+        linearRampToValueAtTime: (): void => {},
+        cancelScheduledValues: (): void => {},
       },
       connect: (): void => {},
       disconnect: (): void => {},
@@ -301,5 +314,180 @@ describe("CreditsModal (#1773)", () => {
     closeCreditsModal();
     openCreditsModal();
     expect(screen.getByTestId("credits-mute").getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+describe("the credits END (#1931)", () => {
+  // The sequence vjt dictated, end to end: block → prose until the deck is
+  // spent → manifesto → the credits again with a heart, a line and a button.
+  //
+  // jsdom has no `getAnimations`, so the roll would read every pass as the
+  // first and no turnover could be observed. Stubbing it is what makes the
+  // sequence reachable here at all; the stopping of the roll and the pulse are
+  // CSS and belong to `creditsFinaleCss.test.ts`.
+  const turnTheRollOver = (times: number): void => {
+    const roll = screen.getByTestId("credits-roll");
+    for (let i = 0; i < times; i += 1) {
+      roll.dispatchEvent(new Event("animationiteration", { bubbles: true }));
+    }
+  };
+
+  /** Turn it over until the ending is up, or give up loudly. */
+  const runToTheEnd = (): number => {
+    const ceiling = CREDITS_PROSE.length + 4;
+    for (let turns = 1; turns <= ceiling; turns += 1) {
+      turnTheRollOver(1);
+      if (screen.queryByTestId("credits-heart") !== null) return turns;
+    }
+    throw new Error(`the ending never arrived in ${ceiling} turns`);
+  };
+
+  it("shows no ending until every set has been dealt", () => {
+    // 🔴 The failure mode that would ruin the whole thing: an early "that's
+    // all, folks". Asserted on EVERY turn up to the last set rather than on a
+    // sample, because the interesting bug is an off-by-one.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+
+    for (let turn = 1; turn <= CREDITS_PROSE.length; turn += 1) {
+      turnTheRollOver(1);
+      expect(screen.queryByTestId("credits-heart"), `heart on turn ${turn}`).toBeNull();
+      expect(screen.queryByTestId("credits-close-cta"), `button on turn ${turn}`).toBeNull();
+    }
+  });
+
+  it("puts the manifesto between the last set and the ending", () => {
+    render(() => <CreditsModal />);
+    openCreditsModal();
+
+    // The turn after the last set is the manifesto, and it is alone there.
+    turnTheRollOver(CREDITS_PROSE.length + 1);
+    expect(screen.getByTestId("credits-manifesto")).toBeTruthy();
+    expect(screen.queryByTestId("credits-prose")).toBeNull();
+    expect(screen.queryByTestId("credits-heart")).toBeNull();
+
+    // ...and the turn after THAT is the ending, with the manifesto gone.
+    turnTheRollOver(1);
+    expect(screen.queryByTestId("credits-manifesto")).toBeNull();
+    expect(screen.getByTestId("credits-heart")).toBeTruthy();
+  });
+
+  it("ships the manifesto's attribution with it, never bare", () => {
+    // The text is a placeholder pending vjt's written clearance, but the
+    // credit is a condition of ever showing it — so it is wired now, and this
+    // is what stops the slot being filled in later without one.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    turnTheRollOver(CREDITS_PROSE.length + 1);
+
+    const credit = screen.getByTestId("credits-manifesto-credit");
+    expect(screen.getByTestId("credits-manifesto").contains(credit)).toBe(true);
+    expect(credit.textContent).toBe(CREDITS_MANIFESTO_ATTRIBUTION);
+  });
+
+  it("brings the credits back for the ending, with the heart, the line and the button", () => {
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    runToTheEnd();
+
+    // "the credits come back": the same block, not a new screen.
+    const block = screen.getByTestId("credits-block");
+    expect(screen.getByTestId("credits-title")).toBeTruthy();
+    expect(block.contains(screen.getByTestId("credits-cow"))).toBe(true);
+    expect(block.contains(screen.getByTestId("credits-heart"))).toBe(true);
+    expect(screen.getByTestId("credits-heart").textContent).toBe(CREDITS_HEART);
+    expect(screen.getByTestId("credits-finale-line").textContent).toBe(CREDITS_FINALE_LINE);
+    expect(screen.getByTestId("credits-close-cta")).toBeTruthy();
+  });
+
+  it("does not re-arm the fade on the block that came back", () => {
+    // The fade is `1 forwards`. A re-mounted block still carrying its class
+    // would dissolve the ending as it arrives — invisible in review, and
+    // fatal to the one screen the reader is meant to act on.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    expect(screen.getByTestId("credits-block").classList.contains("credits-block-fading")).toBe(
+      true,
+    );
+
+    runToTheEnd();
+
+    expect(screen.getByTestId("credits-block").classList.contains("credits-block-fading")).toBe(
+      false,
+    );
+  });
+
+  it("stops the roll once the ending is up, so the button stays reachable", () => {
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    runToTheEnd();
+
+    expect(screen.getByTestId("credits-roll").classList.contains("credits-roll-ended")).toBe(true);
+  });
+
+  it("closes through the same path everything else closes through", () => {
+    // Not "the modal disappears": the assertion is on `creditsModalOpen`, the
+    // signal `createOverlayLock` and the ✕ both drive. A second closing
+    // mechanism is a second place for the scroll-lock refcount to go wrong.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    runToTheEnd();
+
+    fireEvent.click(screen.getByTestId("credits-close-cta"));
+
+    expect(creditsModalOpen()).toBe(false);
+    expect(screen.queryByTestId("credits-modal")).toBeNull();
+  });
+
+  it("holds on the ending rather than looping back round", () => {
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    runToTheEnd();
+
+    turnTheRollOver(3);
+
+    expect(screen.getByTestId("credits-heart")).toBeTruthy();
+    expect(screen.queryByTestId("credits-prose")).toBeNull();
+  });
+
+  it("reaches the ending ACROSS several viewings, because the deck is the session's", () => {
+    // vjt's intent, and the reason the deck is not rebuilt per open: someone
+    // who watches a few sets, closes, and comes back should be closer to the
+    // end, not back at the start. Closing one turn short and reopening must
+    // therefore land on the ending rather than deal a seventeenth set.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    turnTheRollOver(CREDITS_PROSE.length);
+    expect(screen.queryByTestId("credits-manifesto")).toBeNull();
+
+    closeCreditsModal();
+    openCreditsModal();
+
+    // The block again — a fresh opening always opens on the credits...
+    expect(screen.getByTestId("credits-block")).toBeTruthy();
+    expect(screen.queryByTestId("credits-heart")).toBeNull();
+    // ...and then straight into the ending, because the bag is still spent.
+    turnTheRollOver(1);
+    expect(screen.getByTestId("credits-manifesto")).toBeTruthy();
+    turnTheRollOver(1);
+    expect(screen.getByTestId("credits-heart")).toBeTruthy();
+  });
+
+  it("starts a fresh run on the opening AFTER a finished one", () => {
+    // The other side of the same rule, and the one a latch gets wrong: once
+    // the ending has run, the sequence is over — reopening deals prose again
+    // rather than replaying the ending for ever, which would make sixteen sets
+    // unreachable for the rest of the session.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+    runToTheEnd();
+
+    closeCreditsModal();
+    openCreditsModal();
+    turnTheRollOver(1);
+
+    expect(screen.getByTestId("credits-prose")).toBeTruthy();
+    expect(screen.queryByTestId("credits-heart")).toBeNull();
+    expect(screen.queryByTestId("credits-manifesto")).toBeNull();
   });
 });

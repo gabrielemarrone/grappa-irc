@@ -46038,3 +46038,107 @@ executed. Types and lint are green locally. **Everything outside
 `creditsAudio.test.ts` is still CI's verdict.**
 
 _Deploy: **HOT — `--cic` only.** Client-side; no server change._
+<!-- entry #1929 -->
+
+---
+
+## 2026-09-06 — #1929: the roll, the cow and the special thanks are one block, and a fade hands over to the prose
+
+The credit roll ended where the names ended. vjt's brief is that the names, a
+cowsay and a special-thanks list are **one block — the first one** — and that
+the paragraph sets #1924 introduced begin only on the other side of a fade out,
+with the matrix rain thickening through it.
+
+### One block, and what that buys
+
+`.credits-block` is a new wrapper inside `.credits-roll` holding the titles, the
+contributors, the cow, the thanks and the coda. It is not decorative: it is the
+element carrying the fade, so it is what dissolves and what the rain reads. The
+animation could not go on the roll itself — the roll outlives the block and
+carries the prose afterwards, so a `forwards` fade there would dim every
+paragraph set for ever.
+
+The prose is now gated on `pass() > 0` rather than merely on a set existing. The
+two used to share the first pass, in the same column, which is exactly the
+adjacency the issue says is wrong: the block is supposed to hand over to the
+prose, not be trailed by it. The set is also drawn LAZILY now — on open the
+signal is cleared instead of dealt from, because a set drawn for the first pass
+would be replaced by the first `animationiteration` without ever being on
+screen, quietly spending one of the deck's no-repeat draws.
+
+### The cow is bahamut's, reused rather than redrawn
+
+`azzurra/bahamut src/version.c.SH:145-152` — the `/info` infotext that reads
+`This bahamut has Super Cow Powers !`. The body is transcribed byte-for-byte;
+only the sentence changes, to `This grappa has Super Cow Powers !`. That is the
+smallest edit that makes it speak for grappa, and choosing it rather than
+writing a new joke is the whole point: an ASCII animal that merely resembles
+Azzurra's would be a different joke told to nobody.
+
+The BALLOON is generated from the sentence rather than transcribed, so the
+rules can never disagree with the text — the failure mode of a hand-drawn box
+is that someone shortens the words and the underscores stay the old length.
+That generator is only trusted because it is checked against the original:
+fed bahamut's own sentence it emits bahamut's own eight lines, underscore for
+underscore, and the test asserts exactly that before any claim about "the same
+cow" is made. It handles ONE line and does not wrap; real cowsay breaks at 40
+columns into a multi-line box with shoulders, and half of that would be worse
+than none.
+
+### The special thanks are dictated, and the test says so
+
+Copied verbatim from the issue, in the order given. **Sonic is thanked twice**
+— once among the people keeping Azzurra standing, once for bicchierino — and a
+test pins that, because deduplicating him is precisely the helpful cleanup a
+later reader will reach for. The list is pinned in full and by length: the
+first catches an edit, the second catches an insertion.
+
+### The fade rides the roll's clock, and the rain reads it
+
+`@keyframes credits-block-fade` runs on the same 34s as `credits-roll`, once,
+with `forwards`. It holds opacity until 70% and reaches zero at **82%, which is
+the offset the roll parks at** — the block finishes dissolving exactly as it
+finishes leaving, so the interlude that follows is pure rain with nothing
+half-visible in it. Those two numbers must agree and neither is copied into TS:
+`creditsRain.test.ts` reads both out of the stylesheet and fails if they part.
+Both pins were falsified before being believed — moving the fade end to 80%
+reds the seam test, and declaring the fade at 30s reds the clock test.
+
+No wall-clock timer anywhere, and that constraint is the same one #1807 and
+#1920 wrote down: a `setTimeout` at "about thirty seconds" is a second clock,
+and it disagrees in the case that always breaks these — a backgrounded tab
+freezes rAF and the animation with it while timers keep running.
+
+`creditsRainLook` now takes the block as well as the roll and bursts when
+EITHER says there is nothing left to compete with: the roll parked, or the
+block dissolving. `blockIsFading` reads the fade's start off its own keyframes
+the way `rollIsParked` reads the park offset, so retiming the dissolve moves
+the rain's surge with it.
+
+**The rain reaches the existing burst look at the dissolve's start; it does not
+ramp into it.** That is a deliberate reuse of #1807's two-look model rather
+than a new one. A gradual thickening would mean interpolating four knobs —
+one of them an `rgba` string needing a parser — to render a four-second
+nuance, which is more mechanism than the effect is worth. If vjt wants the
+thickening gradual rather than immediate, that is the change, and it is
+contained to `creditsRainLook`.
+
+### What is NOT established here
+
+* **Nothing was seen.** There is no browser and no handset in this session, so
+  every visual claim is arithmetic and unit tests. That the fade reads as a
+  dissolve rather than as a cut, and that the rain surge lands where it should,
+  is a human's verdict on a real screen.
+* **The cow's fit on a narrow phone is computed, not observed.** 38 columns at
+  `min(0.8em, 3vw)` against the 88vw the rest of the roll keeps; `white-space:
+  pre` because wrapping fixed-width art does not degrade it, it destroys it.
+  The `min()` is what should keep it whole at 320px, and it has not been seen
+  at 320px.
+* **The first pass now travels faster, and by how much is an estimate.** The
+  cycle is a fixed 34s over a distance of one viewport plus the roll's height,
+  so a taller block is a quicker block. The block gained the cow and the thanks
+  and LOST the prose to the second pass, which nets out at roughly +15% travel
+  distance by line count — not measured, and not obviously worth the layout
+  read per resize that #1920 already declined.
+
+_Deploy: **HOT — `--cic` only.** Client-side; no server change._

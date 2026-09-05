@@ -25,22 +25,42 @@
 // #1916 — the arrangement, and why it is DATA. What shipped in #1773 was one
 // 1.92 s bar (eight triangle notes over a static A2 sine) re-armed verbatim
 // for as long as the modal stayed open, which reads as a ringtone rather than
-// a soundtrack. Four things changed, all inside the same contract above:
+// a soundtrack. The phrase became a `bars` ARRAY walked in order (Am → F → C →
+// G), the lead became a `square` with the triangle demoted to a MOVING bass
+// line, one noise channel took the backbeat, and bars went on a LOOKAHEAD
+// cursor rather than being re-based on `ctx.currentTime` at every re-arm.
 //
-//  - The phrase is a `BARS` ARRAY walked in order (Am → F → C → G), so the
-//    loop point is PHRASE_S out rather than one bar. Lengthening it is adding
-//    entries to that array — no code moves. Four bars is an assumption, not a
-//    ruling; see the PR and DESIGN_NOTES.
-//  - The lead is a `square` and the triangle is demoted to a bass line that
-//    MOVES with the chord, replacing the drone. That swap is most of what
-//    makes a chiptune sound like a chiptune.
-//  - One noise channel for percussion, and only one: a snare REPLACES the hat
-//    on the backbeat instead of sounding over it, which is both how a
-//    two-pulse-plus-noise chip actually behaves and what keeps the mix peak
-//    inside the pre-#1916 budget (see PEAK_GAIN).
-//  - Bars are placed on a LOOKAHEAD cursor (`nextBarAt`) rather than re-based
-//    on `ctx.currentTime` at every re-arm, so timer jitter no longer smears
-//    the phrase. See `pump` for the one hazard that introduces.
+// #1920 — the phrase becomes a SUITE, and the roll picks the movement.
+//
+// #1916's four bars still repeated verbatim for as long as the modal stayed
+// open — about four and a half times per 34 s roll cycle, and identically on
+// every cycle, so the second pass of the titles sounded exactly like the
+// first. vjt asked for the music to TURN OVER when the titles come back round,
+// and for more of it: "più variegata più chiptune più voci".
+//
+// Three changes, all inside the contract above:
+//
+//  - `MOVEMENTS` replaces `BARS`. Each movement carries its own progression,
+//    its own pulse WIDTH, its own drum pattern, and its own second-channel
+//    duty (a harmony line, an arpeggio, or nothing). Adding a movement is
+//    adding an entry to that array.
+//  - The movement is chosen by `movementAt()`, which the modal wires to the
+//    roll's own animation (`creditsRoll.creditsRollPass`) — ONE CLOCK, the
+//    same doctrine `creditsRain.rollIsParked` follows. The switch lands on a
+//    BAR boundary because the pump only ever arms whole bars.
+//  - The channel model is now the four an NES actually has: two pulses, one
+//    triangle, one noise. That constraint is the reason `harmony` and `arp`
+//    are mutually exclusive per movement rather than both playing — they are
+//    the SAME channel, and a chip that could sound both would not be a chip.
+//    The pulse width is a `PeriodicWave` (25% and 12.5% duties), which is the
+//    single change that most makes this sound like hardware rather than like
+//    an oscillator; 50% stays the built-in `square`, so movement one is
+//    bit-for-bit the timbre #1916 shipped.
+//
+// The gain budget did NOT move: `PEAK_GAIN` is unchanged and the per-voice
+// peaks below were re-cut so that the worst instant of the busiest movement
+// still lands under the pre-#1916 ceiling. `creditsAudio.test.ts` measures
+// that across every movement rather than trusting this paragraph.
 
 /** A running soundtrack. Both verbs are idempotent. */
 export type CreditsArpeggio = {
@@ -76,11 +96,64 @@ type Octave = "1" | "2" | "3" | "4" | "5" | "6";
 /** Scientific pitch notation — `A2`, `C#5`. */
 type Note = `${PitchClass}${Octave}`;
 
-/** Equal temperament off A4 = 440 Hz (MIDI 69). `A2` → 110, `C4` → 261.63. */
-function hzOf(note: Note): number {
+/** MIDI note number. `A4` → 69, `C4` → 60. */
+function midiOf(note: Note): number {
   const octave = Number(note.slice(-1));
   const pitchClass = note.slice(0, -1) as PitchClass;
-  return 440 * 2 ** (((octave + 1) * 12 + SEMITONE[pitchClass] - 69) / 12);
+  return (octave + 1) * 12 + SEMITONE[pitchClass];
+}
+
+/** Equal temperament off A4 = 440 Hz (MIDI 69). */
+function hzOfMidi(midi: number): number {
+  return 440 * 2 ** ((midi - 69) / 12);
+}
+
+function hzOf(note: Note): number {
+  return hzOfMidi(midiOf(note));
+}
+
+const PITCH_CLASS_COUNT = 12;
+
+function pitchClassOf(midi: number): number {
+  return ((midi % PITCH_CLASS_COUNT) + PITCH_CLASS_COUNT) % PITCH_CLASS_COUNT;
+}
+
+/**
+ * The nearest note BELOW `midi` that belongs to `chord`, or `null` if the
+ * chord has no member in the octave underneath.
+ *
+ * This is how the harmony line is derived rather than written out: the lead
+ * already walks chord tones, so "the chord tone below" tracks it in thirds and
+ * fourths that are in key by construction. Writing a second `Eight<Note>` per
+ * bar would be the same information typed twice, and the copy that drifts is
+ * always the one nobody hums.
+ */
+function chordToneBelow(midi: number, chord: Chord): number | null {
+  // Widened to `number[]` on purpose: `SEMITONE`'s values are a literal union,
+  // and an array of it would make `includes` reject the computed pitch class
+  // this asks about.
+  const classes: number[] = chord.map((name) => SEMITONE[name]);
+  for (let candidate = midi - 1; candidate >= midi - PITCH_CLASS_COUNT; candidate -= 1) {
+    if (classes.includes(pitchClassOf(candidate))) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The chord spelled upward from `root` in `octave`: root, third, fifth, root
+ * again an octave up. Each tone is the next occurrence ABOVE the previous one,
+ * so a chord whose third is a lower pitch class than its root (A minor: A, C,
+ * E) still comes out ascending.
+ */
+function arpeggioFrom(chord: Chord, octave: number): number[] {
+  const notes: number[] = [midiOf(`${chord[0]}${octave}` as Note)];
+  for (let i = 1; i <= chord.length; i += 1) {
+    const wanted = SEMITONE[chord[i % chord.length] as PitchClass];
+    let next = (notes[notes.length - 1] ?? 0) + 1;
+    while (pitchClassOf(next) !== wanted) next += 1;
+    notes.push(next);
+  }
+  return notes;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,44 +162,207 @@ function hzOf(note: Note): number {
 
 type Eight<T> = readonly [T, T, T, T, T, T, T, T];
 type Four<T> = readonly [T, T, T, T];
+/** Root, third, fifth. The second channel is derived from this, not written. */
+type Chord = readonly [PitchClass, PitchClass, PitchClass];
 
 /** One bar: eight eighth-notes of lead over four quarter-notes of bass. */
 type Bar = {
   readonly lead: Eight<Note>;
   readonly bass: Four<Note>;
+  readonly chord: Chord;
 };
-
-// Am → F → C → G, the i–VI–III–VII everyone already knows, which is the point:
-// the roll is a joke and the tune should land as one. Each lead bar walks the
-// chord up, back down, and exits on a step towards the next chord's root. The
-// bass is root · root · fifth · root, staying inside 87–165 Hz so it sits
-// under the lead instead of fighting it.
-//
-// Adding bars five to eight is adding entries HERE. Nothing below counts to
-// four.
-const BARS: readonly [Bar, ...Bar[]] = [
-  { lead: ["A4", "C5", "E5", "A5", "E5", "C5", "A4", "B4"], bass: ["A2", "A2", "E3", "A2"] },
-  { lead: ["F4", "A4", "C5", "F5", "C5", "A4", "F4", "G4"], bass: ["F2", "F2", "C3", "F2"] },
-  { lead: ["E4", "G4", "C5", "E5", "C5", "G4", "E4", "F4"], bass: ["C3", "C3", "G2", "C3"] },
-  { lead: ["D4", "G4", "B4", "D5", "B4", "G4", "D4", "E4"], bass: ["G2", "G2", "D3", "G2"] },
-];
 
 type Drum = "hat" | "snare";
 
-// ONE noise channel, so the backbeat snare takes the hat's slot rather than
-// stacking on it — see the header. Indices 2 and 6 are beats 2 and 4.
-const DRUMS: Eight<Drum | null> = ["hat", "hat", "snare", "hat", "hat", "hat", "snare", "hat"];
+/**
+ * What the second pulse channel does in a movement. `"harmony"` shadows the
+ * lead a chord tone below; `"arp"` runs sixteenths up the chord; `"none"`
+ * leaves the channel silent, which is what movement one shipped with.
+ *
+ * The three are mutually exclusive because they are ONE channel — see the
+ * header. This is the type that says so.
+ */
+type SecondChannel = "none" | "harmony" | "arp";
+
+type Movement = {
+  /** Names the movement in the score; not user-visible. */
+  readonly name: string;
+  readonly bars: readonly [Bar, ...Bar[]];
+  /**
+   * Pulse width of the LEAD channel. `0.5` is a plain square (the built-in
+   * type); anything else is rendered with a `PeriodicWave`.
+   */
+  readonly duty: number;
+  readonly second: SecondChannel;
+  /** Pulse width of the second channel, when it plays. */
+  readonly secondDuty: number;
+  readonly drums: Eight<Drum | null>;
+};
+
+// The suite. Four movements of four bars, all in A minor's orbit so the seams
+// are steps rather than key changes: the roll is a joke and the tune should
+// land as one, four times over.
+//
+// Movement one is #1916's phrase, note for note and timbre for timbre, and
+// that is deliberate — the first pass of the titles is the one everybody sees,
+// and #1920 is not a reason to relitigate a tune nobody complained about.
+// The variation is what happens on passes two, three and four.
+//
+// Each lead bar walks its chord up, back down, and exits on a step towards the
+// next chord's root. Every bass line stays inside 87–165 Hz so it sits under
+// the lead instead of fighting it.
+const MOVEMENTS: readonly [Movement, ...Movement[]] = [
+  {
+    // Pass one: Am → F → C → G, the i–VI–III–VII everyone already knows.
+    name: "opening",
+    duty: 0.5,
+    second: "none",
+    secondDuty: 0.25,
+    drums: ["hat", "hat", "snare", "hat", "hat", "hat", "snare", "hat"],
+    bars: [
+      {
+        lead: ["A4", "C5", "E5", "A5", "E5", "C5", "A4", "B4"],
+        bass: ["A2", "A2", "E3", "A2"],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["F4", "A4", "C5", "F5", "C5", "A4", "F4", "G4"],
+        bass: ["F2", "F2", "C3", "F2"],
+        chord: ["F", "A", "C"],
+      },
+      {
+        lead: ["E4", "G4", "C5", "E5", "C5", "G4", "E4", "F4"],
+        bass: ["C3", "C3", "G2", "C3"],
+        chord: ["C", "E", "G"],
+      },
+      {
+        lead: ["D4", "G4", "B4", "D5", "B4", "G4", "D4", "E4"],
+        bass: ["G2", "G2", "D3", "G2"],
+        chord: ["G", "B", "D"],
+      },
+    ],
+  },
+  {
+    // Pass two: down a fourth into Dm → B♭ → F → C, the second pulse comes in
+    // underneath the lead, and the width narrows to 25% — the nasal one.
+    name: "harmony",
+    duty: 0.25,
+    second: "harmony",
+    secondDuty: 0.25,
+    drums: ["hat", null, "snare", "hat", "hat", null, "snare", "hat"],
+    bars: [
+      {
+        lead: ["D4", "F4", "A4", "D5", "A4", "F4", "D4", "E4"],
+        bass: ["D3", "D3", "A2", "D3"],
+        chord: ["D", "F", "A"],
+      },
+      {
+        lead: ["A#4", "D5", "F5", "A#5", "F5", "D5", "A#4", "C5"],
+        bass: ["A#2", "A#2", "F2", "A#2"],
+        chord: ["A#", "D", "F"],
+      },
+      {
+        lead: ["F4", "A4", "C5", "F5", "C5", "A4", "F4", "G4"],
+        bass: ["F2", "F2", "C3", "F2"],
+        chord: ["F", "A", "C"],
+      },
+      {
+        lead: ["E4", "G4", "C5", "E5", "C5", "G4", "E4", "D4"],
+        bass: ["C3", "C3", "G2", "C3"],
+        chord: ["C", "E", "G"],
+      },
+    ],
+  },
+  {
+    // Pass three: the Andalusian descent Am → G → F → E, half-time drums, and
+    // the second channel switches from a harmony to sixteenths at 12.5% —
+    // the thinnest width, which is what makes a chip arpeggio glitter rather
+    // than thicken.
+    name: "descent",
+    duty: 0.125,
+    second: "arp",
+    secondDuty: 0.125,
+    drums: ["hat", null, null, null, "snare", null, null, "hat"],
+    bars: [
+      {
+        lead: ["A4", "C5", "E5", "A5", "E5", "C5", "A4", "G4"],
+        bass: ["A2", "A2", "E3", "A2"],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["G4", "B4", "D5", "G5", "D5", "B4", "G4", "F4"],
+        bass: ["G2", "G2", "D3", "G2"],
+        chord: ["G", "B", "D"],
+      },
+      {
+        lead: ["F4", "A4", "C5", "F5", "C5", "A4", "F4", "E4"],
+        bass: ["F2", "F2", "C3", "F2"],
+        chord: ["F", "A", "C"],
+      },
+      {
+        // The V of a minor key wants its major third: G#, not G. That one
+        // accidental is the whole reason this progression sounds like an
+        // ending rather than like a loop.
+        lead: ["E4", "G#4", "B4", "E5", "B4", "G#4", "E4", "A4"],
+        bass: ["E3", "E3", "B2", "E3"],
+        chord: ["E", "G#", "B"],
+      },
+    ],
+  },
+  {
+    // Pass four: C → G → Am → F, the major-key turn, harmony back on, hats on
+    // every eighth and a snare on three as well as on two and four. The lead
+    // sits an octave up from where it started the suite: this is the one that
+    // is allowed to be loud, and then it wraps back to "opening".
+    name: "finale",
+    duty: 0.25,
+    second: "harmony",
+    secondDuty: 0.5,
+    drums: ["hat", "hat", "snare", "hat", "snare", "hat", "snare", "hat"],
+    bars: [
+      {
+        lead: ["G4", "C5", "E5", "G5", "E5", "C5", "G4", "A4"],
+        bass: ["C3", "C3", "G2", "C3"],
+        chord: ["C", "E", "G"],
+      },
+      {
+        lead: ["B4", "D5", "G5", "B5", "G5", "D5", "B4", "A4"],
+        bass: ["G2", "G2", "D3", "G2"],
+        chord: ["G", "B", "D"],
+      },
+      {
+        lead: ["A4", "C5", "E5", "A5", "E5", "C5", "A4", "B4"],
+        bass: ["A2", "A2", "E3", "A2"],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["A4", "C5", "F5", "A5", "F5", "C5", "A4", "G4"],
+        bass: ["F2", "F2", "C3", "F2"],
+        chord: ["F", "A", "C"],
+      },
+    ],
+  },
+];
 
 /** One eighth note. 0.24 s ⇒ 125 BPM, unchanged from #1773. */
 const STEP_S = 0.24;
 /** Bar length, in seconds. */
 export const BAR_S = 8 * STEP_S;
-/** How many bars before the phrase repeats. */
-export const BAR_COUNT = BARS.length;
-/** How long the whole phrase runs before it loops. THE number #1916 asked for. */
+/** How many movements the suite walks before it wraps back to the first. */
+export const MOVEMENT_COUNT = MOVEMENTS.length;
+/**
+ * How many bars a movement runs. Every movement is the same length on
+ * purpose — the roll's cycle is the loop point, not the phrase's, so a
+ * movement that ran long would only ever be heard truncated. Pinned by a test
+ * rather than by this comment.
+ */
+export const BAR_COUNT = MOVEMENTS[0].bars.length;
+/** How long ONE movement runs before it repeats. */
 export const PHRASE_S = BAR_COUNT * BAR_S;
 
 const BASS_S = 2 * STEP_S;
+/** The second channel's sixteenths, when it is running an arpeggio. */
+const ARP_S = STEP_S / 2;
 const HAT_S = 0.03;
 const SNARE_S = 0.12;
 
@@ -141,18 +377,38 @@ const SNARE_S = 0.12;
 // declares its envelope peak RELATIVE to it, so the worst instant this mix can
 // produce is `PEAK_GAIN × (sum of the peaks of whatever overlaps)`. #1773's
 // worst instant was a lead note (1) over the drone (0.025 / 0.06 = 0.4167) —
-// 1.4167, i.e. 0.085 absolute. The numbers below are chosen so the new worst
-// instant (lead + bass + snare = 1.41) stays under that, and
-// `creditsAudio.test.ts` measures it from this data rather than trusting the
-// arithmetic in this comment.
+// 1.4167, i.e. 0.085 absolute, and that is still the ceiling.
+//
+// #1920 spends the headroom differently rather than asking for more of it: a
+// lead that has a second pulse channel under it comes DOWN from 1 by exactly
+// what that channel takes, and a lead that does not keeps its old level. So
+// the busiest instant is the same either way — lead + harmony + bass + snare
+// (0.74 + 0.26 + 0.24 + 0.12) and lead + bass + snare (1 + 0.24 + 0.12) both
+// land on 1.36, under the 1.4167 that #1916 sat at 1.41 against.
+// `creditsAudio.test.ts` measures that off the score, across every movement,
+// rather than trusting the arithmetic in this comment.
 // ---------------------------------------------------------------------------
 
 /** Master gain. Deliberate, and not to be raised — see above. */
 export const PEAK_GAIN = 0.06;
-const LEAD_PEAK = 1;
-const BASS_PEAK = 0.28;
+/**
+ * The lead's peak when a second pulse channel is sounding under it. The
+ * headroom it gives up is exactly what that channel spends.
+ */
+const LEAD_PEAK = 0.74;
+/**
+ * ...and its peak when nothing is. A movement with a silent second channel
+ * has no one to make room for, so it keeps #1916's level — which matters for
+ * the OPENING movement specifically: it is the pass everybody hears, it is
+ * unchanged in pitch and in timbre, and there is no reason for #1920 to have
+ * made it quieter as a side effect of what happens on pass two.
+ */
+const LEAD_SOLO_PEAK = 1;
+const HARMONY_PEAK = 0.26;
+const ARP_PEAK = 0.2;
+const BASS_PEAK = 0.24;
 const HAT_PEAK = 0.05;
-const SNARE_PEAK = 0.13;
+const SNARE_PEAK = 0.12;
 
 /** Ramp constant for the mute toggle. An instant gain jump clicks. */
 const MUTE_RAMP_S = 0.02;
@@ -166,13 +422,19 @@ const ATTACK_S = 0.006;
 // The score, expanded to events
 // ---------------------------------------------------------------------------
 
-export type CreditsVoice = "lead" | "bass" | "hat" | "snare";
+export type CreditsVoice = "lead" | "harmony" | "arp" | "bass" | "hat" | "snare";
 
 /** One scheduled sound. Times are relative to the START OF ITS BAR. */
 export type CreditsEvent = {
   readonly voice: CreditsVoice;
   /** Oscillator pitch, or `null` for the noise voices. */
   readonly hz: number | null;
+  /**
+   * Pulse width for the two pulse channels, `null` for everything else. `0.5`
+   * is the built-in `square`; the other widths need a `PeriodicWave`, which is
+   * why this is data on the event rather than a branch in the renderer.
+   */
+  readonly duty: number | null;
   readonly at: number;
   /** How long the source runs before it is stopped. */
   readonly durS: number;
@@ -189,31 +451,83 @@ export type CreditsEvent = {
   readonly peak: number;
 };
 
+/** Wrap an index into `[0, length)`, negatives included. */
+function wrap(index: number, length: number): number {
+  return ((index % length) + length) % length;
+}
+
+/** The movement at suite position `index`, which wraps. */
+function movementAtIndex(index: number): Movement {
+  // `?? MOVEMENTS[0]` is unreachable after the wrap; it is how a non-empty
+  // tuple is spelled under `noUncheckedIndexedAccess` without a throw.
+  return MOVEMENTS[wrap(index, MOVEMENT_COUNT)] ?? MOVEMENTS[0];
+}
+
 /**
- * The events of bar `index`, which wraps — `creditsBar(BAR_COUNT)` is bar 0
- * again. Pure: the scheduler renders these, and the test measures them.
+ * The events of bar `index` of movement `movement`. Both indices wrap, so
+ * `creditsBar(BAR_COUNT)` is bar 0 again and `creditsBar(0, MOVEMENT_COUNT)`
+ * is the opening movement again.
+ *
+ * Pure: the scheduler renders these, and the test measures them.
  */
-export function creditsBar(index: number): readonly CreditsEvent[] {
-  // `?? BARS[0]` is unreachable after the modulo; it is how a non-empty tuple
-  // is spelled under `noUncheckedIndexedAccess` without a throw.
-  const bar = BARS[((index % BAR_COUNT) + BAR_COUNT) % BAR_COUNT] ?? BARS[0];
+export function creditsBar(index: number, movement = 0): readonly CreditsEvent[] {
+  const score = movementAtIndex(movement);
+  const bar = score.bars[wrap(index, score.bars.length)] ?? score.bars[0];
   const events: CreditsEvent[] = [];
+  const leadPeak = score.second === "none" ? LEAD_SOLO_PEAK : LEAD_PEAK;
 
   bar.lead.forEach((note, i) => {
     events.push({
       voice: "lead",
       hz: hzOf(note),
+      duty: score.duty,
       at: i * STEP_S,
       durS: STEP_S,
       decayS: STEP_S * DECAY_FRACTION,
-      peak: LEAD_PEAK,
+      peak: leadPeak,
     });
   });
+
+  if (score.second === "harmony") {
+    bar.lead.forEach((note, i) => {
+      const below = chordToneBelow(midiOf(note), bar.chord);
+      // A lead note with no chord tone under it inside an octave simply gets
+      // no shadow that step. Skipping beats transposing it somewhere in-key
+      // but wrong.
+      if (below === null) return;
+      events.push({
+        voice: "harmony",
+        hz: hzOfMidi(below),
+        duty: score.secondDuty,
+        at: i * STEP_S,
+        durS: STEP_S,
+        decayS: STEP_S * DECAY_FRACTION,
+        peak: HARMONY_PEAK,
+      });
+    });
+  }
+
+  if (score.second === "arp") {
+    const figure = arpeggioFrom(bar.chord, 4);
+    const steps = Math.round(BAR_S / ARP_S);
+    for (let i = 0; i < steps; i += 1) {
+      events.push({
+        voice: "arp",
+        hz: hzOfMidi(figure[i % figure.length] ?? figure[0] ?? 0),
+        duty: score.secondDuty,
+        at: i * ARP_S,
+        durS: ARP_S,
+        decayS: ARP_S * DECAY_FRACTION,
+        peak: ARP_PEAK,
+      });
+    }
+  }
 
   bar.bass.forEach((note, i) => {
     events.push({
       voice: "bass",
       hz: hzOf(note),
+      duty: null,
       at: i * BASS_S,
       durS: BASS_S,
       decayS: BASS_S * DECAY_FRACTION,
@@ -221,12 +535,13 @@ export function creditsBar(index: number): readonly CreditsEvent[] {
     });
   });
 
-  DRUMS.forEach((drum, i) => {
+  score.drums.forEach((drum, i) => {
     if (drum === null) return;
     const durS = drum === "hat" ? HAT_S : SNARE_S;
     events.push({
       voice: drum,
       hz: null,
+      duty: null,
       at: i * STEP_S,
       durS,
       decayS: durS * DECAY_FRACTION,
@@ -247,6 +562,14 @@ const NOISE_S = 1;
 const LOOKAHEAD_S = 0.35;
 /** How often the main thread checks whether the next bar is due. */
 const PUMP_MS = 100;
+/**
+ * Harmonics summed into a pulse `PeriodicWave`. Enough for the width to be
+ * audible as a width (a 12.5% pulse needs its eighth harmonic to be a 12.5%
+ * pulse at all), few enough that a high lead note does not alias: the top note
+ * in the suite is B5 at ~988 Hz, and 24 × 988 is under half of even a 48 kHz
+ * rate.
+ */
+const PULSE_HARMONICS = 24;
 
 function makeNoiseBuffer(ctx: AudioContext): AudioBuffer {
   const frames = Math.max(1, Math.floor(ctx.sampleRate * NOISE_S));
@@ -257,11 +580,44 @@ function makeNoiseBuffer(ctx: AudioContext): AudioBuffer {
 }
 
 /**
+ * A pulse wave of the given duty cycle, or `null` if this context cannot make
+ * one (jsdom's stub, or an engine that refuses).
+ *
+ * The Fourier series of a duty-`d` pulse has sine coefficients
+ * `(2 / nπ)·sin(nπd)`; at `d = 0.5` every even term vanishes and it is a
+ * square, which is why 50% never comes through here. Normalisation is left ON
+ * so the rendered peak stays ≤ 1 — the gain budget above is stated in those
+ * terms and a de-normalised wave would quietly break it.
+ */
+function pulseWave(ctx: AudioContext, duty: number): PeriodicWave | null {
+  if (typeof ctx.createPeriodicWave !== "function") return null;
+  const real = new Float32Array(PULSE_HARMONICS + 1);
+  const imag = new Float32Array(PULSE_HARMONICS + 1);
+  for (let n = 1; n <= PULSE_HARMONICS; n += 1) {
+    imag[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * duty);
+  }
+  try {
+    return ctx.createPeriodicWave(real, imag);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Start the soundtrack on `ctx`, which this function then OWNS — `stop()`
  * closes it. Never throws: a browser that refuses a node leaves the modal
  * silent rather than broken.
+ *
+ * @param movementAt reads which pass of the credit roll is on screen; the
+ *   suite follows it, so the music turns over exactly when the titles do. The
+ *   default keeps the opening movement forever, which is what a caller with no
+ *   roll to read (and every test that does not care) wants.
  */
-export function startCreditsArpeggio(ctx: AudioContext, muted: boolean): CreditsArpeggio {
+export function startCreditsArpeggio(
+  ctx: AudioContext,
+  muted: boolean,
+  movementAt: () => number = () => 0,
+): CreditsArpeggio {
   const master = ctx.createGain();
   master.gain.value = muted ? 0 : PEAK_GAIN;
   master.connect(ctx.destination);
@@ -270,11 +626,24 @@ export function startCreditsArpeggio(ctx: AudioContext, muted: boolean): Credits
   // future — `onended` cannot be relied on for that, because a note that has
   // not started yet never ends.
   const voices: AudioScheduledSourceNode[] = [];
+  const waves = new Map<number, PeriodicWave | null>();
   let noise: AudioBuffer | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let barIndex = 0;
+  let movement = 0;
   let nextBarAt = 0;
+
+  // Built once per width and cached: a `PeriodicWave` is immutable and shared
+  // by every oscillator that uses it, so making one per note would be a few
+  // hundred allocations a minute for an identical object.
+  const waveFor = (duty: number): PeriodicWave | null => {
+    const cached = waves.get(duty);
+    if (cached !== undefined) return cached;
+    const built = pulseWave(ctx, duty);
+    waves.set(duty, built);
+    return built;
+  };
 
   // Called once the source has been STARTED: `stop()` on a source that never
   // started is an InvalidStateError, and the two sources start differently
@@ -316,12 +685,33 @@ export function startCreditsArpeggio(ctx: AudioContext, muted: boolean): Credits
     }
 
     const osc = ctx.createOscillator();
-    // THE chiptune swap (#1916): pulse lead, triangle bass.
-    osc.type = event.voice === "lead" ? "square" : "triangle";
+    // THE chip channel model (#1916, widened by #1920): pulses on top, one
+    // triangle underneath. A width other than 50% needs a `PeriodicWave`, and
+    // an engine that will not give us one falls back to the square rather than
+    // to silence.
+    const wave = event.duty === null || event.duty === 0.5 ? null : waveFor(event.duty);
+    if (wave !== null) {
+      osc.setPeriodicWave(wave);
+    } else {
+      osc.type = event.duty === null ? "triangle" : "square";
+    }
     osc.frequency.value = event.hz ?? 0;
     osc.connect(env);
     osc.start(at);
     keep(osc, env, at + event.durS);
+  };
+
+  // The roll's pass, defended. A caller whose accessor throws or answers with
+  // a NaN must not take the modal's audio down with it, nor jump the suite to
+  // a movement that does not exist: either way the music simply stays where it
+  // was, which is inaudible as a failure.
+  const readMovement = (): number => {
+    try {
+      const next = movementAt();
+      return Number.isFinite(next) ? next : movement;
+    } catch {
+      return movement;
+    }
   };
 
   // Bars are placed against `ctx.currentTime` and never against a timer: a
@@ -336,7 +726,16 @@ export function startCreditsArpeggio(ctx: AudioContext, muted: boolean): Credits
     // and it is exactly the case the gain budget above cannot defend against.
     if (nextBarAt < ctx.currentTime) nextBarAt = ctx.currentTime;
     while (nextBarAt < ctx.currentTime + LOOKAHEAD_S) {
-      for (const event of creditsBar(barIndex)) scheduleEvent(event, nextBarAt);
+      // Read the roll's pass HERE, one bar before it is heard: the movement
+      // can therefore only change on a bar line, never mid-phrase. Restarting
+      // `barIndex` is what makes the new movement enter at its OWN first bar
+      // instead of wherever the outgoing one had got to.
+      const wanted = wrap(readMovement(), MOVEMENT_COUNT);
+      if (wanted !== movement) {
+        movement = wanted;
+        barIndex = 0;
+      }
+      for (const event of creditsBar(barIndex, movement)) scheduleEvent(event, nextBarAt);
       barIndex += 1;
       nextBarAt += BAR_S;
     }
@@ -372,6 +771,7 @@ export function startCreditsArpeggio(ctx: AudioContext, muted: boolean): Credits
         voice.disconnect();
       }
       voices.length = 0;
+      waves.clear();
       master.disconnect();
       void ctx.close();
     },

@@ -14547,10 +14547,18 @@ audio.media-viewer-media {
   left: 0;
   right: 0;
   /* Starts fully below the fold and ends fully above it, so the loop has no
-     visible seam. #1773 ran the whole 28s cycle as travel; #1807 keeps the
-     travel at 27.88s (0.82 x 34s — the titles roll at exactly the speed they
-     did) and spends the remaining 6.12s with the roll PARKED off the top.
-     That tail is the interlude of pure rain the issue asked for.
+     visible seam. #1773 ran the whole 28s cycle as travel; #1807 kept the
+     travel at 27.88s (0.82 x 34s) and spends the remaining 6.12s with the roll
+     PARKED off the top. That tail is the interlude of pure rain the issue
+     asked for.
+
+     #1920 note on SPEED: the cycle is still 34s, but the entrance now starts a
+     viewport away rather than a roll-height away, so the distance covered in
+     those 27.88s grew and the titles travel faster than they did. That is the
+     cost of entering from the bottom on a short roll and it is accepted, not
+     overlooked — the alternative is measuring the distance in JS and setting
+     the duration from it, i.e. a layout read per resize to hold one number
+     steady that nobody has complained about.
 
      Lengthening the cycle rather than adding a JS pause is what keeps the
      frame budget at zero AND keeps one clock: `creditsRain.rollIsParked`
@@ -14569,16 +14577,51 @@ audio.media-viewer-media {
 /* The last two stops carry the SAME transform on purpose: that hold is the
    interlude, and its start (82%) is the only place the number lives. The roll
    re-enters from the bottom afterwards, which is the same entrance as the
-   first pass rather than a resume mid-list. */
+   first pass rather than a resume mid-list.
+
+   #1920 — the ENTRANCE is viewport-relative and the EXIT is self-relative, and
+   the mismatch is the point rather than an oversight. A percentage translate
+   resolves against the element's OWN border box: `.credits-roll` is absolute
+   with no `top`, so its static position puts its top edge at y=0 and
+   `translateY(100%)` parked it at y = its own height. That is below the fold
+   only for a roll TALLER than the viewport — with the nine contributors this
+   repo bakes it is a few hundred px against a ~1000px window, so every cycle
+   began with the titles already sitting halfway up the screen. vjt reported it
+   as "i credits riappaiono in mezzo allo schermo": the loop was the visible
+   half of a defect the first pass had too.
+
+   `100dvh` puts the top edge on the bottom EDGE, which is what "from the
+   bottom" means, at any roll height. The exit stays `-100%` because clearing
+   the top is a fact about the roll's own height, not the window's. `dvh`
+   rather than `vh` for the reason #205 records at `#root`: `100vh` is iOS
+   Safari's URL-bar-hidden LAYOUT viewport, which would start the roll below
+   the visible bottom and eat the first seconds of the entrance. */
 @keyframes credits-roll {
   0% {
-    transform: translateY(100%);
+    transform: translateY(100dvh);
   }
   82% {
     transform: translateY(-100%);
   }
   100% {
     transform: translateY(-100%);
+  }
+}
+
+/* #205's dvh fallback, applied to the roll: engines without dynamic-viewport
+   units (Safari < 15.4) redefine the whole animation rather than carry a
+   duplicate declaration, which biome forbids. Same shape, `vh` entrance. */
+@supports not (height: 100dvh) {
+  @keyframes credits-roll {
+    0% {
+      transform: translateY(100vh);
+    }
+    82% {
+      transform: translateY(-100%);
+    }
+    100% {
+      transform: translateY(-100%);
+    }
   }
 }
 

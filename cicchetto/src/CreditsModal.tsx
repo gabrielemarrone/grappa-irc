@@ -9,6 +9,7 @@ import {
   toggleCreditsMuted,
 } from "./lib/creditsModal";
 import { creditsRainLook } from "./lib/creditsRain";
+import { creditsRollPass } from "./lib/creditsRoll";
 import { createOverlayLock } from "./lib/overlayScrollLock";
 import MatrixRain from "./MatrixRain";
 
@@ -43,6 +44,18 @@ const CreditsModal: Component = () => {
 
   const credits = buildCredits();
 
+  // #1807 — the roll's own animation is the ONLY clock. `MatrixRain` calls
+  // `look` once per drawn frame from inside the loop it already runs, and
+  // `creditsRainLook` answers by reading this element's animation phase, so
+  // the burst can never drift away from the interlude it belongs to. Assigned
+  // during element creation, which is before any `onMount` — including the
+  // one that starts the rain — so the loop never sees it unset.
+  //
+  // #1920 reads the same element for the SUITE's cursor (`creditsRollPass`),
+  // which is why the declaration sits above the audio effect: both readers
+  // close over it, neither runs before it is assigned.
+  let roll: HTMLDivElement | undefined;
+
   // ── soundtrack lifecycle ────────────────────────────────────────────────
   // Tied to the OPEN signal, not to this component's mount: Shell mounts the
   // component for the whole session, so an onMount-scoped context would be
@@ -69,7 +82,13 @@ const CreditsModal: Component = () => {
     // `untrack`: the initial mute state is an INPUT to construction, not a
     // dependency of it. Tracked, a mute toggle would re-run this effect for
     // nothing — the separate effect below is what carries a live toggle.
-    arpeggio = startCreditsArpeggio(new Ctor(), untrack(creditsMuted));
+    //
+    // #1920 — the third argument is what makes the soundtrack turn over when
+    // the titles come back round. It is a THUNK read from the scheduler's own
+    // pump, not a signal: the roll's pass lives in the CSS animation, which
+    // Solid cannot observe, and polling it into a signal would be the second
+    // clock `creditsRain` was careful not to introduce.
+    arpeggio = startCreditsArpeggio(new Ctor(), untrack(creditsMuted), () => creditsRollPass(roll));
   });
 
   createEffect(() => {
@@ -83,14 +102,6 @@ const CreditsModal: Component = () => {
 
   const versionLabel = (): string => bootBundleVersionAccessor() ?? "version unknown";
   const dateLabel = (): string | null => creditsDateLabel(credits.date);
-
-  // #1807 — the roll's own animation is the ONLY clock. `MatrixRain` calls
-  // `look` once per drawn frame from inside the loop it already runs, and
-  // `creditsRainLook` answers by reading this element's animation phase, so
-  // the burst can never drift away from the interlude it belongs to. Assigned
-  // during element creation, which is before any `onMount` — including the
-  // one that starts the rain — so the loop never sees it unset.
-  let roll: HTMLDivElement | undefined;
 
   return (
     <Show when={creditsModalOpen()}>

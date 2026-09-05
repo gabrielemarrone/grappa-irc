@@ -61,6 +61,44 @@
 // peaks below were re-cut so that the worst instant of the busiest movement
 // still lands under the pre-#1916 ceiling. `creditsAudio.test.ts` measures
 // that across every movement rather than trusting this paragraph.
+//
+// #1922 — the movements get a RHYTHM, because #1920's did not.
+//
+// vjt, on the deployed #1920: "ok molto meglio ma le musichette so tutte
+// uguali". He is right, and the reason is legible in the score #1920 shipped:
+// every bar of every movement was eight eighth-notes walking its chord up, back
+// down and out on a step, over four quarter-notes of bass, at one fixed tempo.
+// What #1920 varied was the HARMONY (the progression), the TIMBRE (the pulse
+// width) and the drum pattern — the colour. What it did not vary was the thing
+// an ear actually uses to tell two tunes apart: where the notes fall and how
+// long they last. Four transpositions of one rhythm are one tune, played four
+// times, and no amount of duty cycle fixes that.
+//
+// So `lead` and `bass` stop being fixed-length rows of notes and become SLOT
+// arrays: the array covers exactly one bar, and its length is the subdivision.
+// Eight entries are eighth-notes, sixteen are sixteenths, four are quarters —
+// a movement changes its felt tempo by changing its resolution, with the bar
+// itself left alone because the bar line is where the suite is allowed to turn
+// over (and `BAR_S` is what the roll's cycle is measured in). Two slot values
+// are not notes: `null` is a REST, and `"-"` HOLDS the previous note through
+// this slot. Those two are what buy syncopation and sustain, and neither can
+// be spelled in a row of eight notes that all have to sound.
+//
+// The result, and it is deliberately four different kinds of music:
+//
+//   opening   eighths, straight, no rests — #1916's phrase, untouched. It is
+//             the pass everybody sees, nobody complained about it, and it is
+//             now also the RULER the other three are heard against.
+//   swing     eighths with ties and rests: the lead breathes, the bass pumps.
+//   descent   half-time — quarter-note lead over a bass that holds three
+//             beats, with the sixteenth arpeggio doing the moving.
+//   finale    sixteenths, an octave-alternating bass on eighths, hats all the
+//             way down. The one that is allowed to be busy.
+//
+// The gain budget is again unmoved: no movement sounds two leads at once (a
+// held note ends where the next begins) and the voice peaks are untouched, so
+// the worst instant is the same lead + second channel + bass + snare it was.
+// The test that measures it walks the score, so it re-measures this by itself.
 
 /** A running soundtrack. Both verbs are idempotent. */
 export type CreditsArpeggio = {
@@ -106,10 +144,6 @@ function midiOf(note: Note): number {
 /** Equal temperament off A4 = 440 Hz (MIDI 69). */
 function hzOfMidi(midi: number): number {
   return 440 * 2 ** ((midi - 69) / 12);
-}
-
-function hzOf(note: Note): number {
-  return hzOfMidi(midiOf(note));
 }
 
 const PITCH_CLASS_COUNT = 12;
@@ -160,15 +194,33 @@ function arpeggioFrom(chord: Chord, octave: number): number[] {
 // The score
 // ---------------------------------------------------------------------------
 
-type Eight<T> = readonly [T, T, T, T, T, T, T, T];
-type Four<T> = readonly [T, T, T, T];
 /** Root, third, fifth. The second channel is derived from this, not written. */
 type Chord = readonly [PitchClass, PitchClass, PitchClass];
 
-/** One bar: eight eighth-notes of lead over four quarter-notes of bass. */
+/**
+ * One slot of a line. A `Note` sounds; `null` RESTS; `"-"` HOLDS the note in
+ * the previous slot through this one.
+ *
+ * The hold is a slot rather than a duration on the note because the array's
+ * length is what says how the bar is divided (see `Line`), and a note carrying
+ * its own length would let those two disagree — a bar that adds up to more than
+ * a bar, which the scheduler would happily arm straight over the next one.
+ */
+type Step = Note | null | "-";
+
+/**
+ * One bar of one voice. The array covers EXACTLY one bar, so its length is the
+ * subdivision: 4 is quarter-notes, 8 eighths, 16 sixteenths. This is how a
+ * movement changes its felt tempo without changing `BAR_S`, which has to stay
+ * put — it is the grid the suite turns over on and the unit the roll's cycle is
+ * counted in.
+ */
+type Line = readonly [Step, ...Step[]];
+
+/** One bar: a lead line and a bass line over a chord, each on its own grid. */
 type Bar = {
-  readonly lead: Eight<Note>;
-  readonly bass: Four<Note>;
+  readonly lead: Line;
+  readonly bass: Line;
   readonly chord: Chord;
 };
 
@@ -196,7 +248,8 @@ type Movement = {
   readonly second: SecondChannel;
   /** Pulse width of the second channel, when it plays. */
   readonly secondDuty: number;
-  readonly drums: Eight<Drum | null>;
+  /** One bar of percussion, on its own grid — same rule as `Line`. */
+  readonly drums: readonly [Drum | null, ...(Drum | null)[]];
 };
 
 // The suite. Four movements of four bars, all in A minor's orbit so the seams
@@ -208,9 +261,14 @@ type Movement = {
 // and #1920 is not a reason to relitigate a tune nobody complained about.
 // The variation is what happens on passes two, three and four.
 //
-// Each lead bar walks its chord up, back down, and exits on a step towards the
-// next chord's root. Every bass line stays inside 87–165 Hz so it sits under
-// the lead instead of fighting it.
+// Every bass line stays inside 87–165 Hz so it sits under the lead instead of
+// fighting it, and no lead note goes above B5: `PULSE_HARMONICS` × that is
+// still under the Nyquist frequency of a 48 kHz context, and a pulse whose top
+// harmonic folds back is an out-of-tune whistle rather than a bright note.
+//
+// #1922: each movement now owns its RHYTHM as well as its chords — read the
+// slot arrays, not just the note names. The four grids are 8 / 8-with-holes /
+// 4 / 16.
 const MOVEMENTS: readonly [Movement, ...Movement[]] = [
   {
     // Pass one: Am → F → C → G, the i–VI–III–VII everyone already knows.
@@ -245,30 +303,36 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
   {
     // Pass two: down a fourth into Dm → B♭ → F → C, the second pulse comes in
     // underneath the lead, and the width narrows to 25% — the nasal one.
-    name: "harmony",
+    //
+    // #1922 — and the rhythm SWINGS. Still an eighth-note grid, but the lead
+    // holds its downbeat through beat two, rests where the opening movement
+    // had a note, and comes back in off the beat; the bass answers in the
+    // holes rather than marking every beat. Same tempo as the opening, half
+    // the note count, and it is unmistakably not the same tune.
+    name: "swing",
     duty: 0.25,
     second: "harmony",
     secondDuty: 0.25,
     drums: ["hat", null, "snare", "hat", "hat", null, "snare", "hat"],
     bars: [
       {
-        lead: ["D4", "F4", "A4", "D5", "A4", "F4", "D4", "E4"],
-        bass: ["D3", "D3", "A2", "D3"],
+        lead: ["D5", "-", "F5", null, "E5", "D5", "-", "A4"],
+        bass: ["D3", null, null, "D3", "A2", null, "D3", null],
         chord: ["D", "F", "A"],
       },
       {
-        lead: ["A#4", "D5", "F5", "A#5", "F5", "D5", "A#4", "C5"],
-        bass: ["A#2", "A#2", "F2", "A#2"],
+        lead: ["A#4", "-", "D5", null, "F5", "D5", "-", "C5"],
+        bass: ["A#2", null, null, "A#2", "F2", null, "A#2", null],
         chord: ["A#", "D", "F"],
       },
       {
-        lead: ["F4", "A4", "C5", "F5", "C5", "A4", "F4", "G4"],
-        bass: ["F2", "F2", "C3", "F2"],
+        lead: ["C5", "-", "A4", null, "F4", "A4", "-", "C5"],
+        bass: ["F2", null, null, "F2", "C3", null, "F2", null],
         chord: ["F", "A", "C"],
       },
       {
-        lead: ["E4", "G4", "C5", "E5", "C5", "G4", "E4", "D4"],
-        bass: ["C3", "C3", "G2", "C3"],
+        lead: ["E5", "-", "G4", null, "C5", "E5", "-", "D5"],
+        bass: ["C3", null, null, "C3", "G2", null, "C3", null],
         chord: ["C", "E", "G"],
       },
     ],
@@ -278,6 +342,12 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
     // the second channel switches from a harmony to sixteenths at 12.5% —
     // the thinnest width, which is what makes a chip arpeggio glitter rather
     // than thicken.
+    //
+    // #1922 — HALF-TIME for real, not just in the drums. The lead is on a
+    // four-slot grid (quarter-notes) and opens each bar on a note held through
+    // two beats; the bass holds three and steps on the fourth. Four lead notes
+    // a bar against the finale's sixteen is the widest contrast the suite has,
+    // and the arpeggio is what keeps it from sounding empty.
     name: "descent",
     duty: 0.125,
     second: "arp",
@@ -285,68 +355,163 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
     drums: ["hat", null, null, null, "snare", null, null, "hat"],
     bars: [
       {
-        lead: ["A4", "C5", "E5", "A5", "E5", "C5", "A4", "G4"],
-        bass: ["A2", "A2", "E3", "A2"],
+        lead: ["A4", "-", "C5", "E5"],
+        bass: ["A2", "-", "-", "E3"],
         chord: ["A", "C", "E"],
       },
       {
-        lead: ["G4", "B4", "D5", "G5", "D5", "B4", "G4", "F4"],
-        bass: ["G2", "G2", "D3", "G2"],
+        lead: ["G4", "-", "B4", "D5"],
+        bass: ["G2", "-", "-", "D3"],
         chord: ["G", "B", "D"],
       },
       {
-        lead: ["F4", "A4", "C5", "F5", "C5", "A4", "F4", "E4"],
-        bass: ["F2", "F2", "C3", "F2"],
+        lead: ["F4", "-", "A4", "C5"],
+        bass: ["F2", "-", "-", "C3"],
         chord: ["F", "A", "C"],
       },
       {
         // The V of a minor key wants its major third: G#, not G. That one
         // accidental is the whole reason this progression sounds like an
         // ending rather than like a loop.
-        lead: ["E4", "G#4", "B4", "E5", "B4", "G#4", "E4", "A4"],
-        bass: ["E3", "E3", "B2", "E3"],
+        lead: ["E4", "-", "G#4", "B4"],
+        bass: ["E3", "-", "-", "B2"],
         chord: ["E", "G#", "B"],
       },
     ],
   },
   {
     // Pass four: C → G → Am → F, the major-key turn, harmony back on, hats on
-    // every eighth and a snare on three as well as on two and four. The lead
-    // sits an octave up from where it started the suite: this is the one that
-    // is allowed to be loud, and then it wraps back to "opening".
+    // every eighth and a snare on three as well as on two and four. This is
+    // the one that is allowed to be loud, and then it wraps back to "opening".
+    //
+    // #1922 — SIXTEENTHS. The lead runs on a sixteen-slot grid, the bass
+    // alternates root and fifth on every eighth, and the drums move onto the
+    // lead's grid too. Nothing here is faster in tempo than the opening: it is
+    // the same 125 BPM at twice the resolution, which is exactly the trick
+    // chip music uses to end on a lap of honour.
     name: "finale",
     duty: 0.25,
     second: "harmony",
     secondDuty: 0.5,
-    drums: ["hat", "hat", "snare", "hat", "snare", "hat", "snare", "hat"],
+    drums: [
+      "hat",
+      "hat",
+      "hat",
+      "hat",
+      "snare",
+      "hat",
+      "hat",
+      "hat",
+      "hat",
+      "hat",
+      "hat",
+      "hat",
+      "snare",
+      "hat",
+      "snare",
+      "hat",
+    ],
     bars: [
       {
-        lead: ["G4", "C5", "E5", "G5", "E5", "C5", "G4", "A4"],
-        bass: ["C3", "C3", "G2", "C3"],
+        lead: [
+          "C5",
+          "E5",
+          "G5",
+          "E5",
+          "C5",
+          "G4",
+          "C5",
+          "E5",
+          "G5",
+          "A5",
+          "G5",
+          "E5",
+          "C5",
+          "E5",
+          "D5",
+          "E5",
+        ],
+        bass: ["C3", "G2", "C3", "G2", "C3", "G2", "C3", "G2"],
         chord: ["C", "E", "G"],
       },
       {
-        lead: ["B4", "D5", "G5", "B5", "G5", "D5", "B4", "A4"],
-        bass: ["G2", "G2", "D3", "G2"],
+        lead: [
+          "B4",
+          "D5",
+          "G5",
+          "D5",
+          "B4",
+          "G4",
+          "B4",
+          "D5",
+          "G5",
+          "A5",
+          "G5",
+          "D5",
+          "B4",
+          "D5",
+          "A4",
+          "B4",
+        ],
+        bass: ["G2", "D3", "G2", "D3", "G2", "D3", "G2", "D3"],
         chord: ["G", "B", "D"],
       },
       {
-        lead: ["A4", "C5", "E5", "A5", "E5", "C5", "A4", "B4"],
-        bass: ["A2", "A2", "E3", "A2"],
+        lead: [
+          "A4",
+          "C5",
+          "E5",
+          "C5",
+          "A4",
+          "E4",
+          "A4",
+          "C5",
+          "E5",
+          "A5",
+          "E5",
+          "C5",
+          "A4",
+          "C5",
+          "B4",
+          "C5",
+        ],
+        bass: ["A2", "E3", "A2", "E3", "A2", "E3", "A2", "E3"],
         chord: ["A", "C", "E"],
       },
       {
-        lead: ["A4", "C5", "F5", "A5", "F5", "C5", "A4", "G4"],
-        bass: ["F2", "F2", "C3", "F2"],
+        lead: [
+          "F4",
+          "A4",
+          "C5",
+          "A4",
+          "F4",
+          "C4",
+          "F4",
+          "A4",
+          "C5",
+          "F5",
+          "C5",
+          "A4",
+          "F4",
+          "A4",
+          "G4",
+          "A4",
+        ],
+        bass: ["F2", "C3", "F2", "C3", "F2", "C3", "F2", "C3"],
         chord: ["F", "A", "C"],
       },
     ],
   },
 ];
 
-/** One eighth note. 0.24 s ⇒ 125 BPM, unchanged from #1773. */
+/**
+ * One eighth note. 0.24 s ⇒ 125 BPM, unchanged from #1773.
+ *
+ * Since #1922 this is no longer the note length — each line divides `BAR_S` by
+ * its own slot count — but it is still what a bar is eight of, i.e. the tempo.
+ */
 const STEP_S = 0.24;
-/** Bar length, in seconds. */
+/** Bar length, in seconds. The one grid every movement shares. */
 export const BAR_S = 8 * STEP_S;
 /** How many movements the suite walks before it wraps back to the first. */
 export const MOVEMENT_COUNT = MOVEMENTS.length;
@@ -360,7 +525,6 @@ export const BAR_COUNT = MOVEMENTS[0].bars.length;
 /** How long ONE movement runs before it repeats. */
 export const PHRASE_S = BAR_COUNT * BAR_S;
 
-const BASS_S = 2 * STEP_S;
 /** The second channel's sixteenths, when it is running an arpeggio. */
 const ARP_S = STEP_S / 2;
 const HAT_S = 0.03;
@@ -451,6 +615,43 @@ export type CreditsEvent = {
   readonly peak: number;
 };
 
+/** A sounded note of a line: when it starts, how long it runs, what pitch. */
+type Sounded = { readonly midi: number; readonly at: number; durS: number };
+
+/** Floats that came out of two different divisions of `BAR_S`. */
+const TIME_EPS = 1e-9;
+
+/**
+ * A `Line` laid out in time. The array covers one bar, so the slot length is
+ * `BAR_S / line.length`; `null` slots sound nothing and `"-"` slots lengthen
+ * whatever is already running.
+ *
+ * A `"-"` with nothing to hold — first slot of a bar, or straight after a rest
+ * — is simply a rest. Making it an error would buy a compile-time check on a
+ * score nobody but this file writes, and cost the ability to start a bar on the
+ * tail of the one before it.
+ */
+function soundLine(line: readonly Step[]): Sounded[] {
+  const slotS = BAR_S / line.length;
+  const out: Sounded[] = [];
+  line.forEach((step, i) => {
+    const at = i * slotS;
+    if (step === null) return;
+    if (step === "-") {
+      const held = out[out.length - 1];
+      // Only extend a note that runs up to THIS slot: a hold after a rest has
+      // nothing to attach to, and lengthening the note before the rest would
+      // sound through the silence that was written on purpose.
+      if (held !== undefined && Math.abs(held.at + held.durS - at) < TIME_EPS) {
+        held.durS += slotS;
+      }
+      return;
+    }
+    out.push({ midi: midiOf(step), at, durS: slotS });
+  });
+  return out;
+}
+
 /** Wrap an index into `[0, length)`, negatives included. */
 function wrap(index: number, length: number): number {
   return ((index % length) + length) % length;
@@ -475,36 +676,39 @@ export function creditsBar(index: number, movement = 0): readonly CreditsEvent[]
   const bar = score.bars[wrap(index, score.bars.length)] ?? score.bars[0];
   const events: CreditsEvent[] = [];
   const leadPeak = score.second === "none" ? LEAD_SOLO_PEAK : LEAD_PEAK;
+  const lead = soundLine(bar.lead);
 
-  bar.lead.forEach((note, i) => {
+  for (const note of lead) {
     events.push({
       voice: "lead",
-      hz: hzOf(note),
+      hz: hzOfMidi(note.midi),
       duty: score.duty,
-      at: i * STEP_S,
-      durS: STEP_S,
-      decayS: STEP_S * DECAY_FRACTION,
+      at: note.at,
+      durS: note.durS,
+      decayS: note.durS * DECAY_FRACTION,
       peak: leadPeak,
     });
-  });
+  }
 
   if (score.second === "harmony") {
-    bar.lead.forEach((note, i) => {
-      const below = chordToneBelow(midiOf(note), bar.chord);
+    for (const note of lead) {
+      const below = chordToneBelow(note.midi, bar.chord);
       // A lead note with no chord tone under it inside an octave simply gets
       // no shadow that step. Skipping beats transposing it somewhere in-key
       // but wrong.
-      if (below === null) return;
+      if (below === null) continue;
       events.push({
         voice: "harmony",
         hz: hzOfMidi(below),
         duty: score.secondDuty,
-        at: i * STEP_S,
-        durS: STEP_S,
-        decayS: STEP_S * DECAY_FRACTION,
+        // The lead's own placement, held note lengths included: a harmony on
+        // its own grid would flam against the note it is shadowing.
+        at: note.at,
+        durS: note.durS,
+        decayS: note.durS * DECAY_FRACTION,
         peak: HARMONY_PEAK,
       });
-    });
+    }
   }
 
   if (score.second === "arp") {
@@ -523,18 +727,21 @@ export function creditsBar(index: number, movement = 0): readonly CreditsEvent[]
     }
   }
 
-  bar.bass.forEach((note, i) => {
+  for (const note of soundLine(bar.bass)) {
     events.push({
       voice: "bass",
-      hz: hzOf(note),
+      hz: hzOfMidi(note.midi),
       duty: null,
-      at: i * BASS_S,
-      durS: BASS_S,
-      decayS: BASS_S * DECAY_FRACTION,
+      at: note.at,
+      durS: note.durS,
+      decayS: note.durS * DECAY_FRACTION,
       peak: BASS_PEAK,
     });
-  });
+  }
 
+  // The drums are hits, not notes: their length is the sound of the hit and
+  // does not follow the grid, so only the placement is read off the array.
+  const drumSlotS = BAR_S / score.drums.length;
   score.drums.forEach((drum, i) => {
     if (drum === null) return;
     const durS = drum === "hat" ? HAT_S : SNARE_S;
@@ -542,7 +749,7 @@ export function creditsBar(index: number, movement = 0): readonly CreditsEvent[]
       voice: drum,
       hz: null,
       duty: null,
-      at: i * STEP_S,
+      at: i * drumSlotS,
       durS,
       decayS: durS * DECAY_FRACTION,
       peak: drum === "hat" ? HAT_PEAK : SNARE_PEAK,

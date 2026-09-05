@@ -45955,3 +45955,86 @@ off an esbuild bundle of the module. **The unit suite's verdict is CI's**, and
 nothing here should be read as a claim that it passed locally.
 
 _Deploy: **HOT — `--cic` only.** Client-side; no server change._
+
+## #1922 — the movements get a RHYTHM, because #1920's did not
+
+> «ok molto meglio ma le musichette so tutte uguali»
+
+vjt, on the deployed #1920. He is right, and the reason is legible in the score
+that shipped: `MOVEMENTS` gave every pass its own progression, pulse width, drum
+pattern and second-channel role — and left every one of them playing **eight
+eighth-notes of lead over four quarter-notes of bass at one tempo**, walking the
+chord up, back down and out on a step. All four movements were one rhythm,
+transposed. That is one tune played four times, and no duty cycle fixes it: an
+ear separates two tunes by where the notes fall and how long they last, which is
+precisely the dimension #1920 held constant.
+
+**The tests could not have caught it, and that is the more useful lesson.** Every
+#1920 assertion about the movements differing compares PITCHES —
+`JSON.stringify(events.map(e => [voice, hz, at, duty]))`, distinct across the
+suite, green on four transpositions of one figure. A test that compares the
+*colour* of music will pass an arrangement with no variety in it at all.
+
+### `lead` and `bass` become slot arrays
+
+A `Line` covers exactly one bar, so its LENGTH is the subdivision: 4 is
+quarter-notes, 8 eighths, 16 sixteenths. A movement changes its felt tempo by
+changing its resolution, and `BAR_S` never moves — the bar line is where the
+suite is allowed to turn over, and the bar is the unit the roll's cycle is
+counted in. Two slot values are not notes: `null` RESTS, and `"-"` HOLDS the
+previous note through this slot. Those two are what buy syncopation and sustain,
+and neither can be spelled in a row of eight notes that all have to sound.
+
+The hold is a slot rather than a duration on the note ON PURPOSE. A note that
+carried its own length could disagree with the array it sits in — a bar adding
+up to more than a bar, which the scheduler would happily arm straight over the
+next one. A `"-"` with nothing to hold (first slot, or straight after a rest) is
+simply a rest: making it an error would buy a compile-time check on a score
+nobody outside this file writes, and cost the ability to start a bar on the tail
+of the one before it.
+
+The four movements now span densities rather than transposing one figure:
+
+| movement | grid | what it sounds like |
+|---|---|---|
+| `opening` | 8, straight | #1916's phrase, untouched — and now also the ruler |
+| `swing` | 8 with ties and rests | lead breathes, bass answers in the holes |
+| `descent` | 4 (half-time) + 16ths arp | quarters over a bass that holds three beats |
+| `finale` | 16 | sixteenths, root/fifth bass on eighths, hats all the way down |
+
+`opening` is deliberately untouched: it is the pass everybody sees, nobody
+complained about it, and #1922 is not a licence to relitigate it.
+
+**The finale is not faster.** It is 125 BPM at twice the resolution, which is the
+trick chip music uses to end on a lap of honour — and the reason the tempo is
+still one number for the whole suite.
+
+### What the constraint did to the score
+
+`PEAK_GAIN` and every voice peak are untouched, so the ceiling is still the same
+lead + second channel + bass + snare it was. That holds only because **no
+movement sounds two lead notes at once** — a held note ends exactly where the
+next begins — which is now a test rather than a property of a fixed-length row.
+
+The harmony is placed at the lead's own `at` and `durS`, held notes included: a
+harmony on its own grid would flam against the note it is shadowing. The drums
+are the one voice whose LENGTH does not follow the grid — a hit's length is the
+sound of the hit — so only their placement is read off the array.
+
+**No lead note goes above B5.** `PULSE_HARMONICS` (24) × B5 (~988 Hz) is 23.7 kHz,
+under the Nyquist frequency of a 48 kHz context; a pulse whose top harmonic folds
+back is an out-of-tune whistle rather than a bright note. The finale runs
+sixteenths high in the register, which is exactly where a future edit trips over
+this, so it is pinned by a test too.
+
+### What is proven here
+
+The unit suite **was** run on `nowhere` this time — 30/30 — by pointing vitest at
+a throwaway config with `environment: "node"` and `setupFiles: []`, which is what
+sidesteps the node-20 jsdom breakage recorded above (`setupTests.ts` reaches for
+`HTMLMediaElement`, which a node environment does not have). That is a narrower
+run than CI's: this file's tests need no DOM, and nothing else in the suite was
+executed. Types and lint are green locally. **Everything outside
+`creditsAudio.test.ts` is still CI's verdict.**
+
+_Deploy: **HOT — `--cic` only.** Client-side; no server change._

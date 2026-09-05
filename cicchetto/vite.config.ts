@@ -44,6 +44,46 @@ if (!CIC_VERSION) {
   );
 }
 
+// #1773 — the credits easter egg's git facts (commit sha, its date, every
+// contributor with their commit count), on the SAME channel and for the same
+// reason: this build sees only ./cicchetto, so it has no repo to read them
+// from. A `git shortlog` here would find nothing and bake an EMPTY roll,
+// silently, on every containerised build — release included. So they arrive
+// derived, from infra/packaging/credits.sh, through GRAPPA_CREDITS.
+//
+// UNSET is fatal, exactly like GRAPPA_VERSION, and for exactly its reason: it
+// means a wrapper forgot to plumb it, and a silently empty credit roll is
+// worse than a broken build. A build that HAS NO GIT is a different thing and
+// is NOT an error — the AUR source tarball builds with `.git` absent by
+// construction, and credits.sh reports that as a well-formed payload of
+// nulls. The two states are kept distinct here on purpose; the same
+// distinction `Grappa.Version.verify_build_sha/2` draws between
+// `{:skip, :no_git}` and a degraded snapshot. Dockerfile.release's context has
+// no `.git` either, but since #1834 the PUBLISHED image is not a degraded
+// build: release.yml derives the payload on the runner (which has the
+// history) and passes it as `--build-arg GRAPPA_CREDITS`, with the in-context
+// call left as the fallback a naked `docker build` still takes.
+//
+// Parsed rather than passed through: the parse IS the validation, so a
+// malformed payload fails the build here instead of reaching the browser as a
+// roll that silently renders nothing. Re-serialised so what lands in the
+// bundle is canonical JSON and not whatever whitespace the env carried.
+const CIC_CREDITS_RAW = process.env.GRAPPA_CREDITS;
+if (!CIC_CREDITS_RAW) {
+  throw new Error(
+    "vite.config.ts: GRAPPA_CREDITS is unset — the cic build must be launched by a wrapper that derives it from the repo root (infra/packaging/credits.sh, #1773). Refusing to bake an empty credit roll. Note that a build with no .git is NOT this case: credits.sh answers that with a payload of nulls.",
+  );
+}
+let CIC_CREDITS_JSON: string;
+try {
+  CIC_CREDITS_JSON = JSON.stringify(JSON.parse(CIC_CREDITS_RAW));
+} catch (cause) {
+  throw new Error(
+    `vite.config.ts: GRAPPA_CREDITS is not valid JSON (#1773) — it must be the verbatim output of infra/packaging/credits.sh, not a hand-written value. Got: ${CIC_CREDITS_RAW.slice(0, 120)}`,
+    { cause },
+  );
+}
+
 // Dev-only proxy: vite serves the SolidJS app on :5173 and forwards the
 // REST + Channels surfaces to grappa on :4000. In prod, sub-task 6's
 // nginx service handles the same routing — keeping the dev proxy
@@ -115,7 +155,9 @@ export default defineConfig({
       // by scripts/gen-pwa-icons.mjs): SVG favicon, `any` + `maskable`
       // PNGs, the iOS apple-touch PNG, and the legacy favicon.ico. Listed
       // so the SW precaches them (they're in public/ so Vite copies them
-      // regardless; this adds them to the offline shell).
+      // regardless; this adds them to the offline shell). `badge-96.png` is
+      // the Web Push `badge` silhouette (#1906) — same generator, same shell,
+      // NOT a manifest icon (see `NOTIFICATION_BADGE` in lib/pwaIcons.ts).
       includeAssets: [
         "icon.svg",
         "icon-192.png",
@@ -124,6 +166,7 @@ export default defineConfig({
         "icon-512-maskable.png",
         "apple-touch-icon.png",
         "favicon.ico",
+        "badge-96.png",
       ],
       manifest: {
         // Stable PWA identity per W3C Manifest spec — resolved as a
@@ -188,6 +231,20 @@ export default defineConfig({
         // (denylist for /auth, /me, /networks, /socket) is wired
         // explicitly in `service-worker.ts` via NavigationRoute.
         globPatterns: ["**/*.{js,css,html,svg,png,webmanifest,ico}"],
+        // #1739 — the vendored station logos are NOT shell, and leaving them
+        // to the pattern above would have precached them HALF: 7 `.png` plus
+        // one `.svg` are matched by it and 14 `.jpg` are not, so the offline
+        // bundle would grow by ~96 KB of an inconsistent subset that nobody
+        // chose. Excluding the directory keeps the "shell-only" contract this
+        // block states, and makes the answer the same for every station
+        // whatever extension upstream happens to serve.
+        //
+        // The cost of NOT precaching them is a picker that draws no artwork
+        // while offline — and an IRC client with no socket has nothing to show
+        // in the pane behind it either, so the shell was never sized for that
+        // case. They are ordinary same-origin assets with the endpoint's
+        // default caching; the browser keeps them across a session either way.
+        globIgnores: ["radio-logos/**"],
       },
     }),
   ],
@@ -203,6 +260,17 @@ export default defineConfig({
         ws: true,
       },
     },
+  },
+  // #1773 — the credit roll's payload, as a plain string literal in the JS
+  // chunk. A define rather than a second `<meta>` tag: the value is JSON, and
+  // the meta channel would have to survive HTML attribute serialisation of the
+  // quotes and backslashes a contributor name can carry. Nothing server-side
+  // reads it back (unlike the version meta, which `Grappa.Cic.Bundle` parses
+  // out of the deployed dist), so the meta channel buys nothing here. Read by
+  // `src/lib/buildCredits.ts`, which coerces it — the define is ABSENT under
+  // vitest, whose config is a separate file.
+  define: {
+    __GRAPPA_CREDITS_JSON__: JSON.stringify(CIC_CREDITS_JSON),
   },
   build: {
     target: "es2022",

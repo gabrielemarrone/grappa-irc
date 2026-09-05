@@ -34,6 +34,9 @@ let mockFramePreview: { messages: number; remainingBytes: number | null } | null
 let mockFrameBudgetBase: number | null = 393;
 
 vi.mock("../lib/isupport", () => ({
+  // #1861 — the nick fold is per-network now; the store-reading half
+  // lives here. `"ascii"` is the production posture (bahamut/Azzurra).
+  casemappingForNetwork: () => "ascii" as const,
   frameBudgetBaseForNetwork: () => mockFrameBudgetBase,
 }));
 
@@ -94,6 +97,9 @@ vi.mock("../lib/windowState", () => ({
 }));
 
 vi.mock("../lib/networks", () => ({
+  // #1861 — casemappingForSlug (lib/casemapping.ts) resolves the fold
+  // through this map, so the mock has to carry it.
+  networkIdBySlug: () => undefined,
   // Bucket F H4: ComposeBox narrows on `kind === "user"` before
   // reading connection_state. Tests exercise the user branch (the
   // greyed cascade only applies to user subjects' credential rows;
@@ -1301,23 +1307,54 @@ describe("ComposeBox", () => {
       expect(input).toBeNull();
     });
 
-    it("selecting a file via the picker calls triggerUpload with file + slug + channel", async () => {
-      const orch = await import("../lib/uploadOrchestrator");
-      render(() => <ComposeBox networkSlug="freenode" channelName="#a" />);
+    // #1883 — the picker hands its files to `triggerUploads`, which is where
+    // the confirm now lives (vjt's ruling, 2026-08-31, reversing #1884's
+    // picker-only `pickerUpload`). So what this file can assert is the WIRING
+    // and only the wiring: the orchestrator is mocked here, so no dialog opens
+    // and none should be expected. The guard's own behaviour — that nothing
+    // reaches the host before Send — is `uploadOrchestrator.test.ts`'s job,
+    // where the real pipeline and a real test host exist to prove it.
+    const pickFile = (file: File): void => {
       const input = document.querySelector(
         "input[type='file'][data-file-picker]",
       ) as HTMLInputElement;
-      const file = sampleImage();
-      Object.defineProperty(input, "files", {
-        value: [file],
-        configurable: true,
-      });
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
       fireEvent.change(input);
+    };
+
+    it("hands the picked file to triggerUploads with slug + channel — #1883", async () => {
+      const orch = await import("../lib/uploadOrchestrator");
+      render(() => <ComposeBox networkSlug="freenode" channelName="#a" />);
+      const file = sampleImage();
+
+      pickFile(file);
 
       expect(orch.triggerUploads).toHaveBeenCalledWith(expect.any(String), "freenode", "#a", [
         file,
       ]);
     });
+
+    it("does NOT pre-filter the pick by category — the iOS .m4r rescue — #1883", async () => {
+      const orch = await import("../lib/uploadOrchestrator");
+      render(() => <ComposeBox networkSlug="freenode" channelName="#a" />);
+      // iOS labels a .m4r ringtone octet-stream, which `categoryOf` rejects.
+      // Only `normalizeUploadFile` inside the orchestrator rescues it, so the
+      // picker must reach `triggerUploads` directly and never `dropUpload`.
+      const ringtone = new File([new Uint8Array(8)], "ring.m4r", {
+        type: "application/octet-stream",
+      });
+
+      pickFile(ringtone);
+
+      expect(orch.triggerUploads).toHaveBeenCalledWith(expect.any(String), "freenode", "#a", [
+        ringtone,
+      ]);
+    });
+
+    // The Cancel case moved to `uploadOrchestrator.test.ts`. It cannot be
+    // asserted here any more and must not be faked: the orchestrator is mocked
+    // in this file, so `triggerUploads` opens no dialog and "not called after
+    // Cancel" would pass against a build with no gate at all.
 
     // #351 — the compose form is NO LONGER a drop target. Drag-drop was
     // hoisted to the whole message pane (`DropUploadZone`, wrapping
@@ -1351,9 +1388,16 @@ describe("ComposeBox", () => {
       });
       ta.dispatchEvent(pasteEvent);
 
-      expect(orch.triggerUploads).toHaveBeenCalledWith(expect.any(String), "freenode", "#a", [
-        file,
-      ]);
+      expect(orch.triggerUploads).toHaveBeenCalledWith(
+        expect.any(String),
+        "freenode",
+        "#a",
+        [file],
+        // #1883 — dropUpload forwards the displacement slot; a paste
+        // supplies none (the gesture is repeatable). Only the OS share
+        // target passes a handler here.
+        undefined,
+      );
       // Textarea content stays untouched (paste event was prevented).
       expect(compose.setDraft).not.toHaveBeenCalled();
     });
@@ -1386,9 +1430,16 @@ describe("ComposeBox", () => {
       });
       ta.dispatchEvent(pasteEvent);
 
-      expect(orch.triggerUploads).toHaveBeenCalledWith(expect.any(String), "freenode", "#a", [
-        file,
-      ]);
+      expect(orch.triggerUploads).toHaveBeenCalledWith(
+        expect.any(String),
+        "freenode",
+        "#a",
+        [file],
+        // #1883 — dropUpload forwards the displacement slot; a paste
+        // supplies none (the gesture is repeatable). Only the OS share
+        // target passes a handler here.
+        undefined,
+      );
     });
 
     it("pasting a document file calls triggerUpload (Task 7 — paste accepts all categories)", async () => {
@@ -1404,9 +1455,16 @@ describe("ComposeBox", () => {
       });
       ta.dispatchEvent(pasteEvent);
 
-      expect(orch.triggerUploads).toHaveBeenCalledWith(expect.any(String), "freenode", "#a", [
-        file,
-      ]);
+      expect(orch.triggerUploads).toHaveBeenCalledWith(
+        expect.any(String),
+        "freenode",
+        "#a",
+        [file],
+        // #1883 — dropUpload forwards the displacement slot; a paste
+        // supplies none (the gesture is repeatable). Only the OS share
+        // target passes a handler here.
+        undefined,
+      );
     });
 
     it("pasting a category-less MIME file is ignored — triggerUpload NOT called", async () => {
@@ -1436,10 +1494,15 @@ describe("ComposeBox", () => {
         configurable: true,
       });
       ta.dispatchEvent(pasteEvent);
-      expect(orch.triggerUploads).toHaveBeenCalledWith(expect.any(String), "freenode", "#a", [
-        a,
-        b,
-      ]);
+      expect(orch.triggerUploads).toHaveBeenCalledWith(
+        expect.any(String),
+        "freenode",
+        "#a",
+        [a, b],
+        // #1883 — dropUpload forwards the displacement slot; a paste supplies
+        // none (the gesture is repeatable). Only the OS share target passes one.
+        undefined,
+      );
     });
 
     it("the picker input allows multiple selection — #118", () => {

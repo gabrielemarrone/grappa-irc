@@ -18,6 +18,26 @@ directories.
 | **cic vitest**    | TS unit tests in jsdom         | `cicchetto/src/__tests__/`       | `scripts/bun.sh run test` |
 | **e2e Playwright**| full-stack browser flows       | `cicchetto/e2e/tests/`           | `scripts/integration.sh` |
 
+**`cicchetto/src/__tests__/` is the ONLY place a cic unit test may live
+(#1582)** — the row above used to name it without saying "only", and that
+gap was not harmless. Two more locations grew alongside it,
+`cicchetto/src/lib/__tests__/` and co-located `cicchetto/src/lib/*.test.ts`,
+and five modules ended up tested from two of them at once; for
+`mobilePanel` and `channelTopic` the module's verbs were PARTITIONED across
+the pair, so a verb missing from the file you opened told you nothing. All
+three locations are now one. Enforced by the `test location` stage of
+`scripts/bun.sh run check`, because the doc line alone demonstrably did not
+hold: it has named this directory since 2026-05-24 and the second location
+was created the same day. A test file for a module that already has one goes
+INTO that file, not beside it.
+
+Two roots outside `src/` are also collected by the same vitest run, by
+deliberate exception in `cicchetto/vitest.config.ts`:
+`e2e/fixtures/**/*.test.ts` and `e2e/reporters/**/*.test.ts` — the parts of
+the Playwright fixtures and reporters that carry LOGIC rather than driver
+calls (#806, #1584). They are matched on `.test.ts` alone, never `.spec.ts`,
+so `e2e/tests/*.spec.ts` stay Playwright's.
+
 The CI pipeline runs all three on every push to main. Both `ci.yml`
 (Elixir + lint + audit + cic) and `integration.yml` (Playwright)
 must be green for the commit to count.
@@ -82,6 +102,92 @@ scripts/testnet.sh up|down|status|logs <svc>|probe|shell <svc>
 clean before claiming LANDED — per `feedback_landed_claim_evidence`,
 "LANDED" requires `scripts/check.sh` exit-0 with literal tail evidence,
 not "format ✓ credo ✓ dialyzer ✓" hand-waving.
+
+## Bootstrapping a fresh worktree (#1820)
+
+A new worktree carries the source and nothing else — no submodules, no
+`node_modules`. Every failure that produces is documented in this file
+already; what was missing is the ORDER, and one step that no operational
+doc stated at all (step 4). This section points at the paragraphs rather
+than restating them.
+
+**A docs-only branch needs none of this.** Every step below is a
+precondition for RUNNING a gate, not for having a worktree.
+
+**1. Submodules do not come with a worktree.** `.gitmodules` lists
+**three** — `vendor/bats-core`, `cicchetto/e2e/infra` and
+`frontends/shottino/vendor/libdatachannel` — and all three are empty
+until initialised. In a worktree the init REQUIRES
+`-c protocol.file.allow=always`: the clone comes from the superproject's
+own local module store over `file://`, which the CVE-2022-39253
+mitigation blocks by default (#592).
+
+**You are walked through TWO of the three.** `scripts/bats.sh` auto-inits
+`vendor/bats-core`, `scripts/testnet.sh` auto-inits `cicchetto/e2e/infra`,
+so for those the by-hand form is a fallback: the commands, the `git
+submodule status` reading, and the ⛔ never-`rsync` rule are in **trap 5**
+of "Five e2e gate traps that fake a green (or a red)", with the one-liners
+repeated under "When the test stack itself is broken".
+
+**`frontends/shottino/vendor/libdatachannel` has no auto-init, and no
+gate in this file needs it.** It is a precondition of the opt-in
+`make -C frontends/shottino call` helper only — never `make all`, and
+`make check` deliberately links a hand-written `<rtc/rtc.h>` stub so it
+runs without the submodule (#880). Skipping it is the normal case; it is
+named here because a bootstrap list that counts two leaves whoever builds
+`call` with neither a step nor a warning. The command and why the helper
+is opt-in: `frontends/shottino/docs/CALLS.md` → "The helper, as it
+stands"; `make call` also fails with that exact command rather than a
+bare cmake error. Note that CALLS.md's form carries no
+`protocol.file.allow` — it is not written for a worktree.
+
+Note the exit cost before you init anything: once ANY submodule has been
+initialised here, `git worktree remove` needs `--force` for the life of
+the worktree — `docs/OPERATIONS.md`, "Fresh-worktree e2e submodule
+gotcha".
+
+**2. TWO `node_modules` trees, both per-worktree.**
+`cicchetto/node_modules` (vitest, tsc, vite, biome) and
+`cicchetto/e2e/node_modules` (`@playwright/test`, `@types/node`,
+`irc-framework`) — unlike the bun download cache at `runtime/bun-cache`,
+which every worktree shares. "A fresh worktree has no `node_modules`"
+below has the two signatures an absent tree produces (`exit 127`, and
+`Cannot find type definition file for 'node'`, which is an ABSENT
+TOOLCHAIN reported as a type error) plus the third state: an
+`e2e/node_modules` that exists and is EMPTY.
+
+**3. `scripts/bun.sh` self-heals both, on demand, for every non-install
+verb.** The wrapper is the answer; a bare `vitest` / `tsc` / `biome` is
+the question. Either signature in step 2 means you invoked something
+other than the wrapper — or that the install failed earlier in the same
+run.
+
+**4. Cloning `node_modules` from another worktree is `cp -Rc`** — a CoW
+clone of `cicchetto/node_modules` from a tree that already has one. This
+is "the documented `cp -Rc` procedure" the lock-drift paragraph below
+names; it was recorded in `docs/DESIGN_NOTES.md` (2026-08-20, #1571) and
+stated in no operational doc until this section. `-c` is macOS `cp(1)`'s
+`clonefile(2)` flag (`man cp`), which falls back to a plain copy when the
+target filesystem cannot clone; nothing in this repo states an equivalent
+for another `cp(1)`, so confirm your own before copying the flag.
+**It copies whatever is there**, so it is safe only when the donor's
+content is what `bun.lock` pins — `scripts/bun.sh run check`'s `lock
+drift` stage is what proves that, and it prints the cure
+(`scripts/bun.sh install --frozen-lockfile`).
+
+**5. Checking the donor by hand: hash `cicchetto/bun.lock`, and nothing
+else.** It is the only lock file in the tree. There is no
+`cicchetto/e2e/bun.lock`, and `cicchetto/e2e/infra` is a SUBMODULE, whose
+checked-out commit the superproject records as a gitlink — `git submodule
+status`, never a lock at that path. Hashing a path that does not exist
+fakes a measurement the moment a pipe is involved:
+`cat cicchetto/e2e/bun.lock 2>/dev/null | md5` prints
+`d41d8cd98f00b204e9800998ecf8427e`, the md5 of the EMPTY STRING, at
+rc 0 — donor and target "agree" because neither was read. Hash the path
+directly instead (`md5 -q <path>`: rc 1 and a loud `No such file`). Same
+class as "`| tail -N` on a gate script eats the verdict AND the exit
+code" below. And equal digests are a precondition, not the proof — the
+`lock drift` stage in step 4 is the proof.
 
 ## Architecture: why the scripts exist
 
@@ -296,9 +402,11 @@ what finally makes the documented "mandatory workflow_dispatch smoke
 before a real tag" smoke something). It is also runnable by hand, see the
 quick reference.
 
-Three probes, and every assertion has a mutant that kills it — measured,
-not asserted. Reproduce any row by deriving a one-line mutant image
-`FROM ghcr.io/vjt/grappa:latest` and pointing `GRAPPA_IMAGE` at it:
+Every assertion has a mutant that kills it — measured, not asserted.
+Reproduce a row by deriving a one-line mutant image
+`FROM ghcr.io/vjt/grappa:latest` and pointing `GRAPPA_IMAGE` at it
+(the count of probes is deliberately not stated here: it has already
+rotted once, and the script is the roster):
 
 | Assertion | Mutation that kills it | Observed |
 |---|---|---|
@@ -307,6 +415,8 @@ not asserted. Reproduce any row by deriving a one-line mutant image
 | the named chunk arrives as JavaScript | `RUN rm -rf /app/cicchetto-dist/assets` | 200 `text/html` |
 | `/api/config` reports the expected version | deploy an older published tag | reports the older version |
 | a restart keeps `/data/grappa.env` | drop the `[ ! -f "$secrets_file" ]` guard from the entrypoint | hash changes |
+| the shipped bundle carries a populated credit roll (#1834) | build the image with no `--build-arg GRAPPA_CREDITS`, i.e. the pre-#1834 recipe | the degraded `{"sha":null,"date":null,"contributors":[]}`, quoted in the failure |
+| …and the probe can still SEE one | rename the payload's `"sha"` key in a shipped chunk | "neither shape present" — it fails blind rather than passing quietly |
 
 Two of those are worth knowing on their own. **A missing hashed chunk is
 served as the SPA shell with 200 and `content-type: text/html`** —
@@ -316,6 +426,22 @@ are blind to it. And **the never-rotate probe needs a second container
 shape**: under `deploy.sh` every secret rides in from the host env file,
 so the entrypoint's first-boot bootstrap (#862) never fires there. Only a
 bare `docker run` with just `PHX_HOST` generates them onto `/data`.
+
+**The two credit-roll rows were measured on the DIST, not on a booted
+mutant** — the two `docker build --target cic` outputs, with and without
+the build arg, run through the probe's own assertion block. The probe
+reads the shipped chunks either way, so what the shortcut skips is the
+container, not the oracle. Stated because the rest of this table was
+measured the long way and the difference should not have to be guessed.
+
+⚠️ **This probe asserts a RELEASE build, and a naked local build fails
+it — deliberately.** `.git` is `.dockerignore`d, so an image from a plain
+`docker build -f Dockerfile.release .` legitimately bakes the degraded
+roll; `release.yml` derives the payload on the runner and passes
+`--build-arg GRAPPA_CREDITS` (#1834). Smoking a hand-built image means
+passing that arg too — see § "The published release image" in
+`docs/OPERATIONS.md`. The asymmetry is the point: the naked build must
+keep degrading honestly, the shipped image must not.
 
 What it deliberately does NOT cover: one architecture (whatever the host
 runs — the arm64 leg of the manifest is proven by the build, not here);
@@ -338,15 +464,32 @@ stack (`cicchetto/e2e/compose.yaml`):
 * **playwright-runner**: official Playwright base, runs `npx playwright test` against `https://nginx-test` from inside the docker network.
 
 Cold bring-up: ~30s, suite ~3 min — both wall-clock figures inherited
-from an earlier run, not re-measured. Size of the suite, counted statically on
-`cicchetto/e2e/tests/*.spec.ts` (not from a run): **411 spec files**
-declaring **755** cases (750 `test(` + 5 `test.skip(`, line-anchored).
-That is a floor, not the collected total — 101 of those files build
-cases inside a loop, and the two Playwright projects **partition** the
-set rather than duplicate it (`chromium` is `grepInvert: /@webkit/`,
-`webkit-iphone-15` is `grep: /@webkit/`). For collected counts, read
-what a real run reports; the figures quoted in trap 4 below are runtime
-numbers and were not re-measured here.
+from an earlier run, not re-measured.
+
+**Do not quote a suite size from this file — take it from the tool.**
+`scripts/integration.sh --list` prints `Total: N tests in M files` plus
+one `[project] › file:line › title` line per collected test, which is
+the only count that reflects the loops (7 spec files build cases inside
+one, so a static `test(` census reads low) and the only one that splits
+by project. A static census answers a different question and every
+figure ever written down here has rotted within days.
+
+The three Playwright projects do **not** partition the suite any more
+(issue 1878). Each tag is an opt-in to ONE project and a spec may carry
+both:
+
+| tag in the title | project it opts into |
+|---|---|
+| `@webkit` | `webkit-iphone-15` (`devices["iPhone 15"]`) |
+| `@touch` | `chromium-pixel-touch` (`devices["Pixel 7"]`) |
+| both | both — the mobile suite's default since issue 1878 |
+| neither | `chromium` (`devices["Desktop Chrome"]`), by `grepInvert` |
+
+So `--grep @webkit` still collects exactly the set it always did: the
+widening ADDED `@touch`, it did not move `@webkit`. Eight entries in
+seven files stay `@webkit`-only because they are iOS-bound by
+construction — six assert `html.is-ios` is present, two ride
+`navigator.standalone`.
 
 E2E test outputs land in `cicchetto/e2e/test-results/` (failure
 artifacts: screenshot, video, trace.zip) and
@@ -642,17 +785,28 @@ the hard way on 2026-07-27.
    `feedback_bg_task_exit_code_masked_by_chain` (an `exit 0` that is
    really a trailing `echo`); evidence bar is `feedback_landed_claim_evidence`.
 
-4. **`--project chromium` is NOT the ship gate — it drops every
-   `@webkit` spec.** The suite partitions across two Playwright projects;
-   `webkit-iphone-15` carries the `@webkit`-tagged specs that chromium
-   never collects (~419 tests chromium-only vs ~526+ for the full
-   two-project run). `--project chromium` is an **iso-rerun tool**, not a
-   green light. Before claiming a green e2e, **reconcile the collected
-   COUNT against the baseline** — a run that collected 419 when the
-   baseline is 526+ silently skipped 100+ specs. "N ≥ 1 collected" is a
-   smoke check that Playwright found *something*, NOT a check that it
-   collected the *right* set. See `feedback_e2e_user_class_parity_matrix`
-   + `feedback_playwright_webkit_not_ios_scroll`.
+4. **`--project <one>` is NOT the ship gate — it drops every spec the
+   other two projects carry.** `chromium` never collects a tagged spec
+   at all (`grepInvert`), and since issue 1878 the two touch projects
+   overlap heavily rather than dividing the mobile specs between them,
+   so no single project is a superset of any other. `--project` is an
+   **iso-rerun tool**, not a green light.
+
+   Before claiming a green e2e, **reconcile the collected COUNT against
+   a baseline you took the same way** — `scripts/integration.sh --list`
+   on the base ref, then on yours. Do not carry a number in from this
+   file or from an older report: the totals move whenever a spec file
+   lands. "N ≥ 1 collected" is a smoke check that Playwright found
+   *something*, NOT a check that it collected the *right* set. See
+   `feedback_e2e_user_class_parity_matrix` +
+   `feedback_playwright_webkit_not_ios_scroll`.
+
+   🔴 And do not read `chromium-pixel-touch` as "Android coverage". A
+   Pixel device descriptor is chromium with `isMobile` + `hasTouch` — not
+   an Android WebView, not Firefox Android. It covers the #1869 family
+   (behaviour gated on `html.is-ios`, which is absent off Safari). It
+   would not have caught #717: Playwright's firefox has no touch
+   emulation, so Gecko is unreachable from this harness.
 
 5. **A fresh worktree's `cicchetto/e2e/infra` submodule is EMPTY — and
    the repair everyone reaches for (rsync) POISONS git.** Worktrees
@@ -706,6 +860,169 @@ the hard way on 2026-07-27.
    `rm` the pointer (leaves the submodule detached) and do NOT
    hand-write an absolute `gitdir:`. Escalate rather than improvise
    git-state surgery.
+
+## Three traps that fake a green: the real network twice, and a pipe (#1741)
+
+All three were paid for on 2026-08-24. The first two are one defect a
+storey apart — a test that believes it has silenced the network and is
+talking to it. The third is how a red suite gets *read* as green.
+
+### 1. e2e: `page.route` does not intercept a `fetch()` once the service worker has claimed the page
+
+cic ships a Workbox service worker (`VitePWA`, `strategies:
+"injectManifest"`, `registerType: "autoUpdate"` — see
+`cicchetto/vite.config.ts`), and Playwright does not intercept what
+passes through one. A `page.route` on a third-party origin can be
+installed, look right, and never fire.
+
+**Measured, not deduced.** `issue1702-media-session-metadata.spec.ts`
+with the SomaFM feed on `page.route` reached the real `api.somafm.com`,
+and the lock-screen metadata came back naming *"Kaya Project — Desert
+Phase (Hibernation Remix)"* — a track that was genuinely on the air —
+instead of the canned one the spec had seeded.
+
+🔴 **It is a RACE, not a constant, and that is why nobody had caught
+it.** The worker intercepts only once it has CLAIMED the page:
+`cicchetto/src/service-worker.ts` calls `skipWaiting()` on `install` and
+`clients.claim()` on `activate`, so a freshly-opened page starts
+*uncontrolled* and becomes controlled a moment later. A spec that
+touches a third party EARLY is intercepted fine —
+`issue1695-somafm-connect-src-perimeter.spec.ts` fetches straight after
+`page.goto("/login")` and stays honest. `issue1702` runs after a login,
+a channel select and a rail interaction, and does not. Same API, same
+origin, opposite answer, decided by position within the spec. **So a
+green here is not evidence the route fired**: a spec that grew a few
+steps at the front can start reaching the network without a single line
+of its interception changing.
+
+**The cure: stub `window.fetch` in `addInitScript`, above the worker.**
+An init script runs before any page script, and `window` is never
+collectible (unlike a patch written on a platform sub-object — see the
+`navigator.mediaSession` measurement in DESIGN_NOTES 2026-08-24), so the
+seam holds for the whole spec and the request never leaves the renderer.
+Pass everything you did not seed through to the saved real `fetch`, so
+cic's own API traffic is untouched:
+
+```ts
+await page.addInitScript((seed) => {
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!url.startsWith(seed.prefix)) return realFetch(input, init);
+    return new Response(JSON.stringify(seed.body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+}, { prefix: SONGS_PREFIX, body: { /* … */ } });
+```
+
+⛔ **`serviceWorkers: "block"` was tried and REJECTED.** It does stop
+the escape, and it buys a worse test: cic then honestly raises *"Service
+worker registration failed — Offline mode and push notifications are
+unavailable"*, whose banner both intercepts the rail tap and means the
+spec is exercising a **degraded app**. Stubbing at the app's own
+boundary keeps the worker real and still spends nothing on the network.
+
+**Scope, stated rather than generalised.** What was measured is the
+`fetch()`. That same spec keeps the `<audio>` stream and the `<img>`
+logos on `page.route` and passes — consistent with a media load and an
+image being exempt, but **not establishing it**, because neither
+assertion reads those bytes (the artwork check reads the mime off the
+logo URL, not off the response). #682's stream intercept working is
+precisely what hid this for as long as it did. So the rule is not
+"abandon `page.route`", it is: **if an assertion reads the CONTENT of a
+third-party `fetch()`, stub `window.fetch`** — and if it reads the
+content of anything else third-party, prove the route fired rather than
+assuming it.
+
+### 2. vitest: the same defect one storey down (#1701)
+
+A unit test can reach the real network too, and the sandbox will hide
+it. `AudioMiniPlayer.test.tsx` was green locally — this sandbox has no
+network — and red in CI, where it does: expected the stubbed *"Trestal —
+A Land Unknown"*, received *"Alex Cortiz — Paluka days"*.
+
+**The call was not in the test that went red, and that is the general
+lesson.** `tunedStation()` is DERIVED, not declared — `radio.ts` matches
+`activeAudio()?.href` against the curated table — so two *transport*
+tests that call `playAudio(…groovesalad…)`, neither of them about the
+feed, tune Groove Salad as far as the rest of the app is concerned,
+`nowPlaying.ts`'s effect polls `api.somafm.com` immediately, and the
+answer is still in flight when the feed test runs. Grep your own test
+body for the URL and you will find nothing.
+
+**TWO defects, two fixes, each measured on its own** (unfixed → red;
+barrier fix ALONE → red 3/3; both → green, and green with a competing
+answer present):
+
+* an **offline `fetch`** installed in `beforeEach` for every test in the
+  file — `vi.stubGlobal("fetch", vi.fn().mockRejectedValue(…))`.
+  Rejecting rather than answering `ok: false`: both leave the state
+  null, and "there is no network here" is the honest model. A test that
+  WANTS a feed overrides it explicitly;
+* the **barrier keyed on the stubbed TEXT**, not on the element:
+  `toHaveTextContent(TRACK)` instead of `toBeInTheDocument()`. Any answer
+  at all mounts the span, so a presence barrier returns on whichever read
+  landed first and hands the caller a row whose provenance it never
+  checked.
+
+Silencing the network alone would have left a barrier that does not
+establish the state the test asks it for — the same class as the #753
+repair on `ws_presence_test`. **A barrier must wait for the value the
+test seeded, not for the shape that value happens to arrive in.**
+
+### 3. `| tail -N` on a gate script eats the verdict AND the exit code
+
+Two independent failures in one pipe, and both were paid for on
+`scripts/integration.sh … | tail -60`.
+
+**The exit code.** A pipeline's status is its LAST command's, and
+neither shell here sets `pipefail` by default. Measured:
+
+```
+zsh  -c 'false | tail -60 >/dev/null; echo $?'   → 0
+bash -c 'false | tail -60 >/dev/null; echo $?'   → 0
+zsh  -c 'false >/tmp/x 2>&1; echo $?'            → 1
+```
+
+So a failed suite read through that pipe reports `0`. The script is not
+the liar: `integration.sh` runs `set -euo pipefail` and propagates the
+status of its final `docker compose run --rm … playwright-runner`. The
+pipe is what throws it away, and this holds for **any** trailing pipe on
+a gate script — `| grep`, `| head`, `| tee` included.
+
+**The verdict.** `tail -N` keeps the last N lines, and in
+`integration.sh` those are the wrong ones: the `EXIT` trap tears the
+stack down **after** the suite, so docker's `Removing` / `Removed` lines
+print after Playwright's summary. Measured on two real full-suite logs
+from that day:
+
+| run | total lines | summary at | lines AFTER the summary |
+|---|---|---|---|
+| e2e full (#1702) | 4579 | 4463 | 116 |
+| integration (#1675) | 4916 | 4796 | 120 |
+
+A `tail -60` window therefore holds nothing but teardown. **Do not
+"fix" this by raising N** — the gap is however many networks and volumes
+docker happens to print, so there is no constant to tune against.
+
+**The rule: redirect to a FILE, read the file, and take the status from
+the script rather than from a pipe.** Same shape trap 3 above already
+asks for (detached + read the log), and the RC stamp survives it:
+
+```bash
+{ scripts/integration.sh; echo "RC=$?"; } >/tmp/w1-<issue>-integration.log 2>&1 &
+disown
+# later — grep the file, never a pipe on the run itself
+grep -nE '[0-9]+ (passed|failed|flaky)' /tmp/w1-<issue>-integration.log | tail -5
+```
+
+The stamped `RC=` answers "did the run FINISH" — a **missing** one means
+the process was reaped, which is infra death and not a red. It does not
+answer "did the suite pass": that is still the parsed summary line, per
+trap 3 above, which was measured exiting rc 0 with a red test.
 
 ## Writing a bats assertion: never a bare `!` (#745)
 

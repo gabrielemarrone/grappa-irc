@@ -232,25 +232,50 @@
      option runs under the caret. Theme-independent, so base :root. */
   --select-caret-inset: 0.6rem;
   --select-caret-room: 1.75rem;
-  /* #913 — the iOS top safe-area inset, as a variable. Everything else in this
-     file writes `env(safe-area-inset-top)` inline, which is right for a
-     padding: the engine substitutes it and nobody has to read it back. The
-     rail actions menu is the one cap whose OTHER operand is measured in JS
-     (`--rail-menu-space-above`), and JS cannot reliably obtain the inset: an
-     unregistered custom property hands `getComputedStyle().getPropertyValue()`
-     its token stream, not a length, so `parseFloat` yields NaN and a `|| 0`
-     fallback hides it. Keeping the arithmetic in CSS keeps `env()` where the
-     engine resolves it. The `0px` fallback is load-bearing: without it an
-     engine that does not know the variable invalidates the whole declaration
-     and the cap disappears (the #588 overflow, back). Theme-independent, so it
-     lives on base :root. */
+  /* #913 / #949 / #1751 — THE FOUR SAFE-AREA INSETS, AND THE ONLY PLACE THIS
+     FILE WRITES `env()`.
+
+     THE RULE: `env(safe-area-inset-*)` appears exactly once per edge, here,
+     and every consumer reads the token. A surface that needs a MINIMUM of its
+     own writes `max(<its floor>, var(--safe-area-inset-top))`; one that wants
+     the bare inset writes the token alone. Do not inline `env()` at a call
+     site — `safeAreaInsetToken.test.ts` fails on it, by census, with no
+     allowlist to add yourself to.
+
+     WHY A TOKEN, reversing what this comment said until #1751 ("inline is
+     right for a padding: the engine substitutes it and nobody has to read it
+     back"). That is true of the ENGINE and false of every gate we run.
+     Playwright synthesizes no safe-area inset on any engine — they resolve to
+     0, measured in issue913-rail-menu-safe-area.spec.ts — and jsdom resolves
+     no `env()` at all. So an inline site's inset is not observable in ANY
+     test we can write, while a site reading the token is stubbable — a spec
+     re-declares `--safe-area-inset-top` on a `:root:root` override at a
+     non-zero length and every consumer moves at once, which is how that same
+     #913 spec proves its own wiring. #913 introduced the indirection for one
+     site; #1751 finished it for all of them. The other half of #913's reason
+     still holds and is why the arithmetic stays in CSS rather than moving to
+     JS: reading an unregistered custom property back with
+     `getComputedStyle().getPropertyValue()` hands you its token stream, not a
+     length, so `parseFloat` yields NaN and a `|| 0` fallback hides it. JS
+     supplies only what CSS cannot know (`--rail-menu-space-above`).
+
+     THE `0px` FALLBACKS ARE LOAD-BEARING, not defensive, and now cover every
+     consumer instead of the two that used to spell them out. Without one, an
+     engine that does not know the inset invalidates the WHOLE declaration:
+     `.context-menu-safe-area`'s `inset` shorthand collapses to a zero-sized
+     rect and pins every menu to the corner (#949), and `.rail-actions-menu`'s
+     cap disappears (the #588 overflow, back).
+
+     NB, keep CURLY BRACES out of the prose in this whole block: the `ruleBody`
+     test helper captures a rule with a negated character class and stops dead
+     at the first closing one, so a brace in a comment truncates :root and
+     fails every test that reads it.
+
+     Theme-independent, so base :root. */
   --safe-area-inset-top: env(safe-area-inset-top, 0px);
-  /* #949 — the bottom (home-indicator) inset, same contract, same reason: the
-     `.context-menu` height cap subtracts BOTH vertical insets from a value
-     (`--viewport-height`) that JS writes, so the subtraction has to happen in
-     CSS. Sibling of the top inset above; the `0px` fallback is load-bearing
-     for the same reason. */
+  --safe-area-inset-right: env(safe-area-inset-right, 0px);
   --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-inset-left: env(safe-area-inset-left, 0px);
   /* grappa-irc#69: theme the scrollbars. `scrollbar-color` and
      `scrollbar-width` inherit, so declaring them on :root themes every
      scrollable descendant (.scrollback, members pane, admin tables…)
@@ -644,112 +669,202 @@ select:dir(rtl) {
 html.is-ios {
   position: fixed;
   inset: 0;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
-}
-
-/* Dispatch-1 (2026-06-11) — selective re-enable of text selection.
-   THE selectable-text policy point: the blanket kill above is
-   Telegram Web K's pattern, and Telegram pairs it with re-enables on
-   every surface users copy from. New copyable surface → add its
-   selector HERE and to keepKeyboard.ts's SELECTABLE_TEXT_SURFACES
-   allowlist (#79, 2026-07-03 + 2026-07-04 rework): on these same
-   surfaces keepKeyboard DURATION-GATES its mousedown preventDefault —
-   a short tap is left un-prevented (keyboard dismisses) but a
-   long-press IS prevented (keyboard stays up so the iOS selection
-   survives). This `user-select: text` re-enable is the load-bearing
-   half — without it there is nothing to select. CSS and TS can't share
-   a constant, so the two lists MUST stay in sync — a surface added
-   here but not there stays unselectable while compose is focused.
-   Currently: scrollback message text
-   (channels, queries, server window all render through .scrollback),
-   the topic modal's full-topic text, and editable fields (WebKit
-   honors inherited user-select:none inside inputs in some version
-   ranges). Deliberately NOT selectable: mentions rows (navigation
-   buttons — the target message is selectable in its channel),
-   topic-bar text (clickable, opens the modal), all other chrome.
-   Full arc: docs/DESIGN_NOTES.md 2026-06-11. */
-html.is-ios .scrollback,
-html.is-ios .topic-modal-text,
-html.is-ios input,
-html.is-ios textarea {
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-/* #1067 — the OTHER half of `html.is-ios`'s blanket kill above:
-   `-webkit-touch-callout: none`. That property is inherited, so it lands on
-   the scrollback too, and a range installed under a suppressed callout has no
-   draggable endpoints — the second symptom #1067 diagnoses ("once text is
-   selected the endpoints cannot be moved"). #366 never re-enabled it, which is
-   why its programmatic select-all produced a selection nobody could adjust.
-
-   The re-enable is scoped in TIME, not in space: `lib/messageMenu`'s Select…
-   puts `is-selecting` on <html> while a selection is live and removes it on the
-   first `selectionchange` that finds the selection gone. Scoping it to
-   `.scrollback` permanently would put iOS's own long-press callout back on
-   every message row, where it would race the long-press menu that replaced the
-   select-all — two menus for one gesture.
-
-   NOT device-verified: the callout ⇄ grab-handle link is read from the platform
-   contract and from the code, and neither jsdom nor Playwright webkit
-   reproduces iOS selection UI. #1067 declares its own diagnosis the same way. */
-html.is-ios.is-selecting .scrollback {
-  -webkit-touch-callout: default;
-}
-
-/* #508 — <select> tap-to-open on iOS. `html.is-ios` sets
-   `-webkit-user-select: none` (the blanket kill above) and user-select
-   INHERITS, so it lands on every <select>. WebKit then refuses to open the
-   native picker on a DIRECT tap of a user-select:none form control — the
-   same "WebKit honors
-   inherited user-select:none inside controls" quirk the input/textarea
-   re-enable above works around. A tap on the associated `<label for=…>`
-   still forwards activation programmatically, which is exactly why only the
-   label opened the picker and the control itself looked dead. Re-enable it.
-   The value MUST be explicit: `user-select: auto` on a control re-inherits
-   the parent's `none` (per CSS-UI), so `text` — matching the input/textarea
-   re-enable — is the value that actually overrides it. */
-html.is-ios select {
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-/* The [Join] invite CTA is a button inside .scrollback — re-exclude
-   it so long-press doesn't pop the selection magnifier over a control. */
-html.is-ios .scrollback-invite-join {
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-/* #589 — admin pane content selectable on iOS. The blanket `html.is-ios`
-   user-select:none above kills selection on every admin table — exactly the
-   surfaces (IPs, session/visitor ids, vhosts, UA strings, error text) an
-   operator needs to copy off the device. `.admin-tab-panel` is the single
-   wrapper around every tab's content (AdminPane.tsx), so ONE selector
-   re-enables all ten tabs. Mirrors the .scrollback re-enable above; NOT
-   mirrored into keepKeyboard.ts's SELECTABLE_TEXT_SURFACES — that list is
-   compose-focus KEYBOARD policy, and the AdminPane <Match> arm UNMOUNTS
-   ComposeBox (Shell.tsx <Switch>), so no text input holds focus behind the
-   pane (handleMouseDown bails on document.activeElement). iOS native
-   long-press selection here is pure CSS. See DESIGN_NOTES 2026-08-01. */
-html.is-ios .admin-tab-panel {
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-/* Re-exclude controls inside the panel — a long-press on a refresh/action
-   button must not pop the selection magnifier over a control (same carve-out
-   as .scrollback-invite-join). Buttons only: <input>/<select> stay selectable
-   via the global input/select re-enables above, and anchors keep their URL
-   text copyable (the .scrollback-link reasoning in keepKeyboard.ts). */
-html.is-ios .admin-tab-panel button {
-  -webkit-user-select: none;
-  user-select: none;
 }
 
 html.is-ios body {
   height: calc(var(--vh, 1vh) * 100);
+}
+
+/* #1869 — the selection/callout policy below is TOUCH behaviour, and it used
+   to sit under `html.is-ios` alongside the layout pin above. That is what left
+   Android showing TWO menus for one long-press: Chrome's own selection toolbar
+   over a native selection of the row, plus cic's message menu behind it,
+   because on a platform that never gets `is-ios` nothing suppressed the
+   platform's own callout. Only the `position: fixed` / `--vh` pair above is
+   genuinely iOS-only — iOS is the one platform whose layout viewport ignores
+   the keyboard.
+
+   The gate is `@media (pointer: coarse)` and not a second boot class: it keys
+   on the actual pointing device rather than a UA sniff, so a mouse keeps its
+   drag-select while every touch platform gets the suppression. iOS reports
+   `pointer: coarse`, so everything #79 / #250 / #508 / #589 / #1067
+   established there is preserved — these are the same rules re-parented, not
+   new ones.
+
+   ATOMIC, and this is the half that bites: the blanket kill and EVERY
+   re-enable beneath it ship together. Widening the kill without its re-enables
+   regresses each of those issues on Android instead of iOS. Order is
+   load-bearing too — the re-excludes (`.scrollback-invite-join`,
+   `.admin-tab-panel button`) carve out of the re-enables above them at equal
+   specificity, so they must stay AFTER them.
+
+   Specificity dropped by one class when `html.is-ios X` became `html X`.
+   Checked, not assumed — every `user-select` declaration in this sheet was
+   enumerated: nothing at (0,1,x) sets it on `input`, `textarea`, `select` or
+   `.admin-tab-panel`, so those four re-enables carry unopposed.
+
+   `.scrollback` is the exception, and it is WHY the two #250 tokens are named
+   EXPLICITLY in the rules below instead of being left to inherit.
+   `.nick-clickable` / `.channel-clickable` carry their own top-level
+   `user-select: text` at (0,1,0), and that value now DISAGREES with what the
+   row gets on a coarse pointer — `none`, not `text` — while a token matches
+   its element DIRECTLY and the row reaches it only by inheritance, which a
+   direct match beats outright. Naming them puts the gate's rules at (0,2,1)
+   standing and (0,3,1) latched, over (0,1,0), on every engine and independently
+   of source order. Delete either token from those two selector lists and the
+   defect is back, narrowed to a long-press that lands on a nick. */
+@media (pointer: coarse) {
+  html {
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  /* Dispatch-1 (2026-06-11) — selective re-enable of text selection.
+     THE selectable-text policy point: the blanket kill above is
+     Telegram Web K's pattern, and Telegram pairs it with re-enables on
+     every surface users copy from. New copyable surface → add its
+     selector HERE and to keepKeyboard.ts's SELECTABLE_TEXT_SURFACES
+     allowlist (#79, 2026-07-03 + 2026-07-04 rework): on these same
+     surfaces keepKeyboard DURATION-GATES its mousedown preventDefault —
+     a short tap is left un-prevented (keyboard dismisses) but a
+     long-press IS prevented (keyboard stays up so the iOS selection
+     survives). This `user-select: text` re-enable is the load-bearing
+     half — without it there is nothing to select. CSS and TS can't share
+     a constant, so the two lists MUST stay in sync — a surface added
+     here but not there stays unselectable while compose is focused.
+     (keepKeyboard's own handler stays iOS-gated — its job is the iOS
+     keyboard, not selection; see #1869 in that file.)
+     Currently: the topic modal's full-topic text, and editable fields (WebKit
+     honors inherited user-select:none inside inputs in some version
+     ranges). Scrollback message text left this list in #1869 — it is
+     latch-scoped now, see the rule below. Deliberately NOT selectable:
+     mentions rows (navigation buttons — the target message is selectable in
+     its channel), topic-bar text (clickable, opens the modal), all other
+     chrome.
+     Full arc: docs/DESIGN_NOTES.md 2026-06-11. */
+  html .topic-modal-text,
+  html input,
+  html textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* #1869 — `.scrollback` is NOT in the list above. It is the one copyable
+     surface whose selection is scoped in TIME instead, and the reason is that
+     the iOS mechanism does not port: `-webkit-touch-callout` is WebKit-only
+     (`CSS.supports("-webkit-touch-callout", "none")` is FALSE in Blink,
+     measured on Chrome 151). On iOS `callout: none` + `user-select: text`
+     means "no native long-press UI, still selectable for Select…". Blink has
+     only the second half — and there `user-select: text` IS the native
+     long-press selection, which is the two-menu frame #1869 reports.
+
+     So on a coarse pointer the row defaults to NOT selectable and the
+     `is-selecting` latch below lifts it, exactly as that latch already lifts
+     the callout. Same design, one more property.
+
+     The two #250 tokens are named explicitly because they match their elements
+     DIRECTLY and so beat the inherited value — without them a long-press on a
+     nick still raises the platform's toolbar. See the latch for what this does
+     to #250's guarantee. */
+  html .scrollback,
+  html .scrollback .nick-clickable,
+  html .scrollback .channel-clickable {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* #1067 — the OTHER half of the blanket kill above:
+     `-webkit-touch-callout: none`. That property is inherited, so it lands on
+     the scrollback too, and a range installed under a suppressed callout has no
+     draggable endpoints — the second symptom #1067 diagnoses ("once text is
+     selected the endpoints cannot be moved"). #366 never re-enabled it, which is
+     why its programmatic select-all produced a selection nobody could adjust.
+
+     The re-enable is scoped in TIME, not in space: `lib/messageMenu`'s Select…
+     puts `is-selecting` on <html> while a selection is live and removes it on the
+     first `selectionchange` that finds the selection gone. Scoping it to
+     `.scrollback` permanently would put the platform's own long-press callout
+     back on every message row, where it would race the long-press menu that
+     replaced the select-all — two menus for one gesture. #1869 is that exact
+     state, arrived at from the other direction: on Android the kill never
+     applied at all, so the callout was never suppressed to begin with.
+
+     #1869 added `user-select: text` to the same latch, for Blink, where the
+     callout property does nothing. It is load-bearing and not belt-and-braces:
+     Blink omits `user-select: none` subtrees from a selection's TEXT, so
+     without it Select… installs a range whose `toString()` is the nick alone
+     (measured: `"<peluche>"` vs `"14:04:12 <peluche> prot"`).
+
+     WHAT THIS COSTS #250, deliberately. #250 gave the nick/channel tokens their
+     own `user-select: text` so they would ride INSIDE an Android native
+     drag-selection, written when Android had no scrollback re-enable at all.
+     There is no native drag-selection on the scrollback any more, so that
+     guarantee is now delivered by a different route: Select… takes the whole
+     row (`selectNodeContents`), so the tokens are included by construction, and
+     they are re-enabled under this latch so the selection's text carries them.
+     Desktop is untouched — it reports `pointer: fine` and never enters the
+     gate, which is where #250's mouse-drag case lives.
+
+     NOT device-verified on iOS: the callout ⇄ grab-handle link is read from the
+     platform contract and from the code, and neither jsdom nor Playwright webkit
+     reproduces iOS selection UI. #1067 declares its own diagnosis the same way.
+     The Blink half IS device-verified (Android 17 emulator, Chrome 151). */
+  html.is-selecting .scrollback,
+  html.is-selecting .scrollback .nick-clickable,
+  html.is-selecting .scrollback .channel-clickable {
+    -webkit-touch-callout: default;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* #508 — <select> tap-to-open on iOS. The blanket kill above sets
+     `-webkit-user-select: none` and user-select INHERITS, so it lands on
+     every <select>. WebKit then refuses to open the native picker on a
+     DIRECT tap of a user-select:none form control — the same "WebKit honors
+     inherited user-select:none inside controls" quirk the input/textarea
+     re-enable above works around. A tap on the associated `<label for=…>`
+     still forwards activation programmatically, which is exactly why only the
+     label opened the picker and the control itself looked dead. Re-enable it.
+     The value MUST be explicit: `user-select: auto` on a control re-inherits
+     the parent's `none` (per CSS-UI), so `text` — matching the input/textarea
+     re-enable — is the value that actually overrides it. */
+  html select {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* The [Join] invite CTA is a button inside .scrollback — re-exclude
+     it so long-press doesn't pop the selection magnifier over a control. */
+  html .scrollback-invite-join {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* #589 — admin pane content selectable on touch. The blanket
+     user-select:none above kills selection on every admin table — exactly the
+     surfaces (IPs, session/visitor ids, vhosts, UA strings, error text) an
+     operator needs to copy off the device. `.admin-tab-panel` is the single
+     wrapper around every tab's content (AdminPane.tsx), so ONE selector
+     re-enables all ten tabs. Mirrors the .scrollback re-enable above; NOT
+     mirrored into keepKeyboard.ts's SELECTABLE_TEXT_SURFACES — that list is
+     compose-focus KEYBOARD policy, and the AdminPane <Match> arm UNMOUNTS
+     ComposeBox (Shell.tsx <Switch>), so no text input holds focus behind the
+     pane (handleMouseDown bails on document.activeElement). Native
+     long-press selection here is pure CSS. See DESIGN_NOTES 2026-08-01. */
+  html .admin-tab-panel {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Re-exclude controls inside the panel — a long-press on a refresh/action
+     button must not pop the selection magnifier over a control (same carve-out
+     as .scrollback-invite-join). Buttons only: <input>/<select> stay selectable
+     via the global input/select re-enables above, and anchors keep their URL
+     text copyable (the .scrollback-link reasoning in keepKeyboard.ts). */
+  html .admin-tab-panel button {
+    -webkit-user-select: none;
+    user-select: none;
+  }
 }
 
 /* UX-6 bucket A (2026-05-20) — overlay scroll-lock sentinel. The class
@@ -1232,12 +1347,26 @@ html.overlay-open #root > div {
 /* Three-pane shell (P4-1) */
 
 /* UX-5 bucket BS — sidebar widths driven by CSS custom properties on
-   <html>, set by lib/sidebarWidths.ts at boot AND on drag. The fallbacks
-   (16rem / 14rem) match the pre-bucket literal values, so a fresh
-   visitor without localStorage gets the original layout. */
+   <html>, set by lib/sidebarWidths.ts on drag, and at boot for a side the
+   operator has already sized. A side never dragged has NO var, and this
+   fallback is what renders — see the no-var rule at the top of
+   sidebarWidths.ts (issue 1827).
+
+   issue 1827 — the fallbacks are `256px / 224px` and used to read
+   `16rem / 14rem`. That is a rewrite to PRESERVE what ships today, not a
+   change of it. Measured: sidebarWidths.ts wrote DEFAULT_PX (256 / 224) to
+   these vars on every cold load, so this arm never rendered and a fresh
+   visitor got 256 / 224 — while the literals here say 16rem / 14rem, which
+   at the default --font-size of 14px are 224 / 196. The two disagreed by
+   32 / 28px and the JS won every time. Now that the var is absent for a
+   fresh visitor this arm finally renders, so it has to carry the number
+   that was actually shipping, or the desktop shell would silently narrow.
+   The px also states the truth that these have not tracked --font-size
+   since UX-5 BS; the short-landscape tier below keeps `rem`, because there
+   the fallback is the tier's real default and it is meant to scale. */
 .shell {
   display: grid;
-  grid-template-columns: var(--sidebar-width, 16rem) 1fr var(--members-width, 14rem);
+  grid-template-columns: var(--sidebar-width, 256px) 1fr var(--members-width, 224px);
   grid-template-rows: 1fr;
   /* #205 — iPad standalone-PWA safe area. An iPad is WIDER than the
      768px mobile breakpoint in BOTH orientations, so `isMobile()` is
@@ -1271,10 +1400,10 @@ html.overlay-open #root > div {
         reported). */
   height: 100dvh;
   min-height: 0;
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
+  padding-top: var(--safe-area-inset-top);
+  padding-bottom: var(--safe-area-inset-bottom);
+  padding-left: var(--safe-area-inset-left);
+  padding-right: var(--safe-area-inset-right);
 }
 
 /* #205 — dvh fallback floor for engines without dynamic-viewport units
@@ -1321,7 +1450,16 @@ html.overlay-open #root > div {
    or a long unbreakable token WITHOUT break-word would floor `fit-content`
    at that min-content and re-starve the centre. */
 .shell.shell-no-members {
-  grid-template-columns: var(--sidebar-width, 16rem) 1fr fit-content(14rem);
+  /* issue 1827 — `256px`, matching the sibling `.shell` rule above, for the
+     same reason and by the same measurement: the fallback arm never rendered
+     while sidebarWidths.ts wrote the var for everybody, and `16rem` is 224px
+     at the default --font-size, 32px short of the 256px the JS default was
+     really producing. Now that a never-dragged side leaves the var unset,
+     this arm renders — so it has to carry the shipping number or the
+     no-members shell alone would narrow while the members-bearing one did
+     not. The `fit-content(14rem)` cap is untouched: there is no members rail
+     to drag in this arm. */
+  grid-template-columns: var(--sidebar-width, 256px) 1fr fit-content(14rem);
 }
 
 /* #319 — landscape-compact tier. A small phone (~5") rotated to landscape
@@ -1360,10 +1498,31 @@ html.overlay-open #root > div {
    matchMedia signal to wire up (the #319 fix-direction's simpler arm). */
 @media (orientation: landscape) and (max-height: 500px) and (min-width: 769px) {
   .shell {
-    /* Slim rails; center (1fr) takes the rest. Overrides the drag-persisted
-       --sidebar-width / --members-width vars (not referenced here) so a
-       previously-widened desktop rail can't leak into the compact tier. */
-    grid-template-columns: 8rem 1fr 7rem;
+    /* Slim rails; center (1fr) takes the rest.
+
+       issue 1827 — this REFERENCES the drag vars now, where it used to
+       ignore them outright. The old comment here read "Overrides the
+       drag-persisted --sidebar-width / --members-width vars (not referenced
+       here) so a previously-widened desktop rail can't leak into the compact
+       tier", and the leak it named is real — but not referencing the vars
+       also meant the handles stayed mounted, kept painting `col-resize` and
+       kept accepting the drag while the column could not move. The ruling is
+       that a visible rail must be resizable, in every tier, with the shell's
+       height no longer a condition.
+
+       The leak is stopped where it is actually caused instead: the vars
+       carry a value already clamped to this tier's own tighter bounds
+       (COMPACT_MIN_WIDTH_PX, and a quarter of the viewport rather than a
+       half — see the clamp policy in lib/sidebarWidths.ts), so a rail
+       widened on a tall window clamps DOWN on the way in rather than
+       flooding the centre.
+
+       The `8rem` / `7rem` fallbacks are this tier's real defaults and are
+       what a never-dragged operator still gets, unchanged: the var is absent
+       until the first drag. They stay in `rem` on purpose — unlike the
+       desktop fallbacks above, these do track --font-size, which is the
+       behaviour this tier already had when the widths were literals. */
+    grid-template-columns: var(--sidebar-width, 8rem) 1fr var(--members-width, 7rem);
   }
 
   .shell.shell-no-members {
@@ -1373,8 +1532,14 @@ html.overlay-open #root > div {
        floors at the RailActions launcher's min-content, a few px over 7rem):
        a server window's `max-content` card would otherwise blow straight
        past the slim rails this compact tier exists to enforce, re-creating
-       the centre-starve inside the tier meant to prevent it. */
-    grid-template-columns: 8rem 1fr fit-content(7rem);
+       the centre-starve inside the tier meant to prevent it.
+
+       issue 1827 — the sidebar column takes the var for the same reason the
+       members-bearing arm above does: the left rail is visible here, so it
+       must be draggable. The `fit-content(7rem)` members cap is #605's and
+       is deliberately left alone — there is no members rail to drag in this
+       arm, so no dead affordance to cure. */
+    grid-template-columns: var(--sidebar-width, 8rem) 1fr fit-content(7rem);
   }
 }
 
@@ -1491,6 +1656,96 @@ html.overlay-open #root > div {
   /* UX-5 BS: relative positioning so .resize-handle (absolute, inner-edge)
      anchors against this aside. */
   position: relative;
+  /* #1737 — THE RAIL OWNS ITS HORIZONTAL INSET, ONCE. Every surface mounted
+     in this aside used to declare its own: `.rail-radio-now` 0.5rem of
+     padding, `.rail-actions` 0.5rem of padding, `.rail-server-info` 0.5rem of
+     MARGIN, `.rail-radio-picker-list` 0.5rem again — four hand-written copies
+     of one number, free to drift from each other.
+
+     WHAT THE REPORTED SCREENSHOT ACTUALLY SHOWED, measured before moving
+     anything: the band's CONTENT and the actions launcher already sat at the
+     same 0.5rem. What disagreed was the SURFACE. `.rail-radio-now` draws a
+     background and a `border-top` on a border box that spanned this aside
+     edge to edge, so it read as a full-bleed card; `.rail-actions` spans edge
+     to edge too, but its background is the same `--bg-alt` this aside
+     carries, so its box is invisible and the only surface there is its
+     bordered button, inset by the padding. Full-bleed card above, inset card
+     below. Moving the inset up one level shrinks both border boxes to the
+     same figure, which is the fix — tweaking `.rail-radio-now`'s padding to
+     match `.rail-actions` by hand would have been the fifth copy.
+
+     THE RULE FOR A NEW CHILD: this inset is the gap between the child's
+     BORDER box and the rail edge, and this rule owns it — a new rail surface
+     declares no `padding-inline` / `margin-inline` of its own. A bordered
+     CARD's internal padding is a different axis and stays with the card
+     (`.rail-server-info` keeps its `padding: 0.5rem 0.75rem`,
+     `.rail-actions-menu` its 0.5rem); only the gap to the rail edge moved
+     here.
+
+     🔴 THE TWO ABSOLUTES ANCHORED TO THIS ASIDE DO **NOT** MOVE WITH IT, and
+     #1737 said the opposite here. Corrected by #1751, measured rather than
+     reasoned. An abspos box resolves its offsets against this box's PADDING
+     EDGE — the OUTER edge of the padding, just inside the border — so the
+     containing rectangle INCLUDES the padding and `inset: 0` lands ON that
+     edge, above and outside the padding. Padding on a container is invisible
+     to its absolutely positioned descendants.
+
+     Measured at 390px with the inset token stubbed at 59px: this aside's
+     `padding-top` read 59px while `.rail-radio-picker` (`inset: 0`) stayed at
+     y=0. Horizontally, same physics: the aside's border box spans x 138–390
+     with a 1px border and 7px of padding, so its padding BOX is 146–383, and
+     the picker measured 139–390 — the padding edge, full-bleed inside the
+     border, NOT inset by `--rail-inset`.
+
+     So the horizontal half of #1737's ruling never took effect on this child.
+     It stayed visually a non-event for the reason #1737 gave — the panel's
+     background is this same `--bg-alt` and nothing lives in the strips — which
+     is why nobody saw it. The VERTICAL half was the bug in #1751: the picker's
+     band painted under the notch on the phone. Fixed at the mobile rule, by
+     moving the clearance onto `top` where it moves this box and every child
+     with it; see the long note there.
+
+     THE RULE FOR A NEW ABSPOS CHILD OF THIS ASIDE: it is NOT inset by
+     `--rail-inset` and it does NOT clear the safe area on its own. Give it its
+     own offsets deliberately, or make the ancestor's BOX carry what it needs.
+     #1802 corrects the last sentence this paragraph used to carry, which
+     absolved `.resize-handle-right`: measured, it was the one that was WRONG.
+     See its own rule below.
+
+     #1802 — WHY THE PADDING STAYS ON THIS BOX, against the issue's own sketch.
+     That sketch dropped it and put a `padding-inline` on a `.shell-members`
+     direct-child selector instead, so that the scroller could be excluded
+     generically rather than escape with a margin. (No braces in this comment
+     on purpose: `ruleBody` in the test helpers captures with a `[^}]` class
+     and a brace written here would truncate the body it reads, hiding the two
+     declarations below it.) Measured in chromium
+     at 1280px, `--font-size: 14px` (so 0.5rem = 7px), against this aside's
+     inner edge:
+
+       surface                    padding here   padding on children
+       .rail-radio-now  border box       +7px                  +0px
+       .rail-actions    border box       +7px                  +0px
+       .rail-server-info border box      +7px                  +0px
+       .rail-server-info own padding   10.5px                   7px
+       .resize-handle-right  width        6px                  14px
+
+     The first three are #1737's whole result — the rail's surfaces sharing one
+     border-box inset — and insetting the children loses it, because a padding
+     on a child insets its CONTENT and leaves its BORDER box on the rail edge.
+     A box cannot hold an outer gap and an inner one in the same property, and
+     `.rail-server-info` needs both: it draws a border, so its outer gap has to
+     come from an ancestor's padding or its own margin, and there is no third
+     option in the box model. The last row is the generic selector reaching a
+     6px `box-sizing: border-box` grip and floating it to 14px.
+
+     So the inset stays HERE, one owner, one number, and the ONE child that
+     must span the full width takes it back in a rule this container owns —
+     see the pair next to `.members-pane`. That is the half of the ruling that
+     survives measurement: "questa logica deve stare nel container non negli
+     elementi child". The half that does not is "no margins anywhere"; the
+     margin is still there, moved from the child's rule to the container's. */
+  --rail-inset: 0.5rem;
+  padding-inline: var(--rail-inset);
 }
 
 /* UX-5 bucket BS — drag handles on the inner edge of each sidebar.
@@ -1520,7 +1775,28 @@ html.overlay-open #root > div {
 }
 
 .resize-handle-right {
-  /* Inner (left) edge of the members aside. */
+  /* Inner (left) edge of the members aside.
+
+     #1802 — back to `left: 0`, and the cancellation it replaces was never
+     a compensation: it was a defect, shipped by #1737 on a premise #1751
+     had already measured false. The premise was that a plain `left: 0`
+     would land one inset inside the edge. It does not. An abspos box
+     resolves its offsets against the ancestor's PADDING box, whose OUTER
+     boundary is the inner edge of the border — a boundary that does not
+     move when the padding changes. Measured in chromium, aside padding
+     toggled between 8px and 0 with everything else held: `left: 0` gave
+     x=101 in BOTH arms, and `inset: 0` gave x=101, width 199 in both.
+     Padding is invisible to an absolutely positioned descendant, which is
+     exactly what the long note on `.shell-members` says.
+
+     So the cancellation was not buying anything back, it was subtracting
+     an inset that had never been added. Measured on the rail itself, at
+     1280px: this grip rendered at x 1078–1084 while the aside's border box
+     started at 1084 — the whole 6px strip sat OUTSIDE the rail, over the
+     centre pane, which is also what the `.resize-handle` base rule forbids
+     in as many words. `left: 0` puts it at 1085–1091: inside the aside,
+     flush against the border it exists to grip, and symmetric with
+     `.resize-handle-left`'s `right: 0` on the other sidebar. */
   left: 0;
 }
 
@@ -1569,7 +1845,7 @@ html.resize-dragging * {
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  padding-top: env(safe-area-inset-top);
+  padding-top: var(--safe-area-inset-top);
 }
 
 .error-banner {
@@ -2138,7 +2414,13 @@ html.resize-dragging * {
    footer). */
 .rail-actions {
   position: relative;
-  padding: 0.5rem;
+  /* #1737 — horizontal padding GONE, to `.shell-members`; see the note there.
+     Nothing inside moves: `.rail-action` is `width: 100%` of this box and
+     `.rail-actions-menu` is abspos at `left/right: 0` against it, so both
+     spanned rail-minus-1rem before and span rail-minus-1rem now — the aside's
+     padding replaces this one exactly. The `border-top` shortens with the
+     band's, deliberately and for the same reason. */
+  padding: 0.5rem 0;
   margin-top: auto;
   border-top: 1px solid var(--border);
   background: var(--bg-alt);
@@ -2321,16 +2603,83 @@ html.resize-dragging * {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.5rem;
+  /* #1737 — horizontal padding GONE, to `.shell-members`. This band's border
+     box is now inset with every other rail surface instead of bleeding to the
+     edges while the launcher below it sat half a rem in.
+     WHAT THAT COSTS, accepted knowingly: the `border-top` stops reaching the
+     rail edges and becomes this card's own rule rather than a full-width
+     separator between the members pane and the radio chrome. The alternative
+     the issue offers — move the separator onto something that still spans the
+     rail — would re-introduce the single full-bleed line the report is about.
+     `.rail-actions` carries the identical `border-top` and shortens with it,
+     so the two rules stay the same length as each other, which is the point. */
+  padding: 0.4rem 0;
   border-top: 1px solid var(--border);
   background: var(--bg-alt);
 }
 
+/* #1737 — the band's identity half, and the door back to a hidden transport
+   (#1697). A <button> because it IS one: the ⏹ beside it is a button too, and
+   nesting them is invalid HTML, so the control is the identity rather than
+   the whole row — which also makes "stop is not restore-then-stop" true by
+   construction instead of by a `stopPropagation` ordering rule.
+   `flex: 1` is what makes it the whole band MINUS the ⏹ rather than just the
+   text it wraps, so the ⏹ also stops drifting left behind a short station
+   title; `min-width: 0` hands the title the ellipsis budget that used to sit
+   on `.rail-radio-now-text` one level down. The rest is the plain button
+   reset, the `.members-pane li .member-name` idiom. */
+.rail-radio-now-restore {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* #1828 — the one horizontal inset in this band, and it is OPTICAL.
+   The report is that this logo reads as further left than the nick rows above
+   it. Measured, nothing is misaligned: `.shell-members` puts both left edges on
+   the same `--rail-inset` (7px at this app's 14px root, #1737 for the band and
+   #1802 for the rows). What differs is what sits on that edge. The logo is an
+   image whose pixels start at the box edge; a nick is monospace text whose
+   glyphs carry a left side bearing — measured off the two fonts `--font-mono`
+   actually resolves to on macOS, the median lowercase bearing at a 14px em is
+   1.36px in SF Mono and 1.30px in Menlo, rising to 2.02px and 2.47px for the
+   widest letters. So the glyph ink starts about 1.3px inside a line the image
+   ink sits ON, and a solid mass flush to an edge its neighbour only approaches
+   reads as further out. 0.15rem is 2.1px: between that median and that maximum,
+   which puts the logo's ink just INSIDE the typical nick's rather than level
+   with it — the right direction, because a filled block still reads heavier
+   than sparse strokes at the same x.
+
+   WHY PADDING AND NOT MARGIN, which is the whole shape of this fix. The logo
+   and the title are consecutive flex items, so the 2.1px comes out of one of
+   them and there is no third option in the box model: a margin takes it from
+   the ROW and carries the title and the track line right along with the logo,
+   which the issue forbids; a padding takes it from this box's own content and
+   moves nothing else. Priced before choosing, and the price is real: with the
+   global `border-box`, the content box goes 28px to 25.9px wide against an
+   unchanged 28px height, so `object-fit: cover` starts cropping about 1.05px
+   off each side of artwork that is square in every station file today. Cover
+   crops, never distorts, and that is the policy this rule already declared.
+
+   The picker's `.rail-radio-station-logo` is NOT the same case and is not
+   touched: it sits in a row with its own `padding: 0.25rem 0.375rem`, so its
+   pixels never reach a shared edge. */
 .rail-radio-now-logo {
   flex: none;
   width: 2rem;
   height: 2rem;
   object-fit: cover;
+  padding-inline-start: 0.15rem;
 }
 
 /* `min-width: 0` is what lets the title ellipsise instead of forcing the row
@@ -2352,13 +2701,34 @@ html.resize-dragging * {
   color: var(--fg);
 }
 
+/* #1698 — `.rail-radio-now-track` shares the genres' slot because it REPLACES
+   them: same second line, same clipping, so the chrome's height is the same
+   whether or not the feed has answered. #500's vertical budget is why it is a
+   swap and not a third line. */
 .rail-radio-now-genres,
+.rail-radio-now-track,
+.rail-radio-now-error,
 .rail-radio-station-genres {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.8em;
   color: var(--muted);
+}
+
+/* One step brighter than the genres it stands in for: a genre tag is static
+   metadata, the track is the live fact this row exists to carry. */
+.rail-radio-now-track {
+  color: var(--fg-dim, var(--fg));
+}
+
+/* #1744 — the third tenant of that one line, and the only one that is bad
+   news. It shares the clipping rule above for #500's reason (the chrome's
+   height must not depend on what the second line says) and takes the same
+   `--error` the docked bar's notice takes, so one failure reads as one thing
+   across both surfaces. */
+.rail-radio-now-error {
+  color: var(--error, #e06c75);
 }
 
 /* #1697 — the only delta left. Everything this rule used to declare
@@ -2411,7 +2781,22 @@ html.resize-dragging * {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  padding: 0.5rem;
+  /* #1737 — horizontal padding GONE, and the reason it gave was WRONG.
+     #1802 measured it: the panel above is abspos at `inset: 0` against
+     `.shell-members`, and that resolves against the padding box's OUTER
+     boundary — the inner edge of the border — so the panel is FULL-BLEED, not
+     "already inset by `--rail-inset`". The long note on `.shell-members` says
+     the same thing and was already in the file when #1737 wrote this.
+
+     What follows is that these station rows sit at 0, not at 0.5rem like every
+     other rail surface. LEFT AS IS, deliberately and knowingly: this panel is
+     an OVERLAY over the whole rail with its own `border-left` and a `.topic-
+     bar` head that spans it edge to edge on purpose, not one of the surfaces
+     the rail insets, and #1802's ruling enumerates the four that are. Moving
+     it would move a surface nobody reported — #1737's own lesson. Restoring
+     0.5rem here is a one-line change if that is ever what is wanted; what is
+     fixed here is the claim, which said the opposite of the measurement. */
+  padding: 0.5rem 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -2472,11 +2857,59 @@ html.resize-dragging * {
   object-fit: cover;
 }
 
+/* #1836 — `flex: 1` is new and it is what gives the sub-line below something
+   to distribute. Without it this box is sized by its content, so the format
+   token would sit wherever the longest title happened to end and the column
+   would ragged from row to row. Nothing else moves: the row is already
+   `width: 100%` with `text-align: start`, so a wider box only pushes the
+   title's ellipsis further out, which is the direction anyone would want. */
 .rail-radio-station-text {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
   gap: 0.1rem;
+}
+
+/* #1836 — the genres and the declared format share ONE line.
+   #500's vertical budget is why: a third line charges its cost on every row of
+   a 22-row list, and the format is two short tokens. `baseline` rather than
+   `center` so the smaller text sits on the genres' line rather than floating
+   in the middle of it. */
+.rail-radio-station-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+/* The genres take the slack and the ellipsis; the format keeps its width. A
+   long genre list must clip rather than push the codec off the row — the
+   format is the fact this line was widened for. */
+.rail-radio-station-genres {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Muted like the genres it sits beside: this is the COST, quiet until you look
+   for it. */
+.rail-radio-station-format {
+  flex: none;
+  white-space: nowrap;
+  font-size: 0.8em;
+  color: var(--muted);
+}
+
+/* #1836 — the `[hi-fi]` badge (vjt's ruling). Accent, one step out of the
+   muted row, because it is the one token on this line the eye should catch
+   while scrolling — and it is bracketed TEXT rather than a pill, so it still
+   reads as a badge with the stylesheet off, which a background colour would
+   not. Colour is never the only signal: the brackets carry it. */
+.rail-radio-station-hifi {
+  flex: none;
+  white-space: nowrap;
+  font-size: 0.8em;
+  color: var(--accent);
 }
 
 /* The tuned row, marked the same way the presence toggle marks its active
@@ -2891,6 +3324,42 @@ html.resize-dragging * {
   margin: var(--pane-chrome-inset-block) var(--pane-chrome-inset-inline) 0 0;
 }
 
+/* #1766 — the LEADING ☰ (window list), mounted in this same zero-height box
+   only while the mobile window bar is off. It floats over the pane's top-LEFT
+   corner for the same zero vertical pixels the rail opener costs on the right,
+   which is what keeps this short of a new band — #985 deleted the last one at
+   `--chrome-tap-min + 1rem + 1px` on every mobile window, and #985's argument
+   has not expired.
+
+   `margin-right: auto` and NOT `justify-content: space-between` on the parent,
+   which is what the issue proposed. Measured: this child is CONDITIONAL, and
+   `space-between` with a SINGLE item resolves to flex-start — so on every
+   window where the bar is on (the default, i.e. everyone) it would move the
+   EXISTING rail opener from the right corner to the left. The auto margin
+   absorbs the free space before `justify-content` is consulted, so the
+   one-child case stays byte-identical to today's.
+
+   The other three sides mirror the opener's, mirrored: same block inset, same
+   inline inset on the near edge, bottom collapsed so the float stays out of
+   the flow it overflows (#1039's contract, read as a 4-value shorthand).
+   `background: var(--bg)` for the same reason it carries one — floating puts
+   the glyph over arbitrary scrollback text and over a themed background image.
+
+   Selector: `.shell-chrome .topic-bar-windows-opener`. This class is the
+   left door's OWN, and the first cut of #1766 got that wrong: it reused
+   `.topic-bar-hamburger`, reasoning that the trailing opener here wears
+   `.shell-chrome-rail-opener` and so could not collide. True in THIS host and
+   false in the other one — the channel band's trailing control IS a
+   `.topic-bar-hamburger`, and the e2e fixture that reaches the rail resolves
+   that class with `.first()` (#1073). Measured on the integration run: the
+   fixture opened the window sidebar, the members rail never appeared, and the
+   retry was occluded by the sidebar it had just opened. A selector comment
+   that reasons about one host is not a non-collision proof. */
+.shell-chrome .topic-bar-windows-opener {
+  background: var(--bg);
+  margin: var(--pane-chrome-inset-block) auto 0 var(--pane-chrome-inset-inline);
+}
+
 .shell-chrome-btn {
   background: transparent;
   color: var(--muted);
@@ -2927,6 +3396,163 @@ html.resize-dragging * {
 .shell-chrome-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* #1766 — the ☰ is DRAWN, not typed.
+   U+2630 is three thin strokes centred on the em box, so the CHARACTER is thin
+   while the box is not narrow: next to `⚙` and `@` the glyph reads small even
+   at a 48px tap target. vjt asked for a 40px box; refused with the measure and
+   he confirmed ("si confermo") — `--chrome-tap-min` is ABSOLUTE px on purpose
+   (the root is 14px, so 40px in `rem` lands under the HIG floor, which is
+   #305's "defect 2"). The box was never the problem; the strokes were. vjt on
+   the remedy: "va bene css" — three bars, no SVG, no codepoint swap, no icon
+   set. With the bars drawn, perceived size is set to the pixel, which is why
+   the 40px request has no motive left.
+
+   NOT a bump of `--chrome-icon-size`: that token is #305's "desired parity",
+   and raising it grows the cog, mentions, archive, the presence toggle and
+   this ☰ together — not what was asked. The bars are still SIZED off it, so a
+   text-size change moves them exactly as it moved the glyph.
+
+   Placed AFTER `.shell-chrome-btn` AND written `button.…` — belt and braces
+   against the trap #305 already documented for `display`. `.shell-chrome-btn`
+   declares `font-size: var(--chrome-icon-size)` below its own selector's
+   (0,1,0); a bare `.topic-bar-hamburger` ties and LOSES on source order, and
+   the character would come back at full size underneath the bars.
+
+   NOT `.topic-bar .topic-bar-hamburger`: good specificity, but it matches only
+   inside the band, and since #1766 the same button also floats in
+   `.shell-chrome` on non-channel windows — it would render there as the thin
+   character next to a drawn twin. `.shell-chrome-rail-opener` is listed for
+   the same reason from the other side: it is the SAME door on its other host.
+
+   #1801 removed `.topic-bar-windows-opener` from this list and from the
+   `::before` below. #1766 had put it here because with the bottom bar off the
+   two openers share one 48px band "and must look identical" — true while both
+   were "a menu", and the defect once the left one named a specific list: two
+   doors drawn with the same three bars, one at each end of one band. It is a
+   `#` now; see its own rule further down. */
+button.topic-bar-hamburger,
+.shell-chrome .shell-chrome-rail-opener {
+  /* Suppress the U+2630 text node. It stays in the DOM — it is what renders
+     if this sheet never loads, and ~20 specs locate these buttons — but it
+     must not paint underneath the bars. The accessible name comes from
+     `aria-label` either way, so zeroing the glyph costs the screen reader
+     nothing. */
+  font-size: 0;
+}
+
+/* The bars fill the icon box EXACTLY: three 2px rules whose outermost edges
+   are `--chrome-icon-size` apart, in a box `--chrome-icon-size` wide. So the
+   painted ☰ is a square of the token, and the token stays the one knob.
+
+   The `/3` this replaces was a guess, and measuring it is what caught the
+   regression. On webkit-iphone-15 (root 14px, so the token resolves to
+   19.59px) the numbers are:
+
+       U+2630 as TEXT at 19.59px   ink 19.59 W × 17.00 H   (canvas
+                                   actualBoundingBox, same font stack)
+       bars at `/3`                ink 19.59 W × 15.06 H   ← −1.94px, −11.4%
+       bars at `(token - 2px)/2`   ink 19.59 W × 19.59 H
+
+   #305's floor is 18, and the CHARACTER never met it either — its em box was
+   19.59 but its ink was 17.00, which is why an oracle reading `font-size` was
+   measuring the box and not the glyph. The bars are the first shape here that
+   actually clears 18 in both axes. */
+button.topic-bar-hamburger::before,
+.shell-chrome .shell-chrome-rail-opener::before {
+  content: "";
+  width: var(--chrome-icon-size);
+  height: 2px;
+  /* `currentColor`, never a literal: `.shell-chrome-btn:hover` /
+     `:focus-visible` lift the button's colour to var(--fg), and a hardcoded
+     paint would leave the bars dead under the one hover the rest of the chrome
+     answers. */
+  background: currentColor;
+  box-shadow:
+    0 calc(-1 * (var(--chrome-icon-size) - 2px) / 2) 0 currentColor,
+    0 calc((var(--chrome-icon-size) - 2px) / 2) 0 currentColor;
+}
+
+/* #1801 — the LEFT door is a `#`, and it is a CHARACTER.
+
+   With the bottom bar off the mobile top band carried two openers drawn
+   identically — the same three bars, one at each end — and they are two
+   different things: this one opens the window/channel list, the trailing ☰
+   opens the rail. vjt ruled the right one STAYS a hamburger ("fa anche molto
+   altro rispetto alla lista membri" — it is a catch-all and the generic glyph
+   is the honest name for that), and this one becomes `#`: "il # non emoji / il
+   # carattere / ascii / roba anni '70". An emoji was floated and dropped with
+   the trade-off stated in channel — a platform-painted glyph ignores
+   `currentColor`, so it would sit dead under the `:hover` / `:focus-visible`
+   lift the rest of the chrome answers, and it renders differently on iOS and
+   Android. A text `#` keeps both for free, by being text.
+
+   ## Why the size is a division and not plain `var(--chrome-icon-size)`
+
+   "Ma che sia stessa dimensione del glifo dell'hamburger" is a measurement,
+   not a guess. The bars above fill the token EXACTLY — a 19.59px square at
+   root 14px. A character does not: its INK is smaller than its em box, which
+   is precisely how #305's floor came to be missed by an oracle reading
+   `font-size`. Ink height in em, read off the font files, calibrated against
+   the painted pixels:
+
+       Liberation Mono (the e2e runner)    #  0.5415 W x 0.6587 H
+       SF Mono (`ui-monospace` on iOS)     #  0.5366 W x 0.7046 H
+       Menlo (the stack's macOS fallback)  #  0.6060 W x 0.7153 H
+
+   So `font-size: var(--chrome-icon-size)` paints a `#` a third shorter than
+   the bars beside it — exactly what was asked not to happen — and the ratio
+   that corrects it is a property of the FONT, which differs per platform.
+
+   Hence the pair, which cancels. `font-size-adjust: cap-height N` scales the
+   used size so that the resolved face's cap height is N x the SPECIFIED size,
+   whatever face that turns out to be; and `#` is drawn TO cap height (1.000 of
+   it in Liberation Mono AND in SF Mono, 0.981 in Menlo). Specifying `token /
+   N` and adjusting to `N` therefore states "the `#`'s ink is
+   `--chrome-icon-size` tall" on any font — the same square the bars fill.
+   Verified on the e2e image's webkit and chromium, painted pixels, scanned 4px
+   inside the box so the 1px border is out of frame:
+
+       `#`   ink 16.33 W x 19.67 H        bars  ink 19.33 W x 19.33 H
+
+   N = 0.68 is the midpoint of the two faces that matter (0.659 / 0.705) and is
+   load-bearing ONLY where `font-size-adjust` is not honoured: there the
+   specified size stands alone and still lands within 4% of parity on all three
+   faces, clear of #305's 18px floor. Both engines in the e2e image honour it.
+
+   The WIDTH does not match, and cannot. `#` is a narrower shape than a square,
+   so at equal height it paints 16.33 against the bars' 19.33. Matching the
+   width instead would make the `#` 21.9px TALL — 12% taller than the twin it
+   was told to match. Height is the axis a reader compares glyphs on, and the
+   axis #305's floor was missed in.
+
+   One knob stays one knob: the size is DERIVED from `--chrome-icon-size`, so a
+   text-size change still moves both glyphs together. `button.` and placed
+   after `.shell-chrome-btn` for the belt-and-braces reason the rule above
+   states — that base declares `font-size: var(--chrome-icon-size)`, so a bare
+   class ties at (0,1,0), loses on source order, and the `#` falls back to the
+   un-derived size with nothing looking wrong. */
+button.topic-bar-windows-opener {
+  font-size: calc(var(--chrome-icon-size) / 0.68);
+  font-size-adjust: cap-height 0.68;
+}
+
+/* #1801 ruling 4 — "serve un pelo di margin-right sull'hamburger di sx, o in
+   alternativa di spazio nei contenitori". `.topic-bar`'s 0.5rem gap plus the
+   button's 1px border left ~7px between a boxed control and the channel name.
+   One more gap doubles that to ~14px: the band's own value re-used, not a
+   fresh number.
+
+   LEADING side only, and scoped to the band. Widening `.topic-bar`'s `gap`
+   would take the trailing side with it, and #1039 pinned that side to
+   `--pane-chrome-inset-*` precisely so the ☰'s two mobile hosts cannot drift
+   apart again. Scoping also keeps this longhand from competing at all with the
+   float host's `margin` shorthand, whose `margin-right: auto` is what holds a
+   lone trailing opener in its corner (#1766); relying on specificity to settle
+   that would be a race nobody can see. */
+.topic-bar .topic-bar-windows-opener {
+  margin-inline-end: 0.5rem;
 }
 
 /* Scrollback (existing rules — minor additions for mention highlight) */
@@ -3244,7 +3870,12 @@ html.resize-dragging * {
      This CSS `user-select: text` is deliberately kept INDEPENDENT of that
      (keyboard policy ≠ selection policy — #250 must stay text-selectable).
      Range/Playwright cannot prove the Android behavior (see issue250 spec
-     header); device-verified post-ship. */
+     header); device-verified post-ship.
+     #1869 SUPERSEDES the touch half of this: on a coarse pointer the scrollback
+     no longer offers a native drag-selection for the token to ride inside, so
+     the token is set back to `none` there and re-enabled under `is-selecting`
+     with the rest of the row. This declaration still owns the DESKTOP case
+     (`pointer: fine`), which is untouched. */
   -webkit-user-select: text;
   user-select: text;
 }
@@ -3751,10 +4382,39 @@ html.resize-dragging * {
 
 /* ComposeBox */
 
-/* GH #115 — docked audio mini-player. In-flow slim transport bar
-   between scrollback and the compose box; non-modal so scrollback stays
-   scrollable + readable while audio plays. Sits above compose (and above
-   compose's own safe-area handling), so it needs no bottom inset. */
+/* GH #115 — docked audio mini-player. In-flow slim transport bar, non-modal
+   so scrollback stays scrollable + readable while audio plays.
+   #1701 — it is now the LAST row of the compose column rather than the row
+   above it: below the compose box, and on mobile above `.bottom-bar` (a
+   sibling of `.shell-main`, so still further down). `border-top` is unchanged
+   and still the correct edge — the neighbour it separates from is simply the
+   compose box now instead of the scrollback pane.
+   🔴 It still declares NO bottom inset, and the reason changed with the
+   position: the inset is owned by the SHELL, not by whatever happens to be
+   last. Base `.shell` carries `env(safe-area-inset-bottom)`; `.shell-mobile`
+   deliberately zeroes it (#1127, flush bottom edge), and that comment's
+   warning now applies to this rule too — with the keyboard up iOS reports
+   `env(safe-area-inset-bottom)` against the DEVICE, not the shrunken visual
+   viewport, so an inset added HERE double-counts against `--viewport-height`
+   and reopens the ~34px gap above the keyboard. */
+
+/* #1896 — the two boxes that now sit between the compose column and the bar:
+   the dock Shell renders in place of the old mount, and the container Solid's
+   <Portal> creates inside it. `display: contents` removes BOTH from layout, so
+   `.audio-mini-player` stays a direct FLEX ITEM of `.drop-upload-zone` — which
+   is what #1701's ruling ("inside the compose box's own flex column, after it")
+   is about. Without this the bar would be a block inside a block inside the
+   column: identical today, because the wrappers are full-width and auto-height
+   and the column declares no `gap`, and silently wrong the first time either of
+   those changes. Taking the boxes out of layout removes the class of bug rather
+   than the instance of it.
+   Both selectors are needed and neither is redundant: the dock is ours and the
+   portal container is Solid's, classed through the <Portal ref>. */
+.audio-dock,
+.audio-dock-portal {
+  display: contents;
+}
+
 .audio-mini-player {
   display: flex;
   align-items: center;
@@ -3815,6 +4475,45 @@ html.resize-dragging * {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--fg);
+}
+
+/* #1698 — the track, beside the station name. A SECOND growable span on a row
+   that had one, so the split is stated rather than left to chance: grow 2 vs
+   the label's 1, because the station is short and also on the rail while the
+   track is long and lives only here. Both keep shrink 1 and `min-width: 0`, so
+   neither can widen the row — the transport controls are `flex: none` above,
+   and on a phone this row IS the player: a ✕ pushed past the right edge is a
+   ✕ that cannot be tapped. That was #1697's finding one bar over, and it is no
+   longer one bar over: #1697 shipped the hide chevron INTO this row, so the
+   fixed cost the two spans divide what is left of is 4 × 2.5rem, not 3. The
+   label keeps grow 1 rather than dropping to 0 so a station whose feed has not
+   answered still fills the row instead of leaving a gap trailing the ✕.
+   Pinned by `audioMiniPlayerLayout.test.ts` against the STYLESHEET, because
+   jsdom applies no CSS and a DOM assertion cannot see a cascade override. */
+.audio-mini-player-track {
+  flex: 2 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim, var(--fg));
+}
+
+/* #1744 — why the source will not play, in the slot the track vacates. It
+   inherits the track's contract exactly (grow 2, shrink 1, `min-width: 0`,
+   clip) rather than declaring a new one: it stands in the same place, on the
+   same row, and a span that could widen the row would push ✕ off a phone —
+   the failure this file's #1698 note and `audioMiniPlayerLayout.test.ts` both
+   exist to prevent. Pinned there alongside its two neighbours.
+   `--error` with the same fallback every other error text in this sheet uses,
+   so a theme that recolours failures recolours this one too. */
+.audio-mini-player-error {
+  flex: 2 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--error, #e06c75);
 }
 
 /* #682 — the "this has no end" badge that stands in for the seek slider.
@@ -4149,7 +4848,8 @@ html.resize-dragging * {
    one shrinks to the padding box and lands between the safe areas. */
 .modal-backdrop-viewport {
   height: var(--viewport-height, 100dvh);
-  padding: max(1rem, env(safe-area-inset-top)) 1rem max(1.5rem, env(safe-area-inset-bottom)) 1rem;
+  padding: max(1rem, var(--safe-area-inset-top)) 1rem max(1.5rem, var(--safe-area-inset-bottom))
+    1rem;
 }
 
 /* Privacy modal — full-viewport backdrop + centred dialog. */
@@ -4165,7 +4865,7 @@ html.resize-dragging * {
      non-notched devices. Uniform 1.5rem floor with `.settings-drawer`
      / `.archive-modal`. Top/horizontal arms preserve the original
      1.5rem padding shape. */
-  padding: 1.5rem 1.5rem max(1.5rem, env(safe-area-inset-bottom));
+  padding: 1.5rem 1.5rem max(1.5rem, var(--safe-area-inset-bottom));
   max-width: 28rem;
   /* UX-5 bucket BV (2026-05-20) — defensive keyboard-react cap.
      Modal centers inside fixed backdrop (~:1173) so it CAN grow past
@@ -4228,7 +4928,12 @@ html.resize-dragging * {
 /* MembersPane */
 
 .members-pane {
-  padding: 0.5rem 0;
+  /* #1802 — `padding-block`, not the `0.5rem 0` shorthand this shipped with.
+     The horizontal half is the container's to give now (the pair below), and
+     a shorthand here would keep re-declaring it as zero at a specificity the
+     container rule merely happens to beat — a silent fight for the next
+     reader to lose rather than a rule they can read. */
+  padding-block: 0.5rem;
   /* #500 — the members list owns the scroll on BOTH form factors. `flex: 1 1
      auto` + `min-height: 0` lets it take the remaining rail height and scroll
      internally (min-height:0 defeats the flex-item min-content floor that would
@@ -4242,23 +4947,65 @@ html.resize-dragging * {
   overflow-y: auto;
 }
 
+/* #1802 — THE CONTAINER'S PAIR FOR ITS ONE FULL-WIDTH CHILD, and the whole
+   point of the issue: the logic that lets the members scrollbar keep running
+   on the rail's own edge belongs to the rail, not to the pane. Both selectors
+   are rooted at `.shell-members`, so this reads as one container decision even
+   though it sits next to the child it acts on — it has to, or the (0,2,0) pair
+   would precede the (0,1,0) rule above and trip `noDescendingSpecificity`.
+
+   #1737 put the first of these on `.members-pane` itself, where it read as a
+   child opting OUT of a rule it did not like. Same pixels, different owner:
+   nothing outside the rail can now cancel the rail's inset, and the pane's own
+   rule declares nothing horizontal at all. The `, 0px` fallback #1737 needed
+   goes with the move — the selector guarantees the variable is in scope.
+
+   The second rule is where the inset the pane just gave up comes back, one
+   level down, still from the container. `.members-pane`'s children are `h3`,
+   `ul` and the `<p class="muted">` placeholders (the context menu portals to
+   <body>, so it is not one of them), and each of those is a CONTENT row with
+   no surface of its own — transparent, unbordered, hover is an underline — so
+   insetting their content rather than their border box loses nothing here,
+   which is exactly what it would have lost on `.rail-actions` or the
+   server-info card. Measured: nick rows and the members heading move from
+   1rem to 0.5rem, landing on the same 7px as the radio band and the actions
+   launcher. That 2:1 was the reported defect. */
+.shell-members > .members-pane {
+  margin-inline: calc(-1 * var(--rail-inset));
+}
+
+.shell-members > .members-pane > * {
+  padding-inline: var(--rail-inset);
+}
+
 .members-pane h3 {
   font-size: 0.85rem;
   font-weight: normal;
   color: var(--muted);
   margin: 0;
-  padding: 0.25rem 1rem;
+  /* #1802 — block only; the inline half comes from the container pair above.
+     Was `0.25rem 1rem`, and that 1rem was the second half of the defect: the
+     pane cancelled the rail's 0.5rem and its rows then re-declared twice it. */
+  padding-block: 0.25rem;
   text-transform: uppercase;
 }
 
 .members-pane ul {
   list-style: none;
   margin: 0;
+  /* KEPT as a shorthand, unlike the `h3` and `li` beside it: this zero is the
+     user-agent's `padding-inline-start: 40px` list indent being killed, not an
+     inset being declared, and it has to hold wherever the pane is mounted. The
+     container pair above wins over it inside the rail at (0,2,0) and adds the
+     0.5rem there. This list IS the rows' inset carrier — `li` is a GRANDCHILD
+     of the pane and so is not matched by that pair; it takes its position from
+     this box (#1802). */
   padding: 0;
 }
 
 .members-pane li {
-  padding: 0.1rem 1rem;
+  /* #1802 — block only; see the `h3` note. Was `0.1rem 1rem`. */
+  padding-block: 0.1rem;
   font-family: var(--font-mono);
   font-size: var(--font-size);
   white-space: nowrap;
@@ -4389,7 +5136,8 @@ html.resize-dragging * {
      cramped against Safari's chrome / gesture indicator strip. 1.5rem
      (24px) gives mobile-thumb-reach breathing room while still
      yielding to the larger notched-device env value via max(). */
-  padding: max(1rem, env(safe-area-inset-top)) 1rem max(1.5rem, env(safe-area-inset-bottom)) 1rem;
+  padding: max(1rem, var(--safe-area-inset-top)) 1rem max(1.5rem, var(--safe-area-inset-bottom))
+    1rem;
   z-index: 100;
   transform: translateX(100%);
   transition: transform 200ms ease-out;
@@ -4719,7 +5467,7 @@ html.resize-dragging * {
   /* #987 — the scrim has to be visible AROUND the dialog, not just behind it;
      `.confirm-modal` carries the same margin for the same reason. */
   margin: 1rem;
-  padding: max(0.75rem, env(safe-area-inset-top)) 1rem max(1.5rem, env(safe-area-inset-bottom));
+  padding: max(0.75rem, var(--safe-area-inset-top)) 1rem max(1.5rem, var(--safe-area-inset-bottom));
   font-family: var(--font-mono);
   font-size: var(--font-size);
   display: flex;
@@ -4867,6 +5615,94 @@ html.resize-dragging * {
   padding: 0.5rem 1rem;
   font-family: var(--font-mono);
   cursor: pointer;
+}
+
+/* 1883 — the file list on an upload confirm. Capped and scrollable: a gallery
+   multi-select can be a dozen files, and a dialog that grows past the viewport
+   pushes its own Cancel button off screen — on a phone that turns the guard
+   into a trap. `overscroll-behavior` keeps a flick inside the list from
+   scrolling the pane underneath. */
+.confirm-modal-attachments {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.confirm-modal-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  padding: 0.375rem;
+  min-width: 0;
+}
+
+/* Fixed box for BOTH the thumbnail and its placeholder, so a mixed batch
+   (photo + pdf) keeps every row the same height and the filenames line up. */
+.confirm-modal-attachment-thumb,
+.confirm-modal-attachment-icon {
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-modal-attachment-thumb {
+  /* `cover` and not `contain`: a preview is for recognising the picture, and
+     a letterboxed 2.5rem thumbnail of a portrait photo is a sliver. */
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+
+.confirm-modal-attachment-icon {
+  color: var(--muted);
+}
+
+.confirm-modal-attachment-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* Ellipsis rather than wrap: a camera filename is long and uninformative in
+   the middle, and a wrapped one would push the remove button around. */
+.confirm-modal-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirm-modal-attachment-detail {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* Bare glyph, not a bordered button: the row is not an action, the × is.
+   Sized to the 2.25rem touch floor the other icon buttons use. */
+.confirm-modal-attachment-remove {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  line-height: 1;
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  cursor: pointer;
+}
+
+.confirm-modal-attachment-remove:hover {
+  color: var(--fg);
 }
 
 /* M-cluster M-7 — admin pane. Replaces channel content in the main
@@ -7484,6 +8320,17 @@ html.resize-dragging * {
   padding: 0;
   margin: 0;
   cursor: default;
+  /* #1772 — the backdrop reads like a shield and, until this issue, only ever
+     intercepted CLICKS. A DRAG on it fell through to UIKit as a page pan: the
+     shell slid while the fixed-position menu stayed put, so the content came
+     out from under its own menu. `none` is the honest declaration for a
+     full-viewport shield — there is nothing beneath it that a gesture is meant
+     to reach, and `auto` (the value it had by omission) is precisely the
+     iOS chrome-drag hole #1067 records for any untouched touchable surface.
+     Defense-in-depth only: CSS alone has never stopped UIKit here (see
+     `lib/overlayScrollLock.ts`, v1-v3), and the menu now arms the JS touch
+     lock, which is the half that actually works. */
+  touch-action: none;
 }
 
 .context-menu {
@@ -7520,6 +8367,28 @@ html.resize-dragging * {
     )
   );
   overflow-y: auto;
+  /* #1772 — the scroller carve-out, now that the menu arms the touch lock and
+     so puts the `html.overlay-open body` none-blanket over its own parent. The
+     menu PORTALS to <body>, which is why it escaped `.shell-mobile`'s
+     permanent blanket and needed no carve-out before: it was the one overlay
+     scroller living outside it. The `max-height` + `overflow-y: auto` above
+     make a long item list genuinely scrollable, and without this that scroll
+     would be refused the moment the lock it now takes is armed — fixing the
+     pan by removing the scroll. Same shape as `.rail-actions-menu` (#913).
+     No braces in this comment on purpose: `ruleBody` in the test helper
+     captures up to the first closing brace, so a comment that spells a CSS
+     rule out literally truncates the body its own guard reads. */
+  touch-action: pan-y;
+}
+
+/* #1772 — descendant half of the carve-out above, for the reason #913 spells
+   out at `.rail-actions-menu *`: touch-action does NOT inherit, so every item
+   row sits at the default `auto` under a `none` ancestor, and iOS elects the
+   gesture consumer from the hit-test target's own value. The rows ARE the
+   hit-test target across the whole menu, so the scroller-level declaration
+   alone is the version that ships and does not work. */
+.context-menu * {
+  touch-action: pan-y;
 }
 
 /* #949 — the ruler the placement math measures (ContextMenu.tsx). Fixed, so
@@ -7533,11 +8402,13 @@ html.resize-dragging * {
    ruler to `auto` on every side and hand back a zero-sized rect: a safe box of
    [0,0] on both axes, i.e. every menu pinned to the corner. With the fallbacks
    an engine that knows no insets reports the full viewport, which is exactly
-   the pre-#949 behaviour. */
+   the pre-#949 behaviour. #1751 moved the fallbacks INTO the tokens (see the
+   :root block); they still cover this shorthand, and this rule no longer
+   spells them out four times. */
 .context-menu-safe-area {
   position: fixed;
-  inset: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
-    env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  inset: var(--safe-area-inset-top) var(--safe-area-inset-right) var(--safe-area-inset-bottom)
+    var(--safe-area-inset-left);
   pointer-events: none;
 }
 
@@ -7625,7 +8496,7 @@ html.resize-dragging * {
        clear-ish but was non-interactive. box-sizing: border-box
        (global, line 67) means the inset is consumed FROM the height,
        not added to it. */
-    padding-top: env(safe-area-inset-top);
+    padding-top: var(--safe-area-inset-top);
     /* #1127 — the bottom edge is FLUSH: no home-indicator inset, so the
        whole mobile shell (the `.bottom-bar` tab strip included) reaches
        the physical bottom and the reclaimed band goes to content.
@@ -7676,8 +8547,8 @@ html.resize-dragging * {
        iPhones exceed 768px and get the desktop shell) but non-zero in the
        sub-768 landscape edge (small notched devices): correct clearance
        for the camera housing / rounded corners, not a regression. */
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
+    padding-left: var(--safe-area-inset-left);
+    padding-right: var(--safe-area-inset-right);
   }
 
   /* Legacy fallback for browsers that don't grok `dvh` (Safari < 15.4).
@@ -7738,21 +8609,32 @@ html.resize-dragging * {
      flex column; only the fixed-drawer geometry is bespoke. */
   .shell-mobile .shell-sidebar {
     position: fixed;
-    top: 0;
+    /* #1751 — clearance on `top`, not `padding-top`, for the reason spelled out
+       at `.shell-members` below: padding does not move a container's absolutely
+       positioned descendants, so a top-pinned fixed drawer that clears the
+       notch with padding leaves any abspos child under it.
+
+       This drawer has NO such child today, so the change moves nothing and
+       fixes nothing here — it is made anyway because the comment above says
+       this rule is the MIRROR of `.shell-members`, and two drawers answering
+       the same geometry problem two different ways is how the next one gets
+       copied from whichever was nearer. That is the mechanism that put four
+       hand-written copies of the rail inset in this file (#1737). */
+    top: var(--safe-area-inset-top);
     left: 0;
     /* UX-5 bucket BV — iOS lies about 100vh (and dvh/svh) while the on-screen
        keyboard is up; `--viewport-height` tracks `visualViewport.height` via
        lib/viewportHeight.ts and shrinks in lockstep. Same fallback chain as
        `.shell-members`: `100dvh` for the boot window before the JS sets the var
-       and for browsers without VisualViewport. */
-    height: var(--viewport-height, 100dvh);
+       and for browsers without VisualViewport. Less the top inset, which `top`
+       now carries (#1751) — else the drawer overruns the bottom edge. */
+    height: calc(var(--viewport-height, 100dvh) - var(--safe-area-inset-top));
     /* #205 — `position: fixed` puts this OUTSIDE `.shell`'s padding box, so it
        owns its notch / Dynamic-Island and home-indicator clearance. The 1.5rem
        bottom floor mirrors UX-5 BD on the members drawer: env() is 0px on
        non-notched iPhones, which left the last row cramped under the Safari
-       chrome / gesture indicator. */
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+       chrome / gesture indicator. #1751 moved the TOP arm to `top`. */
+    padding-bottom: max(1.5rem, var(--safe-area-inset-bottom));
     width: 80vw;
     max-width: 18rem;
     z-index: 90;
@@ -7782,7 +8664,37 @@ html.resize-dragging * {
   /* Members drawer slide-in from right (unchanged from pre-C6) */
   .shell-members {
     position: fixed;
-    top: 0;
+    /* 🔴 #1751 — THE CLEARANCE IS ON `top`, NOT ON `padding-top`, AND THAT IS
+       THE WHOLE BUG THIS ISSUE WAS FILED FOR. An absolutely positioned child
+       resolves its offsets against this box's PADDING EDGE — the outer edge of
+       the padding, just inside the border — so the rectangle INCLUDES the
+       padding and `top: 0` on such a child lands ABOVE it. Padding on a
+       container does NOT move its abspos descendants. Measured on a 390px
+       viewport with the token stubbed at 59px: this rule's `padding-top` went
+       0px → 59px while `.rail-radio-picker` (`position: absolute; inset: 0`)
+       stayed at y=0 — under the notch, which is exactly the screenshot.
+
+       Moving the clearance onto `top` moves the BORDER BOX, which every child
+       follows, in flow or not. It is pixel-identical for the flow children:
+       they used to start at the inset because the padding pushed them, and now
+       start there because the box does. `height` has to lose the same amount
+       or the drawer overruns the bottom edge it used to reach exactly.
+
+       WHY THE DESKTOP NEVER SHOWED IT: there this aside is a grid ITEM of
+       `.shell`, so `.shell`'s padding moves this box and the picker follows the
+       box. Same inset, different mechanism — which is why the defect is
+       phone-only and why a source-level guard could never have caught it.
+
+       Corroboration, not theory: `.rail-actions-menu` is the rail's other
+       abspos child and #913 had to subtract the inset by hand from its
+       `max-height`. It hit this same physics from the other end and worked
+       around it locally. This rule is the general form of that workaround.
+
+       THE RULE FOR A NEW TOP-PINNED FIXED CONTAINER: put the safe-area
+       clearance on `top` and compensate `height`. Reach for `padding-top` only
+       once you are sure nothing inside is absolutely positioned — and that is
+       a promise about the future, which is why it is not the default here. */
+    top: var(--safe-area-inset-top);
     /* UX-5 bucket BV (2026-05-20) — VisualViewport keyboard-react.
        Pre-BV: `height: 100vh`. On iOS Safari the on-screen keyboard
        overlays the viewport without resizing CSS units (100vh/100dvh/
@@ -7796,7 +8708,11 @@ html.resize-dragging * {
        `100dvh` for the brief boot window before the JS sets the var
        OR browsers without VisualViewport. Mirrors `.shell-mobile`
        (~:2120). */
-    height: var(--viewport-height, 100dvh);
+    /* #1751 — MINUS the top inset, because `top` now carries it
+       (see above). Without this subtraction the drawer starts one inset lower
+       and still asks for a full viewport of height, so it overruns the bottom
+       edge it used to reach exactly. Content area is unchanged either way. */
+    height: calc(var(--viewport-height, 100dvh) - var(--safe-area-inset-top));
     /* #205 — safe-area insets relocated here from the base `.shell-members`
        rule (~:439). The mobile members drawer is `position: fixed` so it
        sits OUTSIDE `.shell`'s container padding box and needs its own
@@ -7806,9 +8722,10 @@ html.resize-dragging * {
        the bottom `.rail-actions` launcher row (#473; was BM's
        `.mobile-panel-actions` footer) hosts buttons that relied on
        env(safe-area-inset-bottom) alone — 0px on non-notched iPhones —
-       leaving the row cramped under Safari chrome / the gesture indicator. */
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+       leaving the row cramped under Safari chrome / the gesture indicator.
+       #1751 moved the TOP arm to `top`; the bottom arm stays a padding
+       because nothing is abspos-anchored to this box's bottom edge. */
+    padding-bottom: max(1.5rem, var(--safe-area-inset-bottom));
     width: 80vw;
     max-width: 18rem;
     z-index: 90;
@@ -7917,7 +8834,7 @@ html.resize-dragging * {
    was obscured by the keyboard. */
 .diag-float {
   position: fixed;
-  top: max(0.5rem, env(safe-area-inset-top));
+  top: max(0.5rem, var(--safe-area-inset-top));
   right: 0.5rem;
   z-index: 99999;
   background: rgba(0, 0, 0, 0.85);
@@ -8249,7 +9166,7 @@ html.resize-dragging * {
      uniformly with `.settings-drawer` (~:1382). Non-notched iOS
      bug class: env(safe-area-inset-bottom) = 0 → 0.75rem left
      modal's bottom row visually cramped under Safari chrome. */
-  padding: max(0.75rem, env(safe-area-inset-top)) 1rem max(1.5rem, env(safe-area-inset-bottom));
+  padding: max(0.75rem, var(--safe-area-inset-top)) 1rem max(1.5rem, var(--safe-area-inset-bottom));
   font-family: var(--font-mono);
   font-size: var(--font-size);
   display: flex;
@@ -9487,7 +10404,7 @@ html.resize-dragging * {
   width: 100%;
   max-width: 32rem;
   max-height: var(--viewport-height, 100dvh);
-  padding: max(0.75rem, env(safe-area-inset-top)) 1rem max(1.5rem, env(safe-area-inset-bottom));
+  padding: max(0.75rem, var(--safe-area-inset-top)) 1rem max(1.5rem, var(--safe-area-inset-bottom));
   font-family: var(--font-mono);
   font-size: var(--font-size);
   display: flex;
@@ -10425,6 +11342,17 @@ html.resize-dragging * {
   flex: 0 0 auto;
 }
 
+/* M3b — small, fixed-size presence icon; deliberately capped so an
+   oddly-shaped fetched image never breaks the header's baseline flex
+   row (see docs/DESIGN_NOTES.md #1280). */
+.whois-card-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
 .whois-card-tag {
   display: inline-block;
   padding: 0 0.3rem;
@@ -10573,7 +11501,12 @@ html.resize-dragging * {
    pushed off-screen on a phone. */
 .rail-server-info {
   flex: 0 0 auto;
-  margin: 0.5rem;
+  /* #1737 — the horizontal half of this margin was the rail inset spelled a
+     fourth way (as MARGIN, where its siblings used padding); it lives on
+     `.shell-members` now. The vertical half is this card's own separation
+     from the pane above and stays. The `padding` below is the card's INTERNAL
+     inset — a different axis, untouched by the move. */
+  margin: 0.5rem 0;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -10721,7 +11654,14 @@ html.resize-dragging * {
   font-weight: normal;
   color: var(--muted);
   margin: 0;
-  padding: 0.25rem 1rem;
+  /* #1802 — block only, the twin of the `.members-pane h3` edit. This slot was
+     the WORST of the three, not the same as the members one: `.rail-query-
+     context` is an ordinary flow child that sits inside the rail's padding, so
+     this heading's own 1rem stacked ON that 0.5rem and the label rendered at
+     1.5rem — measured 21px against the members list's 14px and the band's 7px.
+     Nothing here replaces it: the container's padding already put the parent
+     at 0.5rem, which is where the label now starts. */
+  padding-block: 0.25rem;
   text-transform: uppercase;
   word-break: break-word;
 }
@@ -11187,8 +12127,8 @@ html.resize-dragging * {
    reproducible in jsdom or Playwright). */
 .install-a2hs {
   position: fixed;
-  right: max(0.75rem, env(safe-area-inset-right));
-  bottom: max(0.75rem, env(safe-area-inset-bottom));
+  right: max(0.75rem, var(--safe-area-inset-right));
+  bottom: max(0.75rem, var(--safe-area-inset-bottom));
   z-index: 201;
   display: flex;
   flex-direction: column;
@@ -11329,8 +12269,9 @@ html.resize-dragging * {
   cursor: pointer;
 }
 
-/* Reload is the fallback-of-the-fallback, not the primary action — muted so
-   Retry reads as the thing to try first. */
+/* The restart is the fallback-of-the-fallback, not the primary action — muted
+   so the retry above reads as the thing to try first. Named by ROLE, not by
+   label: the two labels were renamed once already (#1877). */
 .boot-failure-reload {
   border-color: var(--muted);
   color: var(--muted);
@@ -12618,9 +13559,44 @@ button.home-pane-network-title:hover .home-pane-network-slug {
   background: var(--bg-alt);
 }
 
+/* issue 1839 — the take-it-away verbs, grouped so the ✕ keeps the far edge
+   whatever the arm: the header is `space-between`, and a third flat child
+   would have parked "open in browser" in the middle of the text arm only. */
+.media-viewer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
 .media-viewer-open-external {
   color: var(--accent);
   font-size: 0.9rem;
+}
+
+/* Reads as the sibling of the "open in browser" link, because that is what it
+   is: the second way to take the file out of the viewer. A <button> and not an
+   anchor — it performs an action rather than going anywhere. */
+.media-viewer-copy {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+/* What the LAST copy put on the clipboard — a full file, a slice cut at
+   TEXT_VIEW_MAX_BYTES, or the reason the write failed. Its own band between
+   the header and the body: the pane's truncation banner speaks about what is
+   on SCREEN, this one about what left the modal, and the two must not read as
+   one line. Colour comes from the shared .muted utility. */
+.media-viewer-copy-status {
+  flex: none;
+  margin: 0;
+  padding: 0.25rem 1rem 0.5rem;
+  font-size: 0.9rem;
+  border-bottom: 1px solid var(--border);
 }
 
 .media-viewer-close {
@@ -12700,24 +13676,176 @@ button.home-pane-network-title:hover .home-pane-network-slug {
   object-fit: contain;
 }
 
-/* Pinch-zoomable image (#213). `touch-action: none` hands EVERY touch to our
-   element-level JS handlers instead of letting the browser interpret it as a
-   scroll/zoom pan — mandatory for the synthesized pinch (the shell's native
-   pinch is dead via iOS-1's viewport lock; this reclaims the raw touch stream
-   for the modal image only). transform-origin: center matches the geometry in
-   lib/pinchZoom.ts (translate is measured from center). will-change hints the
-   compositor for smooth pinch. The inline `transform` style is written by the
-   component per gesture frame. */
+/* Pinch-zoomable image (#213, #1805).
+
+   `touch-action: pan-x pan-y` and NOT `none`, which is what it was until #1805.
+   The <img> is the hit target for every touch in the viewer, and the UA
+   intersects touch-action from the hit target up to the scroll container that
+   would handle the gesture — so a `none` HERE closes the scroller that wraps
+   it. Measured, chromium/iPhone-15 through the real touch pipeline: img `none`
+   inside a `pan-x pan-y` scroller scrolls 0px; img `pan-x pan-y` scrolls 130px.
+   The pinch is unaffected — `pan-x pan-y` withholds the `pinch-zoom` token, so
+   two fingers still belong to our JS.
+
+   transform-origin: 0 0 (was center center) is load-bearing arithmetic, not a
+   style: it makes image coordinates and scroll coordinates the same system
+   times the scale, which is what lets rescaleScroll in lib/pinchZoom.ts hold a
+   point under the fingers. will-change hints the compositor for smooth pinch.
+   The inline `transform` style is written by the component per gesture frame. */
 .media-viewer-media--zoomable {
-  touch-action: none;
-  transform-origin: center center;
+  touch-action: pan-x pan-y;
+  transform-origin: 0 0;
   will-change: transform;
+}
+
+/* #1805 — the image arm's re-opening of the touch stream, twin of
+   .media-viewer-modal--text one issue earlier. The base .media-viewer-modal
+   closes it with `touch-action: none`, and a descendant cannot widen what an
+   ancestor narrowed under the read where the intersection walks to the root.
+   Whether it does is engine-dependent: chromium stops at the scroll container,
+   so the base rule is inert there and this one changes nothing; Playwright's
+   WebKit exposes no touch-drag drive, so the same question cannot be put to the
+   engine this issue is about. Declaring it is correct under BOTH readings, and
+   measured free under the one that can be measured — at fit the dismiss binder
+   still received 11 cancelable touchmoves out of 11, exactly as under `none`,
+   because at fit nothing overflows and the browser has no pan to start. */
+.media-viewer-modal--zoomable {
+  touch-action: pan-x pan-y;
+}
+
+/* The scroller that replaced the synthesized pan (#1805). overscroll-behavior
+   keeps a drag past either end off the page behind the modal, the same posture
+   .media-viewer-text takes. position: relative makes it the containing block
+   for the sizer below. max-width so a zoomed image never widens the modal
+   instead of scrolling inside it. */
+.media-viewer-zoom-scroller {
+  position: relative;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  max-width: 100%;
+}
+
+/* A CSS transform does not change layout, so a scaled <img> produces no
+   overflow and there would be nothing to scroll. This box is the scrollable
+   area: the component sizes it to fit x scale, and to ZERO at fit, so that at
+   fit the swipe-to-dismiss keeps the single-finger drag.
+
+   Absolutely positioned on purpose — an out-of-flow child contributes to its
+   container's scrollable overflow but NOT to its intrinsic size, so the <img>
+   goes on sizing the scroller at fit and its own max-width: 100% goes on
+   resolving against a box that does not move. In flow it would be a feedback
+   loop. pointer-events: none so the invisible box never eats a tap. */
+.media-viewer-zoom-sizer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
 }
 
 /* <audio> has no intrinsic size — give the bare controls strip a
    usable width. */
 audio.media-viewer-media {
   width: min(80vw, 24rem);
+}
+
+/* #1764 — the .txt/.md SOURCE arm of the same modal. vjt ruled out rendering
+   of any kind, so everything below is about making raw source READABLE:
+   monospace, aligned line numbers, no wrapping.
+
+   The base .media-viewer-modal sizes itself to its content (`width:
+   max-content`), which is right for a picture and wrong for text — a
+   three-line file would open in a sliver and a 200-column one at the cap.
+   A fixed share of the viewport gives every file the same frame. */
+.media-viewer-modal--text {
+  width: min(92vw, 72rem);
+  /* Re-opens what the base rule closes. .media-viewer-modal takes the whole
+     touch stream with `touch-action: none` because nothing under it scrolls;
+     here the body DOES, and a descendant cannot widen what an ancestor
+     narrowed (the UA intersects down the chain), so the re-opening has to be
+     on this element. The dismiss binder still owns the drags it claims — it
+     preventDefaults them — and it deliberately claims neither an upward drag
+     nor one starting mid-scroll, which is what leaves those to the pane.
+     NOT VERIFIED ON A DEVICE: no browser can be driven from the dev host, so
+     whether iOS begins a rubber-band before the claim lands is on dogfood. */
+  touch-action: pan-x pan-y;
+}
+
+/* The base body centers a single fixed-size element and hides overflow; text
+   fills the frame and scrolls instead. */
+.media-viewer-body--text {
+  align-items: stretch;
+  justify-content: flex-start;
+  flex-direction: column;
+  /* Without this a flex item refuses to shrink below its content height and
+     the pane's own `overflow: auto` never engages. */
+  min-height: 0;
+}
+
+/* The scroller, and the ONE place the text metric is declared. Both <pre>
+   children take `font: inherit` from here rather than restating the tokens:
+   a <pre> carries a UA font-family/font-size that would otherwise win, and
+   two independently spelled copies are two things that can drift apart —
+   which for a gutter means number N drifting off line N. */
+.media-viewer-text {
+  display: flex;
+  align-items: flex-start;
+  overflow: auto;
+  /* A drag past either end belongs to this pane, not to the page behind the
+     modal (and not to iOS's pull-to-refresh). */
+  overscroll-behavior: contain;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--font-size);
+  line-height: 1.4;
+}
+
+/* Sticky, so panning right along a long line does not scroll the numbers out
+   of the frame — the one thing that would make the gutter useless exactly
+   when it is needed. user-select: none keeps a copy of the source free of
+   line numbers. */
+.media-viewer-text-gutter {
+  position: sticky;
+  left: 0;
+  flex: none;
+  margin: 0;
+  padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+  font: inherit;
+  white-space: pre;
+  text-align: right;
+  color: var(--muted);
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  user-select: none;
+}
+
+/* `white-space: pre` and NOT pre-wrap: a wrapped line would render as N rows
+   against one gutter number, and source with significant columns (a log, a
+   diff, a table) stops being readable. Long lines pan horizontally instead. */
+.media-viewer-text-source {
+  flex: none;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  white-space: pre;
+  color: var(--fg);
+}
+
+/* The honest-degradation line for a file cut at TEXT_VIEW_MAX_BYTES. Above
+   the pane on purpose: a reader must know they are holding a slice before
+   they start, not at a bottom they may never reach. Colour comes from the
+   shared .muted utility. */
+.media-viewer-text-truncated {
+  flex: none;
+  margin: 0;
+  padding: 0.25rem 0.75rem 0.5rem;
+  font-size: 0.9rem;
+  border-bottom: 1px solid var(--border);
 }
 
 /* GH #235 — "jump to next active window" affordance (irssi Alt+A).
@@ -12843,7 +13971,7 @@ audio.media-viewer-media {
      actual height below the default --font-size. */
   --nab-lift: 0.75rem;
   top: calc(var(--viewport-height, 100dvh) - max(3.5rem, 48px) - var(--nab-lift));
-  right: calc(0.5rem + env(safe-area-inset-right, 0px));
+  right: calc(0.5rem + var(--safe-area-inset-right));
   z-index: 40;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
 }
@@ -13333,4 +14461,199 @@ audio.media-viewer-media {
 
 .share-modal-error {
   color: #d04040;
+}
+
+/* ── credits easter egg (#1773) ──────────────────────────────────────────
+   A full-viewport modal: falling characters behind an end-titles roll, on
+   a loop. Opened from the bottom of the settings drawer, mounted in Shell.
+
+   ONE fixed box rather than the `.modal-backdrop` + centred-dialog pair the
+   other modals wear: the rain IS the backdrop here, and a scrim between the
+   two would only mute it. That also makes `.credits-modal` the element the
+   overlay lock targets, which is the selector CreditsModal passes.
+
+   `position: relative` is NOT decoration — `MatrixRain` sizes its canvas off
+   `parentElement.clientWidth/Height` through a ResizeObserver and positions
+   absolutely inside it, so the parent must establish the containing block
+   and clip. Same contract `.adm-matrix` carries for the Debug tab. */
+.credits-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+  background: #000;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  /* The roll animates upward past both edges; nothing here scrolls, so the
+     iOS gesture must not be handed to a pan that has nowhere to go. */
+  touch-action: none;
+}
+
+/* Brighter than the Debug tab's `.adm-rain` (0.55): there it sits under
+   readouts an operator must read, here it IS the picture.
+
+   #1807 — the DRAWING is louder here too, and that is a prop rather than a
+   rule in this file: `MatrixRain` takes its four knobs (glyph alpha, wash,
+   leader colour, rows per frame) from the caller since the credits modal
+   needed all four past what the phosphor panel can afford. This layer's
+   opacity is the only part of the difference that is CSS. */
+.credits-rain {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.85;
+  mix-blend-mode: screen;
+}
+
+.credits-rain canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Above the rain, and inside the safe areas — a full-bleed modal puts its
+   top-right controls under the notch otherwise, exactly as `.settings-drawer`
+   and `.modal-backdrop-viewport` guard against. */
+.credits-chrome {
+  position: absolute;
+  z-index: 2;
+  top: max(0.5rem, var(--safe-area-inset-top));
+  right: max(0.5rem, var(--safe-area-inset-right));
+  display: flex;
+  gap: 0.25rem;
+}
+
+/* The window the titles travel through. Masked top and bottom so they fade
+   in and out of the void instead of being guillotined by the viewport edge. */
+.credits-viewport {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 12%,
+    #000 88%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to bottom, transparent 0, #000 12%, #000 88%, transparent 100%);
+}
+
+.credits-roll {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* Starts fully below the fold and ends fully above it, so the loop has no
+     visible seam. #1773 ran the whole 28s cycle as travel; #1807 keeps the
+     travel at 27.88s (0.82 x 34s — the titles roll at exactly the speed they
+     did) and spends the remaining 6.12s with the roll PARKED off the top.
+     That tail is the interlude of pure rain the issue asked for.
+
+     Lengthening the cycle rather than adding a JS pause is what keeps the
+     frame budget at zero AND keeps one clock: `creditsRain.rollIsParked`
+     reads the phase of THIS animation, and takes the 0.82 off its own
+     keyframes, so retiming the roll needs no edit anywhere else. */
+  animation: credits-roll 34s linear infinite;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0 1.5rem;
+  text-align: center;
+  text-shadow: 0 0 0.5rem var(--accent);
+}
+
+/* The last two stops carry the SAME transform on purpose: that hold is the
+   interlude, and its start (82%) is the only place the number lives. The roll
+   re-enters from the bottom afterwards, which is the same entrance as the
+   first pass rather than a resume mid-list. */
+@keyframes credits-roll {
+  0% {
+    transform: translateY(100%);
+  }
+  82% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(-100%);
+  }
+}
+
+.credits-title {
+  margin: 0 0 0.25rem;
+  font-size: 1.8em;
+  letter-spacing: 0.35em;
+  color: var(--accent);
+}
+
+.credits-version {
+  margin: 0;
+  font-size: 1.1em;
+}
+
+.credits-build {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.credits-heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.9em;
+  font-weight: normal;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+}
+
+.credits-list {
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: min(20rem, 80vw);
+}
+
+.credits-person {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.credits-person-count {
+  color: var(--muted);
+}
+
+.credits-empty,
+.credits-coda {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+/* The falling characters turn themselves off (MatrixRain watches the query
+   live). The ROLL cannot simply stop — a frozen roll shows whichever three
+   lines it happened to be on — so it becomes an ordinary scrollable column
+   that reads top to bottom, and the mask goes with the animation it framed. */
+@media (prefers-reduced-motion: reduce) {
+  .credits-viewport {
+    overflow-y: auto;
+    pointer-events: auto;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .credits-modal {
+    touch-action: pan-y;
+  }
+
+  .credits-roll {
+    position: static;
+    animation: none;
+    padding: max(3rem, var(--safe-area-inset-top)) 1.5rem max(3rem, var(--safe-area-inset-bottom));
+  }
 }

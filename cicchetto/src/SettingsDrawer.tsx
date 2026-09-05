@@ -22,15 +22,32 @@ import {
   withConversationMute,
   withoutConversationMute,
 } from "./lib/conversationMute";
-import { syncedSetColoredNicklist, syncedSetTimeFormat } from "./lib/displayPrefs";
+import { CREDITS_LABEL, openCreditsModal } from "./lib/creditsModal";
+import {
+  syncedSetColoredNicklist,
+  syncedSetShowBottomBar,
+  syncedSetTimeFormat,
+} from "./lib/displayPrefs";
 import { formatDuration } from "./lib/duration";
 import { type FontSizeKey, getFontSize, setFontSize } from "./lib/fontSize";
 import { errorMessage, friendlyApiError } from "./lib/friendlyApiError";
 import { getHideNextActive, setHideNextActive } from "./lib/hideNextActive";
-import { deleteAccountBody, updateIdentity, updateNetworkPassword } from "./lib/lifecycle";
+import {
+  deleteAccountBody,
+  deleteAvatar,
+  updateIdentity,
+  updateNetworkPassword,
+  updateProfile,
+  uploadAvatar,
+} from "./lib/lifecycle";
 import { networks, user } from "./lib/networks";
 import { mirrorNotificationPrefs, notificationPrefs } from "./lib/notificationPrefs";
 import { popOverlay, pushOverlay } from "./lib/overlayScrollLock";
+import {
+  loadShowPeerProfiles,
+  saveShowPeerProfiles,
+  showPeerProfilesValue,
+} from "./lib/peerProfiles";
 import {
   deletePushSubscription,
   deviceRows,
@@ -49,11 +66,15 @@ import { reconnectConnectedNetworks } from "./lib/reconnect";
 import { selectedChannel } from "./lib/selection";
 import { consumePendingSettingsPage, type SettingsSubPage } from "./lib/settingsNav";
 import { isShareableSubject, openShareModal, SHARE_SESSION_LABEL } from "./lib/shareModal";
+import { getShowBottomBar } from "./lib/showBottomBar";
 import { getTimeFormat, type TimeFormatKey } from "./lib/timeFormat";
 import { activeHost } from "./lib/uploadHost";
 import {
+  loadUploadConfirmEnabled,
   loadUploadTtlSeconds,
+  saveUploadConfirmEnabled,
   saveUploadTtlSeconds,
+  uploadConfirmEnabledValue,
   uploadTtlSecondsValue,
 } from "./lib/uploadOrchestrator";
 import { deviceClassIcon, deviceDisplayName, parseUserAgent } from "./lib/userAgent";
@@ -140,12 +161,17 @@ const SettingsDrawer: Component<Props> = (props) => {
   // cache on drawer mount, saveUploadTtlSeconds round-trips on
   // change. `null` = "use the active host's defaultTtl".
   const [uploadTtlSavingError, setUploadTtlSavingError] = createSignal<string | null>(null);
+  const [uploadConfirmSavingError, setUploadConfirmSavingError] = createSignal<string | null>(null);
   // #348 — auto-away debounce. The server owns the behaviour AND the
   // accepted range; these three only drive the control. `customMode`
   // is a MODE the user can enter without having written anything yet,
   // which is why it is a signal and not derived from the stored value
   // alone.
   const [autoAwaySavingError, setAutoAwaySavingError] = createSignal<string | null>(null);
+  // M2 — the peer-profiles opt-in. Boolean, no custom-value mode.
+  const [showPeerProfilesSavingError, setShowPeerProfilesSavingError] = createSignal<string | null>(
+    null,
+  );
   const [autoAwayCustomMode, setAutoAwayCustomMode] = createSignal(false);
   const [autoAwayCustomDraft, setAutoAwayCustomDraft] = createSignal("");
   // #228, #251 — source-bind (vhost) selection. Server owns the allow-set +
@@ -235,6 +261,14 @@ const SettingsDrawer: Component<Props> = (props) => {
     setHideNextActive((e.currentTarget as HTMLInputElement).checked);
   };
 
+  // #1766 — like the #914 row, no drawer-local mirror: `getShowBottomBar()` IS
+  // the module signal. Unlike it, the write goes through the coordinator, which
+  // is the single PUT authority for the #449 synced prefs — the owner module's
+  // own setter stays local-only on purpose.
+  const onShowBottomBarChange = (e: Event) => {
+    syncedSetShowBottomBar((e.currentTarget as HTMLInputElement).checked);
+  };
+
   // #986 — the `onDetach` / `onQuit` handlers moved to RailActions with
   // their buttons, and now fire through lib/lifecycle's `confirmDetach` /
   // `confirmQuit` so the modal states the per-subject consequence first.
@@ -279,6 +313,28 @@ const SettingsDrawer: Component<Props> = (props) => {
   // call sites.
   const [identityArmed, setIdentityArmed] = createSignal(false);
 
+  // KVIrc-style CTCP USERINFO profile (age/gender/location/languages/a free
+  // custom field). Targets the SAME selected network the identity editor
+  // above does — no separate picker. Unlike identity, saving does NOT
+  // reconnect (these fields never ride the IRC handshake), so there's no
+  // two-tap confirm here — a plain save.
+  const [profileAge, setProfileAge] = createSignal("");
+  const [profileGender, setProfileGender] = createSignal("");
+  const [profileLocation, setProfileLocation] = createSignal("");
+  const [profileLanguages, setProfileLanguages] = createSignal("");
+  const [profileCustom, setProfileCustom] = createSignal("");
+  const [profileSaving, setProfileSaving] = createSignal(false);
+  const [profileError, setProfileError] = createSignal<string | null>(null);
+  const [profileSaved, setProfileSaved] = createSignal(false);
+
+  // M3a — the own avatar, on the SAME selected network the profile editor
+  // above does. No text signal for the value itself: the current avatar is
+  // read straight off `net.avatar_url` (server-authoritative, like every
+  // other credential field here) — these signals only track the upload
+  // widget's transient in-flight state.
+  const [avatarUploading, setAvatarUploading] = createSignal(false);
+  const [avatarError, setAvatarError] = createSignal<string | null>(null);
+
   // #124 — the per-network PASSWORD field. Its own signals and its own save,
   // NOT folded into the identity form above: the password is write-only and
   // leave-blank-to-keep, while the identity fields round-trip and treat a
@@ -321,8 +377,73 @@ const SettingsDrawer: Component<Props> = (props) => {
       setIdentityArmed(false);
       setIdentitySaved(false);
       setIdentityError(null);
+      setProfileAge(net.age ?? "");
+      setProfileGender(net.gender ?? "");
+      setProfileLocation(net.location ?? "");
+      setProfileLanguages(net.languages ?? "");
+      setProfileCustom(net.custom ?? "");
+      setProfileSaved(false);
+      setProfileError(null);
     }),
   );
+
+  const onSaveProfile = async () => {
+    setProfileError(null);
+    setProfileSaved(false);
+    const net = selectedIdentityNetwork();
+    if (!net) return;
+    setProfileSaving(true);
+    try {
+      // Send all 5 fields; a blank one clears it (same "editor owns the
+      // full value including clear" contract as identity above).
+      await updateProfile(net.slug, {
+        age: profileAge(),
+        gender: profileGender(),
+        location: profileLocation(),
+        languages: profileLanguages(),
+        custom: profileCustom(),
+      });
+      setProfileSaved(true);
+    } catch (err) {
+      setProfileError(
+        err instanceof ApiError ? friendlyApiError(err) : "Couldn't save profile. Try again.",
+      );
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const onUploadAvatar = async (file: File) => {
+    setAvatarError(null);
+    const net = selectedIdentityNetwork();
+    if (!net) return;
+    setAvatarUploading(true);
+    try {
+      await uploadAvatar(net.slug, file);
+    } catch (err) {
+      setAvatarError(
+        err instanceof ApiError ? friendlyApiError(err) : "Couldn't upload avatar. Try again.",
+      );
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  const onDeleteAvatar = async () => {
+    setAvatarError(null);
+    const net = selectedIdentityNetwork();
+    if (!net) return;
+    setAvatarUploading(true);
+    try {
+      await deleteAvatar(net.slug);
+    } catch (err) {
+      setAvatarError(
+        err instanceof ApiError ? friendlyApiError(err) : "Couldn't remove avatar. Try again.",
+      );
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
 
   const onSaveIdentity = async () => {
     setIdentityArmed(false);
@@ -446,9 +567,13 @@ const SettingsDrawer: Component<Props> = (props) => {
       // fieldset's `<select>` reflects the server value before the
       // first user interaction.
       void loadUploadTtlSeconds(t);
+      void loadUploadConfirmEnabled(t);
       // #348 — same reason: the auto-away control must show what the
       // server stored, not a client-side guess.
       void loadAutoAwayDebounce(t);
+      // M2 — same reason: the peer-profiles toggle must show the
+      // subject's actual opt-in, not a client-side guess.
+      void loadShowPeerProfiles(t);
       // #228, #251 — load the source-bind (vhost) view so the widget
       // reflects the server's allow-set + current selection.
       void loadVhostSettings(t);
@@ -755,6 +880,21 @@ const SettingsDrawer: Component<Props> = (props) => {
     }
   };
 
+  // M2 — persist the peer-profiles opt-in. Flipping this ON does not
+  // retroactively query anyone already in a joined channel — it only
+  // gates the lazy query for nicks seen from here on.
+  const onShowPeerProfilesChange = async (e: Event) => {
+    const enabled = (e.currentTarget as HTMLInputElement).checked;
+    const t = token();
+    if (t === null) return;
+    setShowPeerProfilesSavingError(null);
+    try {
+      await saveShowPeerProfiles(t, enabled);
+    } catch (err) {
+      setShowPeerProfilesSavingError(err instanceof Error ? err.message : "save_failed");
+    }
+  };
+
   // Selecting "custom" only opens the input — it is a mode, not a value.
   // Writing here would persist whatever the input was seeded with.
   const onAutoAwayChange = async (e: Event) => {
@@ -804,6 +944,22 @@ const SettingsDrawer: Component<Props> = (props) => {
     } catch (err) {
       const code = err instanceof Error ? err.message : "save_failed";
       setUploadTtlSavingError(code);
+    }
+  };
+
+  // #1883 — the pre-upload confirm opt-in. Write-through like the TTL above:
+  // the checkbox reflects the cached mirror, and the PUT updates it so the very
+  // next upload honours the change with no reload.
+  const onUploadConfirmChange = async (e: Event) => {
+    const t = token();
+    if (t === null) return;
+    const next = (e.currentTarget as HTMLInputElement).checked;
+    setUploadConfirmSavingError(null);
+    try {
+      await saveUploadConfirmEnabled(t, next);
+    } catch (err) {
+      const code = err instanceof Error ? err.message : "save_failed";
+      setUploadConfirmSavingError(code);
     }
   };
 
@@ -1211,6 +1367,33 @@ const SettingsDrawer: Component<Props> = (props) => {
             </div>
           </Show>
 
+          {/* #1773 — credits. LAST of the drawer's own entries, and outside
+            every sub-page on purpose: it is not a setting.
+
+            Deliberately NOT a `.settings-nav-row`, and that is the #460
+            contract rather than a styling whim: an index nav row PUSHES a
+            sub-page and wears a chevron saying so. This opens a modal, so it
+            follows the share entry — the drawer's other modal door — and
+            wears its shape instead. Making it a nav row would have put a
+            non-page in the index the `renders the index nav rows in order`
+            case enumerates.
+
+            The modal itself is mounted in Shell, like the share one:
+            `.settings-drawer` animates on `transform`, which makes it the
+            containing block for any `position: fixed` descendant, so a
+            full-screen modal rendered from here would be clipped to it. */}
+          <button
+            type="button"
+            class="settings-share-button settings-credits-entry"
+            data-testid="credits-entry"
+            onClick={() => openCreditsModal()}
+          >
+            <span class="settings-share-button-label">{CREDITS_LABEL}</span>
+            <span class="settings-share-button-subtitle muted">
+              who built this, and out of what
+            </span>
+          </button>
+
           {/* UX-4 bucket L — bottom "done" button. Same close verb as
             the top × — mobile thumb-reach surface. Sits below logout
             so the scroll position when scroll-to-bottom lands on a
@@ -1343,6 +1526,177 @@ const SettingsDrawer: Component<Props> = (props) => {
                 </div>
               </div>
 
+              {/* KVIrc-style CTCP USERINFO profile (age/gender/location/
+                languages/a free custom field), per network — targets the
+                same selected network the identity card above does. Unlike
+                identity, saving does NOT reconnect: these fields never ride
+                the IRC handshake, they only feed the server's CTCP
+                USERINFO auto-reply — so a plain save, no two-tap confirm. */}
+              <div
+                class="settings-section settings-section-card"
+                data-testid="settings-section-profile"
+              >
+                <h4 class="settings-section-heading">profile</h4>
+                <div class="settings-identity" data-testid="settings-profile">
+                  <label for="settings-profile-age">Age</label>
+                  <input
+                    id="settings-profile-age"
+                    type="text"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck={false}
+                    value={profileAge()}
+                    onInput={(e) => setProfileAge(e.currentTarget.value)}
+                  />
+
+                  <label for="settings-profile-gender">Gender</label>
+                  <select
+                    id="settings-profile-gender"
+                    data-testid="settings-profile-gender"
+                    value={profileGender()}
+                    onChange={(e) => setProfileGender(e.currentTarget.value)}
+                  >
+                    <option value="">unset</option>
+                    <option value="male">male</option>
+                    <option value="female">female</option>
+                    <option value="nonbinary">non-binary</option>
+                  </select>
+
+                  <label for="settings-profile-location">Location</label>
+                  <input
+                    id="settings-profile-location"
+                    type="text"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck={false}
+                    value={profileLocation()}
+                    onInput={(e) => setProfileLocation(e.currentTarget.value)}
+                  />
+
+                  <label for="settings-profile-languages">Languages</label>
+                  <input
+                    id="settings-profile-languages"
+                    type="text"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck={false}
+                    value={profileLanguages()}
+                    onInput={(e) => setProfileLanguages(e.currentTarget.value)}
+                  />
+
+                  <label for="settings-profile-custom">Custom</label>
+                  <input
+                    id="settings-profile-custom"
+                    type="text"
+                    autocapitalize="none"
+                    autocorrect="off"
+                    spellcheck={false}
+                    value={profileCustom()}
+                    onInput={(e) => setProfileCustom(e.currentTarget.value)}
+                  />
+                  <p class="settings-identity-hint">
+                    Shown to anyone who sends you a CTCP USERINFO query. Leave a field blank to
+                    clear it.
+                  </p>
+
+                  <button
+                    type="button"
+                    class="settings-identity-apply"
+                    data-testid="settings-profile-apply"
+                    disabled={profileSaving()}
+                    onClick={() => void onSaveProfile()}
+                  >
+                    {profileSaving() ? "saving…" : "save profile"}
+                  </button>
+
+                  <Show when={profileError()}>
+                    {(msg) => (
+                      <p
+                        role="alert"
+                        class="settings-identity-error"
+                        data-testid="settings-profile-error"
+                      >
+                        {msg()}
+                      </p>
+                    )}
+                  </Show>
+                  <Show when={profileSaved()}>
+                    <p class="settings-identity-ok" data-testid="settings-profile-ok">
+                      Profile saved.
+                    </p>
+                  </Show>
+                </div>
+              </div>
+
+              {/* M3a — the own avatar, per network. A permanent, self-hosted
+                upload (same `Grappa.Uploads` pipeline as any other embedded
+                upload, just `expires_at: nil`), served over CTCP AVATAR to
+                whoever asks and — once M3b lands — rendered in peers' WHOIS
+                cards. Never bounces the connection, like /profile above. */}
+              <div
+                class="settings-section settings-section-card"
+                data-testid="settings-section-avatar"
+              >
+                <h4 class="settings-section-heading">avatar</h4>
+                <div class="settings-identity" data-testid="settings-avatar">
+                  <Show when={selectedIdentityNetwork()?.avatar_url}>
+                    {(url) => (
+                      <img
+                        src={url()}
+                        alt="Current avatar"
+                        class="settings-avatar-preview"
+                        width={64}
+                        height={64}
+                      />
+                    )}
+                  </Show>
+
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/gif,image/webp"
+                    data-testid="settings-avatar-file"
+                    disabled={avatarUploading()}
+                    onChange={(e) => {
+                      const file = e.currentTarget.files?.[0];
+                      e.currentTarget.value = "";
+                      if (file) void onUploadAvatar(file);
+                    }}
+                  />
+                  <p class="settings-identity-hint">
+                    Shown to anyone who sends you a CTCP AVATAR query.
+                  </p>
+
+                  <Show when={selectedIdentityNetwork()?.avatar_url}>
+                    <button
+                      type="button"
+                      class="settings-identity-apply"
+                      data-testid="settings-avatar-remove"
+                      disabled={avatarUploading()}
+                      onClick={() => void onDeleteAvatar()}
+                    >
+                      remove avatar
+                    </button>
+                  </Show>
+
+                  <Show when={avatarUploading()}>
+                    <p class="settings-identity-hint" data-testid="settings-avatar-uploading">
+                      uploading…
+                    </p>
+                  </Show>
+                  <Show when={avatarError()}>
+                    {(msg) => (
+                      <p
+                        role="alert"
+                        class="settings-identity-error"
+                        data-testid="settings-avatar-error"
+                      >
+                        {msg()}
+                      </p>
+                    )}
+                  </Show>
+                </div>
+              </div>
+
               {/* #124 — the per-network password. THE one place this secret is
                 editable: it is the credential password, the value
                 `$nickserv_pass` expands to, and for a visitor the credential
@@ -1456,6 +1810,38 @@ const SettingsDrawer: Component<Props> = (props) => {
                     {uploadTtlSavingError()}
                   </p>
                 </Show>
+                {/* #1883 — the pre-upload confirm opt-in, in this fieldset
+                    because it is the other thing an operator decides ABOUT an
+                    upload before making one, and they are looked for together.
+                    NOT host-gated on ttlOptions in its own right — the confirm
+                    is a cic dialog and applies to any host — but it inherits
+                    this fieldset's gate, which is a real limitation: a host
+                    without a TTL ladder would hide the toggle too. Acceptable
+                    while litterbox is the only host; if a second one lands,
+                    this pair splits into its own fieldset. */}
+                <label class="upload-confirm-row">
+                  <input
+                    type="checkbox"
+                    data-testid="upload-confirm-toggle"
+                    checked={uploadConfirmEnabledValue()}
+                    onChange={(e) => {
+                      void onUploadConfirmChange(e);
+                    }}
+                  />
+                  Ask before sending a file
+                </label>
+                {/* Says what it costs as well as what it buys: the whole reason
+                    this is a setting is that the confirm was friction for the
+                    operators who did not want it. */}
+                <p class="settings-section-blurb" data-testid="upload-confirm-hint">
+                  Off by default. When on, every file you pick, drop, paste or share to Grappa shows
+                  a preview and waits for you to confirm before it is uploaded and its link posted.
+                </p>
+                <Show when={uploadConfirmSavingError() !== null}>
+                  <p class="upload-ttl-error" role="alert" data-testid="upload-confirm-error">
+                    {uploadConfirmSavingError()}
+                  </p>
+                </Show>
               </fieldset>
             </Show>
 
@@ -1468,9 +1854,22 @@ const SettingsDrawer: Component<Props> = (props) => {
                 everyone else's. */}
             <fieldset class="auto-away-fieldset">
               <legend>auto-away</legend>
+              {/* #1766 — the visible "mark me away after:" text is GONE (vjt:
+                  "e' gia' incluso nel titolo del fieldset"). It was a second
+                  name for the control the legend already names, with the blurb
+                  below spelling the behaviour out in full underneath it.
+
+                  The catch, and why this is not a deletion: that <label>
+                  WRAPPED the <select>, so the text WAS the select's accessible
+                  name — dropping the string alone leaves the control nameless.
+                  Same cure #1227 applied to the upload-duration select two
+                  fieldsets up: the <label> stays as the row's flex box, the
+                  name moves onto the control. NOT the <legend> instead — a
+                  legend names the GROUP, and a screen reader landing on the
+                  select would still be told nothing. */}
               <label>
-                mark me away after:
                 <select
+                  aria-label="auto-away delay"
                   data-testid="auto-away-select"
                   value={autoAwaySelectValue()}
                   onChange={(e) => {
@@ -1514,6 +1913,40 @@ const SettingsDrawer: Component<Props> = (props) => {
               <Show when={autoAwaySavingError() !== null}>
                 <p class="auto-away-error" role="alert" data-testid="auto-away-error">
                   {autoAwaySavingError()}
+                </p>
+              </Show>
+            </fieldset>
+
+            {/* M2 — opt-in to grappa querying other people's CTCP USERINFO
+                profile (the member-list gender badge's source). Off by
+                default: nobody gets an outbound CTCP query from this
+                bouncer just for existing in a shared channel. */}
+            <fieldset class="show-peer-profiles-fieldset">
+              <legend>peer profiles</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showPeerProfilesValue()}
+                  onChange={(e) => {
+                    void onShowPeerProfilesChange(e);
+                  }}
+                  data-testid="show-peer-profiles-toggle"
+                />
+                show other people's profile info (gender badge)
+              </label>
+              <p class="settings-section-blurb" data-testid="show-peer-profiles-hint">
+                When on, grappa asks other users' clients for their public CTCP USERINFO profile the
+                first time you see them in a channel, and shows a gender badge next to their name
+                when they answer. This sends a small extra message to each new person you meet — off
+                by default.
+              </p>
+              <Show when={showPeerProfilesSavingError() !== null}>
+                <p
+                  class="show-peer-profiles-error"
+                  role="alert"
+                  data-testid="show-peer-profiles-error"
+                >
+                  {showPeerProfilesSavingError()}
                 </p>
               </Show>
             </fieldset>
@@ -1623,13 +2056,27 @@ const SettingsDrawer: Component<Props> = (props) => {
                 </label>
               </fieldset>
 
-              {/* #443 — per-nick colors in the members pane. Off by default: the
-                nicklist stays monochrome so its color reads as the mode tier,
-                not identity. When on, MembersPane drops `noColor` so NickText
-                applies the per-nick hash hue; the mode-prefix glyph keeps its
-                own tier color either way. */}
-              <fieldset class="colored-nicklist-fieldset">
-                <legend>nicklist</legend>
+              {/* #1766 — ONE fieldset for the three checkboxes (vjt: "andiamo
+                ad accorpare in un unico fieldset i checkbox esistenti e quello
+                nuovo"). They were three one-row fieldsets carrying three
+                legends — `nicklist`, `jump button`, and a third on the way —
+                which is three boxes to say three sentences. The two RADIO
+                groups above keep theirs: a radio group is a fieldset by
+                nature, because the box is what makes the exclusivity legible.
+
+                The dissolved classes (`.colored-nicklist-fieldset`,
+                `.hide-next-active-fieldset`) are referenced NOWHERE else —
+                measured, no CSS rule and no selector in the e2e tree — which
+                is what makes the churn free. The `data-testid`s are the real
+                contract and stay VERBATIM; the e2e suite addresses them. */}
+              <fieldset class="display-checkboxes-fieldset">
+                <legend>options</legend>
+
+                {/* #443 — per-nick colors in the members pane. Off by default:
+                  the nicklist stays monochrome so its color reads as the mode
+                  tier, not identity. When on, MembersPane drops `noColor` so
+                  NickText applies the per-nick hash hue; the mode-prefix glyph
+                  keeps its own tier color either way. */}
                 <label>
                   <input
                     type="checkbox"
@@ -1639,16 +2086,30 @@ const SettingsDrawer: Component<Props> = (props) => {
                   />
                   show colored nicklist
                 </label>
-              </fieldset>
 
-              {/* #914 — hide the #235 "jump to next active window" (»N)
-                button. Off by default. PRESENTATIONAL: it removes the button
-                in BOTH placements (desktop sidebar + mobile overlay) and
-                nothing else — Alt+A and Ctrl+N keep jumping. Client-local and
-                per-DEVICE, unlike the two synced rows above; the complaint is
-                the viewport-fixed mobile overlay. */}
-              <fieldset class="hide-next-active-fieldset">
-                <legend>jump button</legend>
+                {/* #1766 — the mobile window bar (BottomBar), ON by default:
+                  an opt-OUT, never a default change. #174's ruling stands
+                  ("the bottom bar must NOT be deleted, it stays opt-in from
+                  settings") and #71's second ruling reversed "kill the mobile
+                  bottom bar" outright. The bar is O(windows), not O(screens),
+                  so at 7 networks the strip is longer than the useful scroll
+                  distance and the picker stops picking. Turning it off ships a
+                  left ☰ with it, so the #1041 edge swipe is not left as the
+                  whole navigation surface. */}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={getShowBottomBar()}
+                    onChange={onShowBottomBarChange}
+                    data-testid="show-bottom-bar-toggle"
+                  />
+                  show the window bar on mobile
+                </label>
+
+                {/* #914 — hide the #235 "jump to next active window" (»N)
+                  button. Off by default. PRESENTATIONAL: it removes the button
+                  in BOTH placements (desktop sidebar + mobile overlay) and
+                  nothing else — Alt+A and Ctrl+N keep jumping. */}
                 <label>
                   <input
                     type="checkbox"
@@ -1658,6 +2119,19 @@ const SettingsDrawer: Component<Props> = (props) => {
                   />
                   hide the jump-to-next-active button
                 </label>
+
+                {/* The one thing the merge HIDES, said out loud rather than
+                  inherited: these rows do not persist alike. Two are #449
+                  server-backed and converge across every device on the
+                  account; the jump button is per-DEVICE localStorage, and
+                  deliberately so — #914's complaint was about a viewport, not
+                  an account. Under one legend three identical-looking rows
+                  would otherwise behave differently on a second device with
+                  nothing on screen to say why. */}
+                <p class="settings-section-blurb" data-testid="display-checkboxes-hint">
+                  The first two follow your account onto every device you use. The jump button is
+                  remembered on this device only.
+                </p>
               </fieldset>
             </section>
           </section>

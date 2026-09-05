@@ -8,9 +8,11 @@
 //
 // Layering (so the litterbox path can reuse the modal half without
 // the embedded-host POST half):
-//   pickFile()        — feed the hidden picker, wait for the privacy
-//                       modal. Heading is a REQUIRED param: it names
-//                       the active upload host (embedded grappa vs
+//   sendPickedFiles() — answer the 1883 send-confirm the picker now
+//                       raises between selection and dispatch.
+//   pickFile()        — feed the hidden picker, Send, then wait for the
+//                       privacy modal. Heading is a REQUIRED param: it
+//                       names the active upload host (embedded grappa vs
 //                       litterbox.catbox.moe) and a wrong-host modal
 //                       must fail loudly, not match loosely.
 //   uploadViaPicker() — pickFile + Continue + pin POST /api/uploads
@@ -45,10 +47,45 @@ export interface UploadResponse {
 export const EMBEDDED_MODAL_HEADING = /Upload to .+grappa/i;
 export const LITTERBOX_MODAL_HEADING = /Upload to litterbox\.catbox\.moe/i;
 
-// Feed the hidden file input (no OS dialog under setInputFiles) and
-// wait for the privacy modal. Fresh context per test → the modal
-// fires every time. Returns the modal locator for the caller to
+// #1883 — the send-confirm, raised BEFORE the privacy modal and before
+// anything reaches the orchestrator's queue. Every journey passes through it,
+// so it lives here rather than being restated: a spec that forgot it would
+// hang on the privacy modal instead of failing on the step it actually
+// skipped. Not picker-only since the gate moved into `triggerUploads` (vjt's
+// ruling, 2026-08-31) — the pane-drop and paste-to-.txt specs call it too.
+//
+// Scoped by the dialog's own HEADING, not by `confirm-modal` alone. The
+// #80/#816 paste guard renders through the SAME singleton, and on the
+// paste -> "upload as .txt" route the two dialogs swap within one tick: a
+// testid-only locator is already visible while the PASTE dialog is still up,
+// so it would act on that one. The title is also the dialog's aria-label.
+export const SEND_CONFIRM_HEADING = /^Send to /;
+
+export async function sendPickedFiles(page: Page): Promise<void> {
+  const confirm = page.getByRole("dialog", { name: SEND_CONFIRM_HEADING });
+  await expect(confirm).toBeVisible({ timeout: 5_000 });
+  await expect(confirm.getByTestId("confirm-modal-confirm")).toHaveText("Send");
+  await confirm.getByTestId("confirm-modal-confirm").click();
+  await expect(confirm).toBeHidden({ timeout: 5_000 });
+}
+
+// Feed the hidden file input (no OS dialog under setInputFiles) and wait for
+// the privacy notice. Returns the PRIVACY modal locator for the caller to
 // Continue or Cancel.
+//
+// #1883d/#1883e — this used to drive `sendPickedFiles` FIRST and then wait for
+// the privacy modal, which encoded two things that are no longer true:
+//
+//   * the send-confirm fired on every upload. It is now an OPT-IN setting,
+//     default OFF (`upload_confirm_enabled`), so the default journey this
+//     fixture describes has no confirm in it at all;
+//   * the confirm came BEFORE the notice. The order is now reversed — terms
+//     first, decision second — so even with the opt-in ON, waiting for the
+//     confirm before the notice deadlocks.
+//
+// This fixture deliberately follows the DEFAULT a real user gets. A spec whose
+// subject IS the confirm turns the opt-in on itself (see
+// `setUploadConfirmEnabled`) and drives `sendPickedFiles` after Continue.
 export async function pickFile(
   page: Page,
   file: PickerFile,

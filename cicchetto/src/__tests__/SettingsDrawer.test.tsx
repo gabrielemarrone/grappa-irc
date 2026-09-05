@@ -25,6 +25,15 @@ vi.mock("../lib/hideNextActive", () => ({
   setHideNextActive: vi.fn(),
 }));
 
+// #1766 — the third checkbox in the merged fieldset. Mocked like its two
+// siblings so a click is observable without a real signal; the SYNCED setter
+// it actually calls lives in `displayPrefs.ts` and writes through to this
+// module, which is the seam asserted below.
+vi.mock("../lib/showBottomBar", () => ({
+  getShowBottomBar: vi.fn(() => true),
+  setShowBottomBar: vi.fn(),
+}));
+
 const subjectHolder = vi.hoisted(() => ({
   current: null as
     | { kind: "user"; id: string; name: string }
@@ -143,6 +152,11 @@ vi.mock("../lib/networks", async () => {
   const [refetchVersion, setRefetchVersion] = createSignal(0);
   networksHolder.bump = () => setRefetchVersion((v) => v + 1);
   return {
+    // #1861 — casemappingForSlug (lib/casemapping.ts) resolves the fold
+    // through this map, so the mock has to carry it. No id is needed here:
+    // an undefined lookup resolves to the `:ascii` default, which is what
+    // every assertion in this file already assumed.
+    networkIdBySlug: () => undefined,
     user: () => meHolder.current,
     // #211 phase 7 — the identity editor + delete-confirm read the visitor's
     // network rows (anchor nick + per-network ident/realname seed). Stub a
@@ -235,6 +249,12 @@ vi.mock("../lib/userSettings", async () => {
 // we mock the public surface so the drawer test stays focused on
 // drawer rendering + event wiring.
 const uploadTtlHolder = vi.hoisted(() => ({ current: null as number | null }));
+// #1883 — the confirm opt-in rides the same holder pattern as the TTL above.
+// This mock lists its exports EXPLICITLY (no `importOriginal` spread), so a new
+// export on `uploadOrchestrator` that the drawer calls must be added here too
+// or every test in this file dies at mount with "No <name> export is defined on
+// the mock" — which is how the opt-in landed 134 failures on its first run.
+const uploadConfirmHolder = vi.hoisted(() => ({ current: false }));
 vi.mock("../lib/uploadOrchestrator", () => ({
   loadUploadTtlSeconds: vi.fn(async () => {
     /* no-op; SettingsDrawer test asserts on the call only */
@@ -243,6 +263,13 @@ vi.mock("../lib/uploadOrchestrator", () => ({
     uploadTtlHolder.current = seconds;
   }),
   uploadTtlSecondsValue: () => uploadTtlHolder.current,
+  loadUploadConfirmEnabled: vi.fn(async () => {
+    /* no-op; the drawer only has to call it */
+  }),
+  saveUploadConfirmEnabled: vi.fn(async (_t: string, enabled: boolean) => {
+    uploadConfirmHolder.current = enabled;
+  }),
+  uploadConfirmEnabledValue: () => uploadConfirmHolder.current,
 }));
 
 // #392 — the share surface is now a MODAL mounted in Shell (not in the
@@ -432,6 +459,86 @@ describe("SettingsDrawer display options section (#443)", () => {
     openSub("display-settings-entry");
     fireEvent.click(screen.getByTestId("hide-next-active-toggle"));
     expect(hideNextActive.setHideNextActive).toHaveBeenCalledWith(true);
+  });
+
+  // #1766 part 1 — the mobile window bar toggle. Default CHECKED: the bar is
+  // opt-OUT, and a dozen e2e specs address `.bottom-bar` on the strength of
+  // that. It is the one SYNCED row of the three, so the click has to reach the
+  // coordinator's setter (which writes through to the owner module) rather
+  // than the owner module directly — the coordinator is the single PUT
+  // authority.
+  it("renders the mobile-window-bar toggle CHECKED by default (opt-out, not opt-in)", () => {
+    wrap(true);
+    openSub("display-settings-entry");
+    const toggle = screen.getByTestId("show-bottom-bar-toggle") as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+  });
+
+  it("unchecking the mobile-window-bar toggle writes false through the owner module", async () => {
+    const showBottomBar = await import("../lib/showBottomBar");
+    wrap(true);
+    openSub("display-settings-entry");
+    fireEvent.click(screen.getByTestId("show-bottom-bar-toggle"));
+    expect(showBottomBar.setShowBottomBar).toHaveBeenCalledWith(false);
+  });
+});
+
+// #1766 part 2 — vjt: "andiamo ad accorpare in un unico fieldset i checkbox
+// esistenti e quello nuovo". The two RADIO groups keep their own fieldsets (a
+// radio group is a fieldset by nature — the grouping is what makes the
+// exclusivity legible); the three checkboxes were three one-row fieldsets with
+// three legends, which is three boxes to say three sentences.
+//
+// The testids are the contract, not the classes: `colored-nicklist-toggle` and
+// `hide-next-active-toggle` are addressed by the e2e suite, so the merge must
+// be invisible to it. The classes it dissolves (`.colored-nicklist-fieldset`,
+// `.hide-next-active-fieldset`) are referenced nowhere else — measured — which
+// is what makes the churn free.
+describe("SettingsDrawer display options — one fieldset for the checkboxes (#1766)", () => {
+  const displaySection = () => screen.getByTestId("settings-section-display");
+
+  it("puts all three checkboxes inside ONE fieldset", () => {
+    wrap(true);
+    openSub("display-settings-entry");
+
+    const boxes = ["colored-nicklist-toggle", "hide-next-active-toggle", "show-bottom-bar-toggle"]
+      .map((id) => screen.getByTestId(id).closest("fieldset"))
+      .filter((f): f is HTMLFieldSetElement => f !== null);
+
+    expect(boxes).toHaveLength(3);
+    expect(new Set(boxes).size, "the three checkboxes must share one fieldset").toBe(1);
+  });
+
+  it("leaves the two radio groups their own fieldsets — three in total", () => {
+    wrap(true);
+    openSub("display-settings-entry");
+
+    const fieldsets = Array.from(displaySection().querySelectorAll("fieldset"));
+    expect(fieldsets).toHaveLength(3);
+    expect(fieldsets[0]?.querySelector('[data-testid="font-size-M"]')).not.toBeNull();
+    expect(fieldsets[1]?.querySelector('[data-testid="time-format-hms"]')).not.toBeNull();
+    expect(fieldsets[2]?.querySelector('[data-testid="show-bottom-bar-toggle"]')).not.toBeNull();
+  });
+
+  it("keeps every pre-existing testid verbatim — the e2e suite addresses them", () => {
+    wrap(true);
+    openSub("display-settings-entry");
+    expect(screen.getByTestId("colored-nicklist-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("hide-next-active-toggle")).toBeInTheDocument();
+  });
+
+  // The merge hides something the three legends used to keep apart: these rows
+  // do NOT persist alike. Colored nicklist and the window bar are server-synced
+  // across devices; hide-next-active is per-device localStorage (#914, and
+  // deliberately so — its complaint was a viewport). Under one legend three
+  // identical-looking rows behave differently on a second device, so the
+  // fieldset says which is which instead of inheriting the ambiguity.
+  it("says out loud that one of the three rows is per-device", () => {
+    wrap(true);
+    openSub("display-settings-entry");
+    const blurb = screen.getByTestId("display-checkboxes-hint");
+    expect(blurb).toHaveClass("settings-section-blurb");
+    expect(blurb.textContent).toMatch(/this device/i);
   });
 });
 
@@ -1863,6 +1970,38 @@ describe("SettingsDrawer (#476/#478 — per-network identity, both subjects)", (
 // must not write anything on its own, and a stored value that matches no
 // preset must still be visible rather than silently rendering as the
 // nearest option.
+
+// #1766 part 3 — vjt: "da general togliamo il label 'mark me away after' che
+// e' gia' incluso nel titolo del fieldset 'auto-away'". He is right: the
+// <legend> already says it and the blurb below spells the behaviour out in
+// full. The catch is that the <label> WRAPPED the <select>, so it was the
+// select's accessible name — deleting the string alone leaves the control
+// nameless. Same cure #1227 applied to the upload-duration select next door:
+// keep the <label> as the row's flex box, move the naming onto the control.
+describe("SettingsDrawer — the redundant auto-away label (#1766)", () => {
+  it("no longer prints 'mark me away after' anywhere in the general sub-page", () => {
+    wrap(true);
+    openSub("general-settings-entry");
+    const page = screen.getByTestId("general-subpage");
+    expect(page.textContent).not.toMatch(/mark me away after/i);
+  });
+
+  it("keeps the fieldset's own legend, which is what already said it", () => {
+    wrap(true);
+    openSub("general-settings-entry");
+    const fieldset = screen.getByTestId("auto-away-select").closest("fieldset");
+    expect(fieldset?.querySelector("legend")?.textContent).toMatch(/auto-away/i);
+  });
+
+  // THE assertion. A bare deletion of the string passes the first test and
+  // strands `[data-testid="auto-away-select"]` with no accessible name at all.
+  it("leaves the select an accessible name", () => {
+    wrap(true);
+    openSub("general-settings-entry");
+    const byName = screen.getByLabelText(/auto-away/i);
+    expect(byName).toBe(screen.getByTestId("auto-away-select"));
+  });
+});
 
 describe("SettingsDrawer — auto-away debounce (#348)", () => {
   it("offers the presets, an off entry and a custom entry", () => {

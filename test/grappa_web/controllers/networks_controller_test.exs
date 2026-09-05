@@ -728,6 +728,255 @@ defmodule GrappaWeb.NetworksControllerTest do
     end
   end
 
+  describe "PATCH /networks/:network_id/profile (KVIrc-style CTCP USERINFO profile)" do
+    test "user edits profile fields → 200 + persisted + wire shape", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-prof-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-prof-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> put_req_header("content-type", "application/json")
+        |> patch("/networks/#{slug}/profile", %{
+          age: "30",
+          gender: "nonbinary",
+          location: "Italy",
+          languages: "it, en",
+          custom: "here for the vibes"
+        })
+
+      body = json_response(conn, 200)
+      assert body["age"] == "30"
+      assert body["gender"] == "nonbinary"
+      assert body["location"] == "Italy"
+      assert body["languages"] == "it, en"
+      assert body["custom"] == "here for the vibes"
+
+      {:ok, cred} = Credentials.get_credential(vjt, network)
+      assert cred.profile_age == "30"
+      assert cred.profile_gender == :nonbinary
+      assert cred.profile_location == "Italy"
+    end
+
+    test "a blank field clears it", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-profclr-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-profclr-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn = conn |> put_bearer(session.id) |> put_req_header("content-type", "application/json")
+      conn |> patch("/networks/#{slug}/profile", %{age: "30"}) |> json_response(200)
+      body = conn |> patch("/networks/#{slug}/profile", %{age: ""}) |> json_response(200)
+
+      assert body["age"] == nil
+    end
+
+    test "rejects an unrecognised gender with 422", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-profbad-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-profbad-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> put_req_header("content-type", "application/json")
+        |> patch("/networks/#{slug}/profile", %{gender: "robot"})
+
+      assert json_response(conn, 422)
+    end
+
+    test "rejects a CRLF-injected field with 422", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-profcrlf-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-profcrlf-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> put_req_header("content-type", "application/json")
+        |> patch("/networks/#{slug}/profile", %{custom: "evil\r\nQUIT"})
+
+      assert json_response(conn, 422)
+    end
+
+    test "404 when the caller holds no credential on the network (authz)", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-profauthz-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-profauthz-#{u()}"
+      {:ok, _} = Networks.find_or_create_network(%{slug: slug})
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> put_req_header("content-type", "application/json")
+        |> patch("/networks/#{slug}/profile", %{age: "30"})
+
+      assert json_response(conn, 404)
+    end
+
+    test "broadcasts the new snapshot on the subject's settings-bridge topic", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-profbcast-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-profbcast-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      :ok =
+        Phoenix.PubSub.subscribe(
+          Grappa.PubSub,
+          Grappa.PubSub.Topic.user_settings(Grappa.Subject.label({:user, vjt.name}))
+        )
+
+      conn
+      |> put_bearer(session.id)
+      |> put_req_header("content-type", "application/json")
+      |> patch("/networks/#{slug}/profile", %{age: "30", gender: "female"})
+      |> json_response(200)
+
+      network_id = network.id
+
+      assert_receive {:credential_profile_changed, ^network_id,
+                      %{age: "30", gender: :female, location: nil, languages: nil, custom: nil}}
+    end
+  end
+
+  describe "PUT /networks/:network_id/avatar (M3a)" do
+    # ConnTest map-params bypass Plug.Parsers, so a %Plug.Upload{} built by
+    # hand exercises the controller's own validation path directly — same
+    # convention as `UploadsControllerTest.upload_fixture/3`. Real image
+    # bytes for the happy path (MetadataStrip fail-closes on garbage).
+    defp avatar_fixture(filename, content_type, bytes) do
+      path =
+        Path.join(System.tmp_dir!(), "avatar_fixture_#{System.unique_integer([:positive])}")
+
+      File.write!(path, bytes)
+      %Plug.Upload{path: path, filename: filename, content_type: content_type}
+    end
+
+    test "user uploads an avatar → 200 + absolute avatar_url + permanent upload row",
+         %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatar-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-avatar-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      upload = avatar_fixture("me.png", "image/png", Grappa.UploadFixtures.bytes(:gps_png))
+
+      conn = conn |> put_bearer(session.id) |> put("/networks/#{slug}/avatar", %{"file" => upload})
+
+      body = json_response(conn, 200)
+      assert is_binary(body["avatar_url"])
+      assert body["avatar_url"] =~ "/uploads/"
+
+      {:ok, cred} = Credentials.get_credential(vjt, network)
+      cred_with_avatar = Repo.preload(cred, :avatar_upload)
+      assert %Grappa.Uploads.Upload{expires_at: nil} = cred_with_avatar.avatar_upload
+    end
+
+    test "replacing an avatar retires the old upload row (unlinked + soft-deleted)",
+         %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatarreplace-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-avatarreplace-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn = put_bearer(conn, session.id)
+
+      first_upload = avatar_fixture("first.png", "image/png", Grappa.UploadFixtures.bytes(:gps_png))
+      conn |> put("/networks/#{slug}/avatar", %{"file" => first_upload}) |> json_response(200)
+
+      {:ok, cred_after_first} = Credentials.get_credential(vjt, network)
+      first_upload_id = cred_after_first.avatar_upload_id
+
+      second_upload = avatar_fixture("second.png", "image/png", Grappa.UploadFixtures.bytes(:gps_png))
+      conn |> put("/networks/#{slug}/avatar", %{"file" => second_upload}) |> json_response(200)
+
+      {:ok, cred_after_second} = Credentials.get_credential(vjt, network)
+      assert cred_after_second.avatar_upload_id != first_upload_id
+
+      {:ok, retired} = Grappa.Uploads.get_by_id(first_upload_id)
+      assert %DateTime{} = retired.deleted_at
+    end
+
+    test "rejects a non-image MIME with 415", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatarmime-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-avatarmime-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      upload = avatar_fixture("notes.txt", "text/plain", "just text")
+
+      conn = conn |> put_bearer(session.id) |> put("/networks/#{slug}/avatar", %{"file" => upload})
+
+      assert json_response(conn, 415)
+    end
+
+    test "404 when the caller holds no credential on the network (authz)", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatarauthz-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-avatarauthz-#{u()}"
+      {:ok, _} = Networks.find_or_create_network(%{slug: slug})
+
+      upload = avatar_fixture("me.png", "image/png", Grappa.UploadFixtures.bytes(:gps_png))
+
+      conn = conn |> put_bearer(session.id) |> put("/networks/#{slug}/avatar", %{"file" => upload})
+
+      assert json_response(conn, 404)
+    end
+  end
+
+  describe "DELETE /networks/:network_id/avatar (M3a)" do
+    test "clears the avatar → 200 + avatar_url null", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatarclr-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-avatarclr-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn = put_bearer(conn, session.id)
+
+      upload =
+        %Plug.Upload{
+          path: Path.join(System.tmp_dir!(), "avatar_fixture_#{System.unique_integer([:positive])}"),
+          filename: "me.png",
+          content_type: "image/png"
+        }
+
+      File.write!(upload.path, Grappa.UploadFixtures.bytes(:gps_png))
+      conn |> put("/networks/#{slug}/avatar", %{"file" => upload}) |> json_response(200)
+
+      body = conn |> delete("/networks/#{slug}/avatar") |> json_response(200)
+      assert body["avatar_url"] == nil
+
+      {:ok, cred} = Credentials.get_credential(vjt, network)
+      assert cred.avatar_upload_id == nil
+    end
+
+    test "no-op success when there was no avatar to begin with", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatarclrnoop-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-avatarclrnoop-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+      _ = credential_fixture(vjt, network, %{nick: "vjt-irc"})
+
+      conn = put_bearer(conn, session.id)
+
+      body = conn |> delete("/networks/#{slug}/avatar") |> json_response(200)
+      assert body["avatar_url"] == nil
+    end
+  end
+
   describe "PUT /networks/:network_id/password (#124)" do
     # The cure for the split brain: one field, one stored secret. Every test
     # here asserts through `Credential.recover_secret/1` rather than the column,
@@ -787,18 +1036,27 @@ defmodule GrappaWeb.NetworksControllerTest do
       assert Credential.recover_secret(reloaded) == "newsecret"
     end
 
-    test ":server_pass keeps its method — the password is spent on PASS", %{conn: conn} do
-      # The field edits THE secret for the network, whatever the method spends
-      # it on. Promoting here would silently redirect a server password to
-      # NickServ and break a working handshake.
+    test ":server_pass keeps its method, and the field edits the NickServ secret", %{conn: conn} do
+      # The field edits the secret this column holds, and #1044 settled what
+      # that is on a `:server_pass` row: the NickServ one, because the gate
+      # secret moved to its own slot. Promoting the METHOD here would still be
+      # wrong (it would change what the handshake does), which is the half
+      # this test has always guarded — what changed is that the edited value
+      # no longer goes on the PASS line, so the gate secret must come out
+      # untouched.
       {vjt, session, network, slug, _} =
-        password_setup(%{auth_method: :server_pass, password: "old-server-pw"})
+        password_setup(%{
+          auth_method: :server_pass,
+          password: "old-ns-pw",
+          server_pass: "gate-secret"
+        })
 
-      assert json_response(put_password(conn, session, slug, %{password: "new-server-pw"}), 200)
+      assert json_response(put_password(conn, session, slug, %{password: "new-ns-pw"}), 200)
 
       {:ok, reloaded} = Credentials.get_credential(vjt, network)
       assert reloaded.auth_method == :server_pass
-      assert Credential.upstream_password(reloaded) == "new-server-pw"
+      assert Credential.upstream_password(reloaded) == "new-ns-pw"
+      assert Credential.upstream_server_pass(reloaded) == "gate-secret"
     end
 
     test "a blank or missing password is a 400, never a silent clear", %{conn: conn} do
@@ -855,6 +1113,112 @@ defmodule GrappaWeb.NetworksControllerTest do
         |> put("/networks/#{slug}/password", %{password: "whatever"})
 
       assert json_response(conn, 401)
+    end
+  end
+
+  describe "GET + PUT /networks/:network_id/server_pass (#1044)" do
+    defp server_pass_setup(attrs) do
+      vjt = user_fixture(name: "vjt-sp-#{u()}")
+      session = session_fixture(vjt)
+      slug = "net-sp-#{u()}"
+      {network, _} = network_with_server(port: 9_999, slug: slug)
+
+      cred =
+        credential_fixture(
+          vjt,
+          network,
+          Map.merge(%{nick: "vjt-irc", password: "fixture-pw"}, attrs)
+        )
+
+      {vjt, session, network, slug, cred}
+    end
+
+    defp server_pass_conn(conn, session) do
+      conn
+      |> put_bearer(session.id)
+      |> put_req_header("content-type", "application/json")
+    end
+
+    test "GET reports the slot as unset by default", %{conn: conn} do
+      {_, session, _, slug, _} = server_pass_setup(%{auth_method: :nickserv_identify})
+
+      body =
+        conn
+        |> server_pass_conn(session)
+        |> get("/networks/#{slug}/server_pass")
+        |> json_response(200)
+
+      assert body["server_pass_set"] == false
+    end
+
+    test "PUT stores the secret and reports it set, never echoing the value", %{conn: conn} do
+      {vjt, session, network, slug, _} = server_pass_setup(%{auth_method: :nickserv_identify})
+
+      body =
+        conn
+        |> server_pass_conn(session)
+        |> put("/networks/#{slug}/server_pass", %{server_pass: "gate-secret"})
+        |> json_response(200)
+
+      # Write-only end to end: the set-ness travels, the secret never does.
+      assert body["server_pass_set"] == true
+      refute Map.has_key?(body, "server_pass")
+      refute inspect(body) =~ "gate-secret"
+
+      {:ok, reloaded} = Credentials.get_credential(vjt, network)
+      assert Credential.upstream_server_pass(reloaded) == "gate-secret"
+    end
+
+    # The door exists so the gate secret has somewhere to go OTHER than the
+    # NickServ column — so the neighbouring secret must come out untouched.
+    test "PUT leaves the NickServ secret alone", %{conn: conn} do
+      {vjt, session, network, slug, _} =
+        server_pass_setup(%{auth_method: :nickserv_identify, password: "ns-secret"})
+
+      assert conn
+             |> server_pass_conn(session)
+             |> put("/networks/#{slug}/server_pass", %{server_pass: "gate-secret"})
+             |> json_response(200)
+
+      {:ok, reloaded} = Credentials.get_credential(vjt, network)
+      assert Credential.upstream_password(reloaded) == "ns-secret"
+      assert reloaded.auth_method == :nickserv_identify
+    end
+
+    test "an empty string CLEARS the slot", %{conn: conn} do
+      {vjt, session, network, slug, _} =
+        server_pass_setup(%{auth_method: :server_pass, server_pass: "gate-secret"})
+
+      body =
+        conn
+        |> server_pass_conn(session)
+        |> put("/networks/#{slug}/server_pass", %{server_pass: ""})
+        |> json_response(200)
+
+      assert body["server_pass_set"] == false
+
+      {:ok, reloaded} = Credentials.get_credential(vjt, network)
+      assert is_nil(Credential.upstream_server_pass(reloaded))
+    end
+
+    # S30: the value is re-interpolated into the single PASS wire token, so a
+    # space would truncate it server-side and a newline would inject a command.
+    test "a CRLF secret is a 422", %{conn: conn} do
+      {_, session, _, slug, _} = server_pass_setup(%{auth_method: :nickserv_identify})
+
+      assert conn
+             |> server_pass_conn(session)
+             |> put("/networks/#{slug}/server_pass", %{server_pass: "a\r\nJOIN #evil"})
+             |> json_response(422)
+    end
+
+    test "requires a Bearer", %{conn: conn} do
+      {_, _, _, slug, _} = server_pass_setup(%{auth_method: :nickserv_identify})
+
+      assert conn
+             |> put_req_header("content-type", "application/json")
+             |> put("/networks/#{slug}/server_pass", %{server_pass: "gate-secret"})
+             |> json_response(401)
     end
   end
 
@@ -1090,6 +1454,49 @@ defmodule GrappaWeb.NetworksControllerTest do
       connection_state_changed_at: now
     })
     |> Repo.update!()
+  end
+
+  describe "GET /networks/:network_id/peer_avatar/:slug" do
+    # The route is nested under `:resolve_network`, so the caller is already
+    # proven to hold a credential on the network in the PATH. The lookup must
+    # be scoped to that same network — a slug is a bearer of nothing on its
+    # own, and the action's own doc scopes ownership to "this network".
+    test "404s for a slug cached on a network the caller is not resolved onto", %{conn: conn} do
+      vjt = user_fixture(name: "vjt-avatar-#{u()}")
+      session = session_fixture(vjt)
+
+      {mine, _} = network_with_server(port: 6667, slug: "avatar-mine-#{u()}")
+      {theirs, _} = network_with_server(port: 6668, slug: "avatar-theirs-#{u()}")
+      _ = credential_fixture(vjt, mine)
+      _ = credential_fixture(vjt, theirs)
+
+      Mox.stub(Grappa.Net.ImageFetcherMock, :fetch, fn _ ->
+        {:ok, Grappa.UploadFixtures.bytes(:gps_png), "image/png"}
+      end)
+
+      assert :ok = Grappa.Avatars.fetch_and_cache(theirs.id, "somepeer", "http://peer.example/av.png")
+      row = Grappa.Avatars.get(theirs.id, "somepeer")
+      on_exit(fn -> File.rm(Grappa.Avatars.storage_path(row.slug)) end)
+      assert File.exists?(Grappa.Avatars.storage_path(row.slug))
+
+      cross =
+        conn
+        |> put_bearer(session.id)
+        |> get("/networks/#{mine.slug}/peer_avatar/#{row.slug}")
+
+      assert json_response(cross, 404)
+
+      # Positive control: the very same slug, served from ITS OWN network,
+      # is a 200 — so the 404 above is the network scope and not a missing
+      # file, an expired row, or a broken route.
+      own =
+        build_conn()
+        |> put_bearer(session.id)
+        |> get("/networks/#{theirs.slug}/peer_avatar/#{row.slug}")
+
+      assert response(own, 200)
+      assert Plug.Conn.get_resp_header(own, "content-type") == ["image/png"]
+    end
   end
 
   # U-0 helper — drive the per-network circuit to `:open` by directly

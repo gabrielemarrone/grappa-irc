@@ -40,7 +40,7 @@ vi.mock("../lib/api", async () => {
     adminUpdateUserPassword: vi.fn(),
     adminDeleteUser: vi.fn(),
     adminListNetworks: vi.fn(),
-    adminPatchNetworkCaps: vi.fn(),
+    adminPatchNetworkSettings: vi.fn(),
     adminRunReaper: vi.fn(),
     adminResetCircuit: vi.fn(),
     adminCreateNetwork: vi.fn(),
@@ -193,6 +193,13 @@ describe("#1074 — Networks drops its secondary columns on a phone", () => {
       `admin-network-circuit-${BAHAMUT.slug}`,
       `admin-network-live-visitors-${BAHAMUT.slug}`,
       `admin-network-live-users-${BAHAMUT.slug}`,
+      // #1760 — the three settings that decide whether a network is
+      // usable at all follow the caps into the card. A control an
+      // operator can only reach on a desktop is a control the operator
+      // holding a phone does not have.
+      `admin-network-visitor-enabled-${BAHAMUT.slug}`,
+      `admin-network-visitor-autoconnect-${BAHAMUT.slug}`,
+      `admin-network-services-flavor-${BAHAMUT.slug}`,
     ]) {
       expect(panel.contains(screen.getByTestId(testId)), testId).toBe(true);
     }

@@ -47,6 +47,9 @@ defmodule Grappa.Session.EventRouterTest do
         channels_created: %{},
         channel_modes: %{},
         userhost_cache: %{},
+        # M2
+        peer_profile_cache: %{},
+        show_peer_profiles: false,
         who_pending: %{},
         # CP22 cluster B — build_persist (used by 315 RPL_ENDOFWHO route)
         # references state.network_slug to set sender on emitted :persist
@@ -572,6 +575,90 @@ defmodule Grappa.Session.EventRouterTest do
       assert attrs.body == "CTCP VERSION query → grappa #{version}"
     end
 
+    test "PRIVMSG carrying CTCP USERINFO query replies with the composed profile" do
+      state =
+        base_state(%{
+          profile: %{
+            age: "30",
+            gender: :nonbinary,
+            location: "Italy",
+            languages: "it, en",
+            custom: "here for the vibes"
+          }
+        })
+
+      body = <<0x01, "USERINFO", 0x01>>
+      m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, _, [{:reply, line}, {:persist, :notice, attrs}]} =
+               EventRouter.route(m, state)
+
+      assert IO.iodata_to_binary(line) ==
+               "NOTICE alice :\x01USERINFO Age=30; Gender=X; Location=Italy; Languages=it, en; here for the vibes\x01"
+
+      assert attrs.channel == "vjt"
+      assert attrs.sender == "alice"
+
+      assert attrs.body ==
+               "CTCP USERINFO query → Age=30; Gender=X; Location=Italy; Languages=it, en; here for the vibes"
+    end
+
+    test "PRIVMSG carrying CTCP USERINFO query still replies (empty) when no profile is configured" do
+      state =
+        base_state(%{
+          profile: %{age: nil, gender: nil, location: nil, languages: nil, custom: nil}
+        })
+
+      body = <<0x01, "USERINFO", 0x01>>
+      m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, _, [{:reply, line}, {:persist, :notice, _}]} =
+               EventRouter.route(m, state)
+
+      assert IO.iodata_to_binary(line) == "NOTICE alice :\x01USERINFO \x01"
+    end
+
+    test "CTCP USERINFO omits male/female genders correctly (M/F, not X)" do
+      for {gender, letter} <- [{:male, "M"}, {:female, "F"}] do
+        state =
+          base_state(%{
+            profile: %{age: nil, gender: gender, location: nil, languages: nil, custom: nil}
+          })
+
+        body = <<0x01, "USERINFO", 0x01>>
+        m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+        assert {:cont, _, [{:reply, line}, _]} = EventRouter.route(m, state)
+        assert IO.iodata_to_binary(line) == "NOTICE alice :\x01USERINFO Gender=#{letter}\x01"
+      end
+    end
+
+    test "PRIVMSG carrying CTCP AVATAR query replies with the URL when one is set" do
+      state = base_state(%{avatar_url: "https://grappa.example/uploads/abc123.png"})
+
+      body = <<0x01, "AVATAR", 0x01>>
+      m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, _, [{:reply, line}, {:persist, :notice, attrs}]} =
+               EventRouter.route(m, state)
+
+      assert IO.iodata_to_binary(line) ==
+               "NOTICE alice :\x01AVATAR https://grappa.example/uploads/abc123.png\x01"
+
+      assert attrs.channel == "vjt"
+      assert attrs.sender == "alice"
+      assert attrs.body == "CTCP AVATAR query → https://grappa.example/uploads/abc123.png"
+    end
+
+    test "PRIVMSG carrying CTCP AVATAR query gets NO reply when unset (unlike USERINFO)" do
+      state = base_state(%{avatar_url: nil})
+
+      body = <<0x01, "AVATAR", 0x01>>
+      m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, ^state, []} = EventRouter.route(m, state)
+    end
+
     test "a CTCP-framed NOTICE lands on $server and mints no query window" do
       state = base_state()
 
@@ -598,6 +685,154 @@ defmodule Grappa.Session.EventRouterTest do
       # round trip. Rewriting it to something human-readable here would
       # make that impossible.
       assert attrs.body == body
+    end
+
+    test "a CTCP USERINFO reply NOTICE captures Gender= into peer_profile_cache" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "USERINFO Age=30; Gender=F; Location=Italy", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, [{:persist, :notice, _}]} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{"alice" => %{gender: :female}}
+    end
+
+    # The peer-profile cache is an OPT-IN feature: `maybe_query_userinfo/2`
+    # and `maybe_query_avatar/2` both refuse to ASK when the subject has not
+    # opted in. The capture half has to refuse to LEARN on the same terms —
+    # otherwise a peer who answers a question we never asked populates a
+    # cache the subject switched off, and for AVATAR that answer also costs
+    # an outbound fetch of a URL the peer chose.
+    test "opted OUT, a CTCP USERINFO reply leaves peer_profile_cache untouched" do
+      state = base_state(%{show_peer_profiles: false})
+      body = <<0x01, "USERINFO Age=30; Gender=F; Location=Italy", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{}
+    end
+
+    test "opted OUT, a CTCP AVATAR reply neither marks the cache nor dispatches a fetch" do
+      state = base_state(%{show_peer_profiles: false})
+      body = <<0x01, "AVATAR http://peer.example/av.png", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, [{:persist, :notice, attrs}]} = EventRouter.route(m, state)
+      # `:pending` is the observable proof a fetch was dispatched — the task
+      # is detached, so the cache mark is what this layer can assert on.
+      assert new_state.peer_profile_cache == %{}
+      # …and the row is still visible, framing intact: the opt-in governs the
+      # cache, never the transcript.
+      assert attrs.channel == "$server"
+      assert attrs.body == body
+    end
+
+    # Deliberately left on the OPTED-OUT default: the visible scrollback row
+    # is not part of the opt-in. Refusing to LEARN from a CTCP reply must
+    # never turn into refusing to SHOW it.
+    test "a CTCP USERINFO reply still persists the normal visible row (not silent)" do
+      state = base_state()
+      body = <<0x01, "USERINFO Gender=M", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, _, [{:persist, :notice, attrs}]} = EventRouter.route(m, state)
+      assert attrs.channel == "$server"
+      # Framing preserved verbatim, same as every other CTCP-framed NOTICE
+      # (see "a CTCP-framed NOTICE lands on $server..." above).
+      assert attrs.body == body
+    end
+
+    test "CTCP USERINFO Gender= parsing is case-insensitive for M/F/X" do
+      for {letter, expected} <- [{"m", :male}, {"F", :female}, {"x", :nonbinary}] do
+        state = base_state(%{show_peer_profiles: true})
+        body = <<0x01, "USERINFO Gender=#{letter}", 0x01>>
+        m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+        assert {:cont, new_state, _} = EventRouter.route(m, state)
+        assert new_state.peer_profile_cache == %{"alice" => %{gender: expected}}
+      end
+    end
+
+    test "a CTCP USERINFO reply with no Gender= field leaves peer_profile_cache untouched" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "USERINFO Age=30; Location=Italy", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{}
+    end
+
+    test "a CTCP USERINFO reply with an unrecognised Gender= value leaves peer_profile_cache untouched" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "USERINFO Gender=Q", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{}
+    end
+
+    # M3b — CTCP AVATAR reply parsing. `dispatch_avatar_fetch/3` starts a
+    # REAL `Task.Supervisor.start_child(Grappa.TaskSupervisor, ...)` on a
+    # valid URL (the app's full supervision tree is up under `mix test`),
+    # so these assert on the SYNCHRONOUS state transition
+    # (`peer_profile_cache` marked `:pending`) — the async fetch's own
+    # SSRF/cap/sniff/strip behavior is `Grappa.AvatarsTest`'s job, not
+    # this file's; asserting on ITS outcome here would need cross-process
+    # Mox wiring for no real coverage gain.
+    test "a CTCP AVATAR reply with an http(s) URL marks the cache :pending and dispatches a fetch" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "AVATAR http://peer.example/av.png", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, [{:persist, :notice, _}]} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{"alice" => %{avatar_slug: :pending}}
+    end
+
+    test "a CTCP AVATAR reply accepts https too" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "AVATAR https://peer.example/av.png", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{"alice" => %{avatar_slug: :pending}}
+    end
+
+    test "a CTCP AVATAR reply with a bare filename (the legacy DCC offer) is refused, never dispatched" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "AVATAR myface.png 4096", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      # No fetch ever starts for a non-http(s) URL — grappa never
+      # implements DCC (docs/DESIGN_NOTES.md #1280).
+      assert new_state.peer_profile_cache == %{}
+    end
+
+    test "a CTCP AVATAR reply with a non-http scheme (e.g. file://) is refused" do
+      state = base_state(%{show_peer_profiles: true})
+      body = <<0x01, "AVATAR file:///etc/passwd", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{}
+    end
+
+    test "a second CTCP AVATAR reply while a fetch is already :pending does not re-dispatch" do
+      state = base_state(%{show_peer_profiles: true, peer_profile_cache: %{"alice" => %{avatar_slug: :pending}}})
+      body = <<0x01, "AVATAR http://peer.example/second.png", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      # Untouched — still :pending, not clobbered by a second query reply.
+      assert new_state.peer_profile_cache == %{"alice" => %{avatar_slug: :pending}}
+    end
+
+    test "a second CTCP AVATAR reply for an already-cached (real slug) nick does not re-dispatch" do
+      state = base_state(%{show_peer_profiles: true, peer_profile_cache: %{"alice" => %{avatar_slug: "existingslug"}}})
+      body = <<0x01, "AVATAR http://peer.example/second.png", 0x01>>
+      m = msg(:notice, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.peer_profile_cache == %{"alice" => %{avatar_slug: "existingslug"}}
     end
 
     test "a plain NOTICE from a regular nick lands in that peer's window when it is OPEN" do
@@ -843,12 +1078,15 @@ defmodule Grappa.Session.EventRouterTest do
     # sender = server hostname from the numeric's prefix. Previously sender
     # was hardcoded to "" which fails valid_sender? and causes changeset
     # rejection → every MOTD line silently dropped.
+    #
+    # issue 1832 — the KIND is `:server_event`, not `:notice`. The routing
+    # and sender contract this test was written for is untouched.
     test "372 RPL_MOTD routes to $server with sender from numeric prefix" do
       state = base_state()
 
       m = msg({:numeric, 372}, ["vjt", "- Welcome to this IRC server"], {:server, "irc.azzurra.chat"})
 
-      assert {:cont, ^state, [{:persist, :notice, attrs}]} =
+      assert {:cont, ^state, [{:persist, :server_event, attrs}]} =
                EventRouter.route(m, state)
 
       assert attrs.channel == "$server"
@@ -862,7 +1100,7 @@ defmodule Grappa.Session.EventRouterTest do
 
       m = msg({:numeric, 372}, ["vjt", "- MOTD line"], nil)
 
-      assert {:cont, ^state, [{:persist, :notice, attrs}]} =
+      assert {:cont, ^state, [{:persist, :server_event, attrs}]} =
                EventRouter.route(m, state)
 
       assert attrs.channel == "$server"
@@ -1641,12 +1879,13 @@ defmodule Grappa.Session.EventRouterTest do
       assert drained.motd_pending == nil
     end
 
-    # Connect-time MOTD (motd_pending == nil) keeps the legacy $server
-    # :notice persist — the modal is ONLY for an explicit /motd.
+    # Connect-time MOTD (motd_pending == nil) keeps the $server persist —
+    # the modal is ONLY for an explicit /motd. issue 1832 moved the kind
+    # from `:notice` to `:server_event`; the window is unchanged.
     test "unprimed (connect-time) MOTD persists to $server, no server_reply" do
       state = base_state()
 
-      assert {:cont, ^state, [{:persist, :notice, attrs}]} =
+      assert {:cont, ^state, [{:persist, :server_event, attrs}]} =
                EventRouter.route(msg({:numeric, 372}, ["vjt", "- connect banner"], {:server, "irc.test"}), state)
 
       assert attrs.channel == "$server"
@@ -1671,12 +1910,12 @@ defmodule Grappa.Session.EventRouterTest do
     end
 
     # An UNPRIMED 402 (no explicit /motd in flight) falls back to the same
-    # $server :notice persist the connect-time MOTD family uses — never
-    # silently swallowed.
+    # $server `:server_event` persist the connect-time MOTD family uses —
+    # never silently swallowed.
     test "unprimed 402 persists to $server, no server_reply" do
       state = base_state()
 
-      assert {:cont, ^state, [{:persist, :notice, attrs}]} =
+      assert {:cont, ^state, [{:persist, :server_event, attrs}]} =
                EventRouter.route(
                  msg({:numeric, 402}, ["vjt", "nope.invalid", "No such server"], {:server, "irc.test"}),
                  state
@@ -1717,18 +1956,18 @@ defmodule Grappa.Session.EventRouterTest do
     end
 
     # Unprimed INFO/VERSION (unsolicited — no connect-time source) fall back
-    # to the $server :notice persist, never silently dropped.
+    # to the $server `:server_event` persist, never silently dropped.
     test "unprimed 371 RPL_INFO persists to $server" do
       state = base_state()
 
-      assert {:cont, ^state, [{:persist, :notice, %{channel: "$server"}}]} =
+      assert {:cont, ^state, [{:persist, :server_event, %{channel: "$server"}}]} =
                EventRouter.route(msg({:numeric, 371}, ["vjt", "stray info"], {:server, "irc.test"}), state)
     end
 
     test "unprimed 351 RPL_VERSION persists to $server" do
       state = base_state()
 
-      assert {:cont, ^state, [{:persist, :notice, %{channel: "$server"}}]} =
+      assert {:cont, ^state, [{:persist, :server_event, %{channel: "$server"}}]} =
                EventRouter.route(
                  msg({:numeric, 351}, ["vjt", "v", "irc.test", "stray version"], {:server, "irc.test"}),
                  state
@@ -1820,7 +2059,7 @@ defmodule Grappa.Session.EventRouterTest do
     test "unprimed 257 with a DOTLESS A-line persists to $server, never a query window" do
       state = base_state()
 
-      assert {:cont, ^state, [{:persist, :notice, attrs}]} =
+      assert {:cont, ^state, [{:persist, :server_event, attrs}]} =
                EventRouter.route(
                  msg({:numeric, 257}, ["vjt", "Azzurra"], {:server, "irc.test"}),
                  state
@@ -1832,7 +2071,7 @@ defmodule Grappa.Session.EventRouterTest do
     test "unprimed 259 RPL_ADMINEMAIL persists to $server, no server_reply" do
       state = base_state()
 
-      assert {:cont, ^state, [{:persist, :notice, %{channel: "$server"}}]} =
+      assert {:cont, ^state, [{:persist, :server_event, %{channel: "$server"}}]} =
                EventRouter.route(
                  msg({:numeric, 259}, ["vjt", "staff@azzurra.org"], {:server, "irc.test"}),
                  state
@@ -1874,6 +2113,71 @@ defmodule Grappa.Session.EventRouterTest do
       # of the ruling.
       assert drained.motd_pending == nil
       assert drained.admin_pending == nil
+    end
+  end
+
+  describe "route/2 — issue 1832: the unprimed server-info fallback is event-tier" do
+    # vjt's ruling (IRC, 2026-08-27, relayed): connect-time MOTD lines
+    # "dovrebbero esser contate come signalling, quindi col numeretto piccolo
+    # che usiamo per i join/part" — i.e. the `events` tier, i.e. kind
+    # `:server_event`. Every clause that falls back to
+    # `persist_server_event/2` is that same unprimed-burst shape, so the whole
+    # family moves together (CLAUDE.md "Total consistency or nothing").
+    #
+    # The table IS the guard: a seventh fallback clause added later without
+    # the right kind fails here, not in review.
+    @unprimed_fallbacks [
+      {375, ["vjt", "- irc.test Message of the Day -"], "375 RPL_MOTDSTART"},
+      {372, ["vjt", "- welcome aboard"], "372 RPL_MOTD"},
+      {376, ["vjt", "End of /MOTD command."], "376 RPL_ENDOFMOTD"},
+      {422, ["vjt", "MOTD File is missing"], "422 ERR_NOMOTD"},
+      {402, ["vjt", "nope.invalid", "No such server"], "402 ERR_NOSUCHSERVER"},
+      {256, ["vjt", "Administrative info about irc.test"], "256 RPL_ADMINME"},
+      {257, ["vjt", "Azzurra"], "257 RPL_ADMINLOC1"},
+      {258, ["vjt", "Milano"], "258 RPL_ADMINLOC2"},
+      {259, ["vjt", "staff@azzurra.org"], "259 RPL_ADMINEMAIL"},
+      {423, ["vjt", "No administrative info available"], "423 ERR_NOADMININFO"},
+      {447, ["vjt", "Restricted connection"], "447 ERR_RESTRICTED"},
+      {371, ["vjt", "grappa test server"], "371 RPL_INFO"},
+      {374, ["vjt", "End of /INFO list."], "374 RPL_ENDOFINFO"},
+      {351, ["vjt", "bahamut-2.2.1", "irc.test", "options"], "351 RPL_VERSION"}
+    ]
+
+    test "every unprimed server-info numeric persists :server_event on $server" do
+      state = base_state()
+
+      for {code, params, label} <- @unprimed_fallbacks do
+        assert {:cont, ^state, [{:persist, kind, attrs}]} =
+                 EventRouter.route(msg({:numeric, code}, params, {:server, "irc.test"}), state),
+               "#{label} did not persist exactly one row"
+
+        assert kind == :server_event, "#{label} persisted #{inspect(kind)}, expected :server_event"
+        assert attrs.channel == "$server", "#{label} landed on #{inspect(attrs.channel)}"
+
+        # The counting consequence, stated against the SSOT rather than a
+        # copied literal: a content kind is what `WindowCounts` buckets as
+        # `messages`, and that is the bucket these rows must NOT be in.
+        refute kind in Grappa.Scrollback.Message.content_kinds(),
+               "#{label} is still a content kind — it will inflate the unread MESSAGE count"
+      end
+    end
+
+    # The other half of the ruling, and the reason the cure is scoped to the
+    # numeric fallback rather than to a kind swap on the `$server` window: a
+    # REAL server NOTICE (services, opers) is somebody talking to you. It
+    # keeps `:notice`, stays a content kind, and so keeps raising the window
+    # severity to `:message`.
+    test "a real server NOTICE to $server stays :notice — a content kind" do
+      state = base_state()
+
+      assert {:cont, ^state, [{:persist, :notice, attrs}]} =
+               EventRouter.route(
+                 msg(:notice, ["vjt", "This nickname is registered."], {:nick, "NickServ", "s", "services."}),
+                 state
+               )
+
+      assert attrs.channel == "$server"
+      assert :notice in Grappa.Scrollback.Message.content_kinds()
     end
   end
 
@@ -1956,6 +2260,67 @@ defmodule Grappa.Session.EventRouterTest do
 
       assert {:cont, _, [{:persist, :join, attrs}]} = EventRouter.route(m, state)
       assert attrs.meta == %{}
+    end
+
+    # M2 — each of these gives its own network_id so the per-(subject,
+    # network) TokenBucket starts FULL, isolated from every other test in
+    # this async file that might touch the shared default @network_id.
+    test "JOIN-other from a new peer, opted in, sends a lazy CTCP USERINFO query" do
+      state =
+        base_state(%{
+          network_id: 90_001,
+          show_peer_profiles: true,
+          members: %{"#italia" => %{"vjt" => []}}
+        })
+
+      m = msg(:join, ["#italia"], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, effects} = EventRouter.route(m, state)
+
+      assert Enum.any?(effects, &match?({:reply, "PRIVMSG alice :\x01USERINFO\x01"}, &1))
+      # M3b — the AVATAR query is a second, independent lazy query fired
+      # alongside USERINFO for the same "first seen this session" nick.
+      assert Enum.any?(effects, &match?({:reply, "PRIVMSG alice :\x01AVATAR\x01"}, &1))
+      # Marked eagerly so a second sighting this session never re-queries.
+      assert new_state.peer_profile_cache == %{"alice" => %{gender: nil, avatar_slug: nil}}
+    end
+
+    test "JOIN-other, opted out (default), never queries" do
+      state = base_state(%{network_id: 90_002, members: %{"#italia" => %{"vjt" => []}}})
+      m = msg(:join, ["#italia"], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, effects} = EventRouter.route(m, state)
+      refute Enum.any?(effects, &match?({:reply, _}, &1))
+      assert new_state.peer_profile_cache == %{}
+    end
+
+    test "JOIN-other for an already-cached peer does not re-query" do
+      state =
+        base_state(%{
+          network_id: 90_003,
+          show_peer_profiles: true,
+          members: %{"#italia" => %{"vjt" => []}},
+          # M3b — both fields must already be present to count as
+          # "fully known": either one missing still triggers ITS OWN
+          # lazy query (the two are independently deduped).
+          peer_profile_cache: %{"alice" => %{gender: :female, avatar_slug: "existingslug"}}
+        })
+
+      m = msg(:join, ["#italia"], {:nick, "alice", "u", "h"})
+
+      assert {:cont, new_state, effects} = EventRouter.route(m, state)
+      refute Enum.any?(effects, &match?({:reply, _}, &1))
+      # Untouched — a real answer isn't clobbered by a re-trigger no-op.
+      assert new_state.peer_profile_cache == %{"alice" => %{gender: :female, avatar_slug: "existingslug"}}
+    end
+
+    test "JOIN-self, opted in, never queries itself" do
+      state = base_state(%{network_id: 90_004, show_peer_profiles: true})
+      m = msg(:join, ["#italia"], {:nick, "vjt", "u", "h"})
+
+      assert {:cont, new_state, effects} = EventRouter.route(m, state)
+      refute Enum.any?(effects, &match?({:reply, _}, &1))
+      assert new_state.peer_profile_cache == %{}
     end
   end
 
@@ -4119,6 +4484,90 @@ defmodule Grappa.Session.EventRouterTest do
     end
   end
 
+  describe "route/2 — M2 peer_profile_cache eviction (shares userhost_cache's helpers/lifecycle)" do
+    test "QUIT evicts the quitting nick from peer_profile_cache" do
+      state =
+        base_state(%{
+          members: %{"#italia" => %{"alice" => []}},
+          peer_profile_cache: %{"alice" => %{gender: :female}}
+        })
+
+      m = msg(:quit, ["bye"], {:nick, "alice", "u", "h"})
+      {:cont, new_state, _} = EventRouter.route(m, state)
+
+      refute Map.has_key?(new_state.peer_profile_cache, "alice")
+    end
+
+    test "PART by other user evicts from peer_profile_cache when no other channel overlap" do
+      state =
+        base_state(%{
+          members: %{"#one" => %{"alice" => [], "vjt" => []}},
+          peer_profile_cache: %{"alice" => %{gender: :female}}
+        })
+
+      m = msg(:part, ["#one"], {:nick, "alice", "u", "h"})
+      {:cont, new_state, _} = EventRouter.route(m, state)
+
+      refute Map.has_key?(new_state.peer_profile_cache, "alice")
+    end
+
+    test "PART by other user keeps peer_profile_cache entry when still sharing another channel" do
+      state =
+        base_state(%{
+          members: %{
+            "#one" => %{"alice" => [], "vjt" => []},
+            "#two" => %{"alice" => [], "vjt" => []}
+          },
+          peer_profile_cache: %{"alice" => %{gender: :female}}
+        })
+
+      m = msg(:part, ["#one"], {:nick, "alice", "u", "h"})
+      {:cont, new_state, _} = EventRouter.route(m, state)
+
+      assert new_state.peer_profile_cache["alice"] == %{gender: :female}
+    end
+
+    test "self-PART evicts peer_profile_cache for nicks left behind with no remaining overlap" do
+      state =
+        base_state(%{
+          members: %{"#italia" => %{"vjt" => [], "alice" => []}},
+          peer_profile_cache: %{"alice" => %{gender: :female}}
+        })
+
+      m = msg(:part, ["#italia"], {:nick, "vjt", "u", "h"})
+      {:cont, new_state, _} = EventRouter.route(m, state)
+
+      refute Map.has_key?(new_state.peer_profile_cache, "alice")
+    end
+
+    test "KICK evicts the kicked nick from peer_profile_cache when no overlap remains" do
+      state =
+        base_state(%{
+          members: %{"#italia" => %{"vjt" => [], "alice" => []}},
+          peer_profile_cache: %{"alice" => %{gender: :female}}
+        })
+
+      m = msg(:kick, ["#italia", "alice", "bye"], {:nick, "vjt", "u", "h"})
+      {:cont, new_state, _} = EventRouter.route(m, state)
+
+      refute Map.has_key?(new_state.peer_profile_cache, "alice")
+    end
+
+    test "NICK rename migrates the peer_profile_cache entry old->new, preserving the gender" do
+      state =
+        base_state(%{
+          members: %{"#italia" => %{"vjt" => [], "alice" => []}},
+          peer_profile_cache: %{"alice" => %{gender: :female}}
+        })
+
+      m = msg(:nick, ["alice_new"], {:nick, "alice", "u", "h"})
+      {:cont, new_state, _} = EventRouter.route(m, state)
+
+      refute Map.has_key?(new_state.peer_profile_cache, "alice")
+      assert new_state.peer_profile_cache["alice_new"] == %{gender: :female}
+    end
+  end
+
   describe "A6 contract — every Scrollback.kind() has at least one EventRouter route" do
     alias Grappa.Scrollback.Message, as: ScrollbackMessage
 
@@ -4680,7 +5129,7 @@ defmodule Grappa.Session.EventRouterTest do
       end_msg = msg({:numeric, 318}, ["vjt", "alice", "End of /WHOIS list"])
       {:cont, _, [{:whois_bundle, target, accum, _}]} = EventRouter.route(end_msg, final_state)
 
-      payload = Wire.whois_bundle("test-net", target, accum)
+      payload = Wire.whois_bundle("test-net", target, accum, nil)
 
       assert payload.kind == :whois_bundle
       assert payload.using_ssl == true
@@ -4705,7 +5154,7 @@ defmodule Grappa.Session.EventRouterTest do
     end
 
     test "wire payload defaults all P-0a booleans to false when accum is empty" do
-      payload = Wire.whois_bundle("test-net", "ghost", %WhoisAccum{})
+      payload = Wire.whois_bundle("test-net", "ghost", %WhoisAccum{}, nil)
 
       assert payload.using_ssl == false
       assert payload.is_registered == false
@@ -5088,7 +5537,7 @@ defmodule Grappa.Session.EventRouterTest do
       end_msg = msg({:numeric, 318}, ["vjt", "alice", "End of /WHOIS list"], {:server, "irc.libera.chat"})
 
       {:cont, _, [{:whois_bundle, target, accum, _}]} = EventRouter.route(end_msg, final_state)
-      payload = Wire.whois_bundle("libera", target, accum)
+      payload = Wire.whois_bundle("libera", target, accum, nil)
 
       assert payload.account == "AliceAccount"
       assert payload.secure == true
@@ -5170,7 +5619,7 @@ defmodule Grappa.Session.EventRouterTest do
       m318 = msg({:numeric, 318}, ["vjt", "alice", "End of /WHOIS list"], {:server, "irc.libera.chat"})
       {:cont, _, [{:whois_bundle, "alice", accum, _}]} = EventRouter.route(m318, s2)
 
-      payload = Wire.whois_bundle("libera", "alice", accum)
+      payload = Wire.whois_bundle("libera", "alice", accum, nil)
 
       assert payload.extra_lines == [
                %{numeric: 617, text: "first line"},

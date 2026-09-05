@@ -62,8 +62,36 @@ import type { Component, JSX } from "solid-js";
  * The slot is REQUIRED, not defaulted to the ☰: a default would let a new host
  * inherit a rail door it never asked for, silently, which is the degradation
  * pattern this codebase bans.
+ *
+ * ## #1766 — a matching LEADING slot, for the same reason on the other edge
+ *
+ * Turning the mobile window bar off (`showBottomBar.ts`) leaves #1041's
+ * left-edge swipe as the only way to the window list, and a gesture with zero
+ * affordance is the "drawer-only navigation" #71's second ruling refused as a
+ * default. So a second door ships with the opt-out — and it has to appear on
+ * every surface wearing this band, not only the channel one, which is what
+ * puts it here rather than in `TopicBar`. (It shipped as a second ☰ and is a
+ * `#` since #1801; see that component's note for why sameness became the
+ * defect.)
+ *
+ * REQUIRED and not optional, by the same argument `trailing` already makes: a
+ * host with no left door passes `null` and says so at the call site, instead
+ * of a new host silently inheriting one. `null` emits no element, so a band
+ * that opted out keeps its two children exactly — which is what #1073's
+ * characterization pins.
+ *
+ * The control that fills it is `PaneTopBarWindowsOpener`, a SEPARATE component
+ * from the trailing ☰ and deliberately not wearing its class — see that
+ * component's own note for the measurement that forced the split.
  */
 export type Props = {
+  /**
+   * The band's FIRST child, or `null`. Being first is what places it on the
+   * left, by the same construction that puts `trailing` on the right — the
+   * `.topic-bar-header` between them carries `flex: 1`, so no margin or
+   * `justify-content` term is involved on this band.
+   */
+  leading: JSX.Element;
   /**
    * The bar's left group, rendered inside `.topic-bar-header`. That wrapper
    * carries `flex: 1; min-width: 0`, so a caller wanting ellipsis gets the
@@ -111,9 +139,87 @@ export const PaneTopBarRailOpener: Component<RailOpenerProps> = (props) => {
   );
 };
 
+export type WindowsOpenerProps = {
+  onOpenWindows: () => void;
+};
+
+/**
+ * #1766 — the LEFT door: #1041's window sidebar, the navigation that has to
+ * exist once the bottom window bar can be switched off.
+ *
+ * ## Why this is a second component and not `PaneTopBarRailOpener` with
+ * another label
+ *
+ * Because `.topic-bar-hamburger` is not a style hook — it is the NAME of the
+ * rail door, and #1073 wrote that contract down where it is consumed. The e2e
+ * fixture `openMembersDrawer` locates the opener BY CLASS and takes
+ * `.first()`, explaining that "the class is what they have in common, and it
+ * is the thing this helper actually needs — the in-flow opener, whichever pane
+ * is mounted". Singular, and roughly twenty specs reach the rail through it.
+ *
+ * The first cut of #1766 did reuse the rail opener here, and the integration
+ * run measured the consequence: with the bar off, two buttons wore the class,
+ * `.first()` resolved to THIS one, the fixture opened the window sidebar
+ * instead of the members rail, and its retry was then occluded by the
+ * `aside.shell-sidebar.open` it had just opened — a click deadline, on a spec
+ * that has nothing to do with either door. Reusing the class would have made
+ * every rail-reaching spec depend on the bottom-bar preference.
+ *
+ * So the two doors are two classes. What they still SHARE is
+ * `.shell-chrome-btn` — #305's tap floor and the `--chrome-icon-size` token
+ * both glyphs are sized off.
+ *
+ * ## #1801 — and what they stopped sharing is the DRAWING
+ *
+ * #1766 also gave this button the drawn-bars rule, on the argument that with
+ * the bar off the two openers sit in one 48px band "and have to look
+ * identical". That was right while both were "a menu". It stopped being right
+ * the moment this one named a specific list: the band then carried TWO doors
+ * drawn with the same three bars, one at each end, promising the same thing
+ * and doing different things.
+ *
+ * vjt's ruling (`#grappa`, 2026-08-26): the trailing ☰ stays a hamburger — "fa
+ * anche molto altro rispetto alla lista membri", it is a catch-all and the
+ * generic glyph is the honest name for that — and this one becomes `#`.
+ *
+ * 🔴 The ASCII character U+0023, never the keycap: "il # non emoji / il #
+ * carattere / ascii / roba anni '70". An emoji was floated and dropped with
+ * the reason stated in channel, and the reason is mechanical rather than
+ * aesthetic — a platform-painted glyph ignores `currentColor`, so it would sit
+ * dead under the `:hover` / `:focus-visible` lift the rest of the chrome
+ * answers, and it renders differently on iOS and Android. A text glyph keeps
+ * both. `PaneTopBar.test.tsx` asserts the CODEPOINT, because `#` + U+FE0F is
+ * invisible in a diff.
+ *
+ * Sizing lives in `themes/default.css` and is not `var(--chrome-icon-size)`:
+ * a character's ink is smaller than its em box, so the `#` is derived from
+ * that token rather than set to it. The measurement and the three font faces
+ * are in the rule's own note.
+ *
+ * The label is a literal, unlike the sibling's `railLabel` prop. That prop
+ * exists because two hosts genuinely word the same door differently; this door
+ * has one name on both surfaces it appears on — one door, two handles — and a
+ * prop only ever passed one value would state a variability that does not
+ * exist. It is also unchanged by #1801: roughly a dozen specs locate this
+ * button by that name, and the door it opens did not move.
+ */
+export const PaneTopBarWindowsOpener: Component<WindowsOpenerProps> = (props) => {
+  return (
+    <button
+      type="button"
+      class="topic-bar-windows-opener shell-chrome-btn"
+      aria-label="open windows sidebar"
+      onClick={props.onOpenWindows}
+    >
+      {"\u{0023}"}
+    </button>
+  );
+};
+
 const PaneTopBar: Component<Props> = (props) => {
   return (
     <div class="topic-bar">
+      {props.leading}
       <div class="topic-bar-header">{props.children}</div>
       {props.trailing}
     </div>

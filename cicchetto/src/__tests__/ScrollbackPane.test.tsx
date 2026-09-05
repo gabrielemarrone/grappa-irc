@@ -6,6 +6,10 @@ import { activeAudio, closeAudio } from "../lib/audioPlayer";
 // #1156 — the REAL compose store: the swipe's whole outcome is what lands in
 // the draft, and a mock here would assert that the pane called something.
 import { getDraft, setDraft } from "../lib/compose";
+// #1765 — the REAL nonce the `»N` verb bumps. Not mocked: what this file
+// pins is that the pane ANSWERS it with the bar's own gesture, and a mock
+// would leave the wiring untested on both sides.
+import { requestJumpToUnread } from "../lib/jumpToUnreadCommand";
 import { closeMediaViewer, mediaViewerState } from "../lib/mediaViewer";
 import {
   popOverlay,
@@ -328,6 +332,9 @@ import {
 // advances the read cursor without needing the button to render (jsdom's
 // zero-geometry keeps `atBottom` true, so the button never mounts).
 import { requestScrollToBottom } from "../lib/scrollToBottomCommand";
+// #1914 — the REAL `/topic` answer store, for the same reason: the pane is
+// its only reader, and what these tests assert IS that it reads it.
+import { appendTopicShow } from "../lib/topicShow";
 import { dismissWhoisCard, setWhoisBundle } from "../lib/whoisCard";
 import ScrollbackPane, {
   resetAutoFocusedJoinsForTest,
@@ -2633,6 +2640,28 @@ describe("ScrollbackPane", () => {
         expect(jumpToUnreadSpy).toHaveBeenCalledWith("freenode", "#grappa");
       });
 
+      // #1765 — the far-behind window can be the ONLY one with unread, and
+      // then the `»N` cycle resolves back to it. #1178's scroll-to-bottom exit
+      // is dead there (the cursor is frozen), so the verb asks the pane for
+      // the bar's jump instead. Asserted through the REAL nonce so both ends
+      // of the bridge are pinned; the pane must answer with the SAME gesture
+      // the button fires, latch included, not a second copy of it.
+      it("runs that same gesture when the »N verb asks for it (#1765)", async () => {
+        seedReadCursor("freenode", "#grappa", 1);
+        setScrollback({ "freenode #grappa": fixture });
+        setFarBehind({ "freenode #grappa": { missed: 3000, resumeFrom: 1 } });
+        render(() => (
+          <ScrollbackPane networkSlug="freenode" channelName="#grappa" kind="channel" />
+        ));
+        // `defer` — the nonce value standing at mount is not a request.
+        expect(jumpToUnreadSpy).not.toHaveBeenCalled();
+
+        requestJumpToUnread();
+        await Promise.resolve();
+
+        expect(jumpToUnreadSpy).toHaveBeenCalledWith("freenode", "#grappa");
+      });
+
       it("offers the dismiss exit — the only way past the frozen cursor", () => {
         // Without this the operator chats at the tail under a permanent
         // "3000 unread": far-behind freezes the read cursor, so no amount of
@@ -4230,6 +4259,60 @@ describe("ScrollbackPane", () => {
       const line = screen.getByTestId("scrollback-line");
       expect(line.textContent).toContain("weirdsender");
       expect(line.textContent).toContain("naked body — meta missing raw_verb");
+    });
+
+    // issue 1832 — the connect-time MOTD burst is persisted `:server_event`
+    // so it counts in the low `events` tier. That only holds up if the lines
+    // stay READABLE in $server, which is the entire reason the server keeps
+    // them instead of dropping them: `:server_event` is outside the server's
+    // `@body_required_kinds`, which makes the body OPTIONAL, not forbidden.
+    // The row shape here is the real one EventRouter writes — sender = server
+    // hostname, `meta.sender_kind`, NO raw_verb — not the synthetic empty
+    // meta of the defensive case above.
+    it("kind=server_event MOTD row (sender_kind, no raw_verb) still shows the MOTD text", () => {
+      setScrollback({
+        "freenode $server": [
+          {
+            id: 205,
+            network: "freenode",
+            channel: "$server",
+            server_time: 205,
+            kind: "server_event",
+            sender: "irc.azzurra.chat",
+            body: "- Benvenuto su Azzurra IRC Network",
+            meta: { sender_kind: "server" },
+          },
+        ],
+      });
+      render(() => <ScrollbackPane networkSlug="freenode" channelName="$server" kind="channel" />);
+      const line = screen.getByTestId("scrollback-line");
+      expect(line.textContent).toContain("irc.azzurra.chat");
+      expect(line.textContent).toContain("- Benvenuto su Azzurra IRC Network");
+    });
+
+    // A MOTD banner is very often mIRC-coloured ASCII art. The arm renders
+    // through <MircBody> without the #455 emphasis layer, so the colour runs
+    // must survive as spans while the control bytes never reach the text.
+    it("kind=server_event MOTD row keeps mIRC colour runs out of the text", () => {
+      setScrollback({
+        "freenode $server": [
+          {
+            id: 206,
+            network: "freenode",
+            channel: "$server",
+            server_time: 206,
+            kind: "server_event",
+            sender: "irc.azzurra.chat",
+            body: "\x0304red banner\x0F plain",
+            meta: { sender_kind: "server" },
+          },
+        ],
+      });
+      render(() => <ScrollbackPane networkSlug="freenode" channelName="$server" kind="channel" />);
+      const line = screen.getByTestId("scrollback-line");
+      expect(line.textContent).toContain("red banner");
+      expect(line.textContent).toContain("plain");
+      expect(line.textContent).not.toContain("\x03");
     });
 
     it("kind=server_event row gets scrollback-presence + scrollback-muted classes", () => {
@@ -6100,6 +6183,125 @@ describe("ScrollbackPane", () => {
         expect(readingAtTailKey()).toBeNull();
       });
     });
+
+    // #1701 — the CONTAINER axis of the defect #1121 closed on the CONTENT axis,
+    // at the same site and for the same reason: the freeze holds ONE number, a
+    // scrollTop, and a scrollTop only names the position it was captured at
+    // while the box it was measured in is the same box. #1121's box was steady
+    // and the CONTENT grew under it; here the content is steady and the BOX
+    // shortens.
+    //
+    // The field path is the docked audio player. It is tuned from the rail's
+    // station picker, the picker is a `createOverlayLock` surface, and picking
+    // deliberately does NOT close it (RailRadio: "Auditioning stations is the
+    // second kind, so the picker stays up") — so the bar mounts between
+    // `.scrollback-pane` and `.compose-box` WHILE the freeze is up. The #778
+    // ResizeObserver re-pin that exists for exactly this class ("chrome growing
+    // inside the shell shrinks THIS box with no event at all") is gated out by
+    // `isOverlayFrozen()`, correctly — a mid-list reader under an overlay must
+    // not be yanked — and no overlay edge fires again until the close. So the
+    // restore replays a px that is short of the tail by the bar's height and the
+    // reader is left looking at a pane whose last lines sit below the fold: the
+    // reported "opening the player does not push the scrollback up".
+    //
+    // The cure is derived from the CAPTURED clientHeight, not from the observer,
+    // so it holds whether or not the RO fired — which matters, because the field
+    // report does not say which of the two suppressed paths ran and this test
+    // cannot settle that either.
+    describe("#1701 — chrome mounting under an overlay strands a tail reader", () => {
+      // `.audio-mini-player`: a 2.5rem control (35px at this app's 14px root)
+      // plus 0.4rem block padding either side and a 1px top border.
+      const BAR_PX = 47;
+      const VIEWPORT_PX = 500;
+      const EXTENT_PX = 2000;
+
+      afterEach(() => {
+        vi.unstubAllGlobals();
+      });
+
+      const mountChromeUnderOverlay = async (scrollTop: number): Promise<HTMLDivElement> => {
+        let roCallback: ResizeObserverCallback | undefined;
+        class FakeResizeObserver {
+          constructor(cb: ResizeObserverCallback) {
+            roCallback = cb;
+          }
+          observe(): void {}
+          unobserve(): void {}
+          disconnect(): void {}
+        }
+        vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+
+        seedRows();
+        render(() => (
+          <ScrollbackPane networkSlug="freenode" channelName="#grappa" kind="channel" />
+        ));
+        const list = screen.getByTestId("scrollback") as HTMLDivElement;
+        await flushRaf();
+
+        Object.defineProperty(list, "scrollHeight", { value: EXTENT_PX, configurable: true });
+        Object.defineProperty(list, "clientHeight", { value: VIEWPORT_PX, configurable: true });
+        Object.defineProperty(list, "scrollTop", {
+          value: scrollTop,
+          writable: true,
+          configurable: true,
+        });
+        // MEASURED, not merely set — same load-bearing scroll event as #1121's
+        // helper: without it `tailGeometryMeasured` is unset and the geometry the
+        // restore republishes is withheld.
+        list.dispatchEvent(new Event("scroll"));
+        await flushRaf();
+
+        pushOverlay(null);
+        await flushRaf();
+        scrollIntoViewSpy.mockClear();
+
+        // The bar takes its space. The scroll list loses height; the CONTENT is
+        // untouched, which is what separates this from #1121.
+        Object.defineProperty(list, "clientHeight", {
+          value: VIEWPORT_PX - BAR_PX,
+          configurable: true,
+        });
+        roCallback?.([], {} as ResizeObserver);
+        await flushRaf();
+
+        return list;
+      };
+
+      it("drops the #778 re-pin while the overlay is up (the freeze eats it, as designed)", async () => {
+        const list = await mountChromeUnderOverlay(EXTENT_PX - VIEWPORT_PX);
+
+        // Characterization, not a defect: the freeze outranking the re-pin is
+        // what keeps a mid-list reader still. It is the CLOSE edge that owes the
+        // tail reader an honest answer, and the test below is where that is due.
+        expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+        expect(list.scrollTop).toBe(EXTENT_PX - VIEWPORT_PX);
+      });
+
+      it("lands a tail reader ON the tail when the overlay closes, not on the stale px", async () => {
+        const list = await mountChromeUnderOverlay(EXTENT_PX - VIEWPORT_PX);
+
+        popOverlay(null);
+        await flushRaf();
+
+        // The tail of a 2000px buffer seen through a 453px box is 1547 — not the
+        // 1500 that was the tail of the 500px box the snapshot was taken in.
+        // Pre-fix the restore replayed 1500 and the last 47px, two chat lines,
+        // stayed under the bar for as long as the reader kept reading.
+        expect(list.scrollTop).toBe(EXTENT_PX - (VIEWPORT_PX - BAR_PX));
+      });
+
+      it("still holds a MID-LIST reader across the same shrink (the #608 posture is not widened)", async () => {
+        const list = await mountChromeUnderOverlay(750);
+
+        popOverlay(null);
+        await flushRaf();
+
+        // distance 2000-750-500 = 750, far past the tail band: this reader asked
+        // for a position, not for the tail, and a shorter box does not change
+        // what they asked for. Guards the fix against becoming "always tail".
+        expect(list.scrollTop).toBe(750);
+      });
+    });
   });
 
   // affordances. Rendered as flex siblings BEFORE `.scrollback` they
@@ -6140,6 +6342,7 @@ describe("ScrollbackPane", () => {
       secure_cipher: null,
       certfp: null,
       extra_lines: null,
+      avatar_url: null,
     };
 
     afterEach(() => {
@@ -6581,5 +6784,119 @@ describe("ScrollbackPane", () => {
 
       expect(getDraft(KEY)).toBe("<alice> hello << ");
     });
+  });
+});
+
+// #1914 — `/topic` prints the topic INTO the window. The command handler drops
+// a frozen snapshot into `topicShow`; the pane's `rows()` memo turns it into a
+// presentational row at the moment it was asked. These pin the pane's half.
+//
+// Each test takes its OWN channel, because `topicShow` is a module singleton
+// with no reset seam: its only emptier is an identity rotation, and adding a
+// test-only door to production code to work around a shared fixture would be
+// the tail wagging the dog. Distinct keys make the isolation structural.
+describe("#1914 /topic answer row", () => {
+  const topic = { text: "beta — https://grappa.chat", set_by: "vjt", set_at: null };
+  let n = 0;
+
+  const msg = (chan: string, id: number, server_time: number): ScrollbackMessage => ({
+    id,
+    network: "freenode",
+    channel: chan,
+    server_time,
+    kind: "privmsg",
+    sender: "alice",
+    body: "hello",
+    meta: {},
+  });
+
+  // Returns the fresh channel name so the caller can seed + assert against it.
+  const freshChannel = (): string => {
+    n += 1;
+    return `#t1914-${n}`;
+  };
+  const keyFor = (chan: string) => `freenode ${chan}` as ChannelKey;
+  const mount = (chan: string) =>
+    render(() => <ScrollbackPane networkSlug="freenode" channelName={chan} kind="channel" />);
+
+  beforeEach(() => {
+    setUserNick("vjt");
+    mockMembersByChannel.mockReturnValue({});
+  });
+
+  it("renders the topic text and the setter meta", () => {
+    const chan = freshChannel();
+    appendTopicShow(keyFor(chan), chan, topic);
+    setScrollback({ [keyFor(chan)]: [msg(chan, 1, 1000)] });
+    mount(chan);
+
+    const row = screen.getByTestId("topic-show-line");
+    expect(row).toHaveTextContent(`Topic for ${chan}:`);
+    expect(row).toHaveTextContent("beta — https://grappa.chat");
+    expect(row).toHaveTextContent("set by vjt");
+  });
+
+  // The operator ASKED. Silence would read as a broken verb, so the empty
+  // topic gets an answer of its own rather than no row at all.
+  it("answers 'No topic set' rather than rendering nothing", () => {
+    const chan = freshChannel();
+    appendTopicShow(keyFor(chan), chan, { text: null, set_by: null, set_at: null });
+    setScrollback({ [keyFor(chan)]: [msg(chan, 1, 1000)] });
+    mount(chan);
+
+    expect(screen.getByTestId("topic-show-line")).toHaveTextContent(`No topic set for ${chan}`);
+  });
+
+  // An empty window is exactly where an operator types /topic first; the early
+  // "no rows" return in the memo must not swallow the answer.
+  it("renders in a window with no messages at all", () => {
+    const chan = freshChannel();
+    appendTopicShow(keyFor(chan), chan, topic);
+    setScrollback({ [keyFor(chan)]: [] });
+    mount(chan);
+
+    expect(screen.getByTestId("topic-show-line")).toBeInTheDocument();
+  });
+
+  // Asking twice prints twice — it is a log of what was asked, not a banner.
+  it("prints one row per invocation", () => {
+    const chan = freshChannel();
+    appendTopicShow(keyFor(chan), chan, topic);
+    appendTopicShow(keyFor(chan), chan, topic);
+    setScrollback({ [keyFor(chan)]: [msg(chan, 1, 1000)] });
+    mount(chan);
+
+    expect(screen.getAllByTestId("topic-show-line")).toHaveLength(2);
+  });
+
+  // Presentational, like the #237 join line: it must stay out of the row
+  // counts and the read-cursor walk, so it is not a `scrollback-line` and
+  // carries no `data-msg-id`.
+  it("is presentational — no scrollback-line testid, no message id", () => {
+    const chan = freshChannel();
+    appendTopicShow(keyFor(chan), chan, topic);
+    setScrollback({ [keyFor(chan)]: [msg(chan, 1, 1000)] });
+    mount(chan);
+
+    const row = screen.getByTestId("topic-show-line");
+    expect(row.dataset.msgId).toBeUndefined();
+    expect(screen.getAllByTestId("scrollback-line")).toHaveLength(1);
+  });
+
+  // Interleaved by wallclock, like an invite-ack: the answer belongs where it
+  // was asked, not pinned under whatever arrived afterwards.
+  it("sits before a message that arrived after the ask", () => {
+    const chan = freshChannel();
+    appendTopicShow(keyFor(chan), chan, topic);
+    const at = Date.now();
+    setScrollback({
+      [keyFor(chan)]: [msg(chan, 1, at - 10_000), msg(chan, 2, at + 10_000)],
+    });
+    mount(chan);
+
+    const rows = Array.from(
+      document.querySelectorAll("[data-testid='scrollback-line'],[data-testid='topic-show-line']"),
+    ).map((r) => r.getAttribute("data-testid"));
+    expect(rows).toEqual(["scrollback-line", "topic-show-line", "scrollback-line"]);
   });
 });

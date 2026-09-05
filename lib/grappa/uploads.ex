@@ -33,6 +33,10 @@ defmodule Grappa.Uploads do
       `expires_at <= now()` AND `deleted_at IS NULL`.
     * `soft_delete/2` — flips `deleted_at`. The caller MUST `File.rm/1`
       the on-disk file FIRST (Reaper does this in `sweep/0`).
+    * `delete_all_for_subject/1` — HARD-deletes a departing subject's
+      uploads, bytes first. Called from the two chokepoints every
+      subject-destroying door funnels through, because the FK cascade
+      takes the rows and leaves the files (issue 1890).
     * `storage_path/2` — joins `storage_root` + slug, base32-validates
       the slug. Used by `create/3` to write, by the controller to
       read, by Reaper to unlink.
@@ -75,17 +79,23 @@ defmodule Grappa.Uploads do
   use Boundary,
     top_level?: true,
     deps: [Grappa.Repo, Grappa.Subject, Grappa.Sys.HardenedCmd],
-    exports: [Upload]
+    # M3b — `MetadataStrip` exported so `Grappa.Avatars` can reuse the
+    # SAME EXIF/GPS privacy-strip pipeline for fetched peer avatars, not
+    # just uploaded bytes — one privacy guarantee, two doors in.
+    exports: [MetadataStrip, Upload]
 
   import Ecto.Query
 
   alias Grappa.{Repo, Subject}
   alias Grappa.Uploads.{ContentType, MetadataStrip, Upload}
 
+  require Logger
+
   @slug_byte_size 16
   @slug_regex ~r/\A[a-z2-7]{26}\z/
 
   @storage_root_key {__MODULE__, :storage_root}
+  @base_url_key {__MODULE__, :base_url}
 
   @doc """
   Boot-time storage-root injection. Called once from the application
@@ -108,6 +118,35 @@ defmodule Grappa.Uploads do
   """
   @spec storage_root() :: Path.t()
   def storage_root, do: :persistent_term.get(@storage_root_key)
+
+  @doc """
+  M3a — boot-time public base URL injection (e.g. `GrappaWeb.Endpoint.url()`,
+  seeded once from `application.ex` `start/2` — the same documented
+  boot boundary as `boot/1` above, CLAUDE.md "non-process DI-seams").
+
+  Exists because `public_url/2` below needs an ABSOLUTE URL — it feeds
+  the CTCP AVATAR reply (`Grappa.Session.EventRouter`), plain text sent
+  to an arbitrary remote IRC client with no origin context of its own,
+  unlike the JSON wire response (where cic resolves a relative path
+  against its own same-origin fetch fine). A `Grappa.Networks`/
+  `Grappa.Session` CONTEXT reaching into `GrappaWeb.Endpoint` directly
+  would cross the web/context boundary this codebase otherwise keeps
+  clean (no `Grappa.*` module outside `application.ex` touches
+  `GrappaWeb.Endpoint` — verified before adding this). Idempotent;
+  later calls overwrite.
+  """
+  @spec boot_base_url(String.t()) :: :ok
+  def boot_base_url(url) when is_binary(url) do
+    :persistent_term.put(@base_url_key, url)
+    :ok
+  end
+
+  @doc """
+  Read the configured public base URL. Raises if `boot_base_url/1`
+  hasn't run — any caller that reaches this without prior boot is a bug.
+  """
+  @spec base_url() :: String.t()
+  def base_url, do: :persistent_term.get(@base_url_key)
 
   @type create_attrs :: %{
           required(:subject) => Subject.t(),
@@ -153,6 +192,26 @@ defmodule Grappa.Uploads do
   """
   @spec ext_for(term()) :: {:ok, String.t()} | :error
   defdelegate ext_for(mime), to: __MODULE__.MimeExt
+
+  @doc """
+  M3a — the absolute public URL for a stored upload
+  (`<base_url>/uploads/<slug>.<ext>`, #418's type-carrying extension).
+  Moved here (from what used to be `UploadsController`'s private
+  `public_url/2`) so a non-web caller — `Grappa.Networks.Wire.avatar_url/1`,
+  which needs the SAME absolute shape for the CTCP AVATAR reply — has one
+  place to get it, instead of a second hand-rolled copy. `UploadsController`
+  now delegates here too. An unmapped MIME degrades to an extensionless
+  URL, matching the pre-move behaviour exactly.
+  """
+  @spec public_url(String.t(), String.t()) :: String.t()
+  def public_url(slug, mime) when is_binary(slug) and is_binary(mime) do
+    base = base_url() <> "/uploads/" <> slug
+
+    case ext_for(mime) do
+      {:ok, ext} -> base <> "." <> ext
+      :error -> base
+    end
+  end
 
   @doc """
   Split a client-declared content type into `{mime, charset}`, the
@@ -373,28 +432,69 @@ defmodule Grappa.Uploads do
   end
 
   @doc """
-  Test-support: HARD-deletes every `uploads` row for `user_id` and
-  removes the corresponding on-disk files. Intended for
-  `Grappa.TestSupport.SubjectReset` only — production lifecycle uses
-  `soft_delete/2` (which the reaper sweeps in
-  `Grappa.Uploads.Reaper.sweep/2`).
+  HARD-delete every upload owned by `subject` — the on-disk bytes FIRST,
+  the row after. Returns `:ok`; idempotent when the subject owns none.
 
-  Iterates per-row to mirror the admin DELETE controller pattern
-  (`File.rm(path)` then row removal). Idempotent if the user has no
-  rows. `File.rm/1` result discarded — a file already swept by the
-  reaper is the expected idempotent case.
+  Called from the two chokepoints that every subject-destroying door
+  funnels through — `Grappa.Accounts.delete_user/1` and
+  `Grappa.Visitors.destroy_visitor/1` — because `uploads.user_id` /
+  `uploads.visitor_id` carry `ON DELETE CASCADE`, which takes the ROWS
+  and leaves the FILES (issue 1890). Routing it at the chokepoints and
+  not at the self-delete door is deliberate: five doors reach those two
+  functions, and the highest-cadence one is `Grappa.Visitors.Reaper`'s
+  60-second sweep, not self-delete.
+
+  ## Why the unlink cannot fail silently here
+
+  `Grappa.Uploads.Reaper` can afford to leave a row alone when
+  `File.rm/1` fails: the ROW IS ITS RETRY TOKEN, and the next sweep
+  tries again. On this path the row is about to be destroyed, so no
+  retry token will ever exist — a discarded error becomes a permanent
+  leak that nothing can later detect, which is the silent-swallow
+  CLAUDE.md forbids at a boundary. So the three outcomes stay apart:
+
+    * `:ok` — unlinked.
+    * `{:error, :enoent}` — NOT a failure, the expected idempotent case
+      (the reaper or a prior partial run got there first). Logging it
+      would drown the one line below that matters.
+    * `{:error, reason}` — logged with the slug, and the deletion
+      CONTINUES. A read-only disk must not hold someone's right to be
+      deleted hostage; the log line is the only surrogate for the retry
+      token being destroyed, and the slug is what makes the leaked
+      bytes findable afterwards.
   """
-  @spec delete_all_for_user(Ecto.UUID.t()) :: :ok
-  def delete_all_for_user(user_id) when is_binary(user_id) do
+  @spec delete_all_for_subject(Subject.t()) :: :ok
+  def delete_all_for_subject(subject) do
     storage_root = storage_root()
-    query = from(u in Upload, where: u.user_id == ^user_id)
-    rows = Repo.all(query)
 
-    Enum.each(rows, fn %Upload{slug: slug} = up ->
-      _ = File.rm(storage_path(storage_root, slug))
-      Repo.delete!(up)
-    end)
+    Upload
+    |> Subject.subject_where(subject)
+    |> Repo.all()
+    |> Enum.each(&unlink_then_delete(&1, storage_root))
 
+    :ok
+  end
+
+  @spec unlink_then_delete(Upload.t(), Path.t()) :: :ok
+  defp unlink_then_delete(%Upload{slug: slug} = up, storage_root) do
+    case File.rm(storage_path(storage_root, slug)) do
+      :ok ->
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        # Same metadata shape as `Grappa.Uploads.Reaper`'s failure line —
+        # one greppable message, the identifiers as structured fields.
+        Logger.error("upload orphaned: unlink failed, row deleted anyway",
+          upload_id: up.id,
+          slug: slug,
+          error: inspect(reason)
+        )
+    end
+
+    _ = Repo.delete!(up)
     :ok
   end
 end

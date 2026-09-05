@@ -31,8 +31,17 @@
 // NON-`is-ios` path, so asserting `.nick-clickable` computes to
 // `user-select: text` THERE directly proves the rule is UNCONDITIONAL
 // (not gated behind `html.is-ios`). On unfixed code the button inherits
-// the default `auto` and the assertion fails. The `@webkit` twin is a
-// regression guard that iOS keeps the nick selectable after the change.
+// the default `auto` and the assertion fails.
+//
+// #1869 SUPERSEDED the TOUCH half of the above, and the header is left standing
+// because the reasoning is still how we got here. What changed: giving the
+// scrollback a standing `user-select: text` on touch is what let Chrome raise
+// its own long-press selection over cic's message menu, because Blink does not
+// implement the `-webkit-touch-callout: none` that suppresses it on WebKit. So
+// on a coarse pointer the row — and this token with it — is `none` standing and
+// `text` under `is-selecting`, and #250's "nick inside the selection" is
+// delivered by `Select…` taking the whole row instead. The chromium test below
+// is UNCHANGED and still owns the desktop case, which never enters that gate.
 
 import { composeSend, loginAs, scrollbackLine, selectChannel } from "../fixtures/cicchettoPage";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
@@ -44,10 +53,14 @@ const CHANNEL = AUTOJOIN_CHANNELS[0];
 // trips Playwright strict mode.
 const MESSAGE_BODY = `android-nick-select target ${Date.now()}`;
 
-// Read the computed selection policy off the freshly-rendered sender
-// button of a message we just sent (specNick() is vjt's own nick), so
-// the `.nick-clickable` under test is guaranteed present and attributed.
-async function nickSelectionStyles(page: import("@playwright/test").Page) {
+// Send one message and hand back its sender button (specNick() is vjt's own
+// nick), so the `.nick-clickable` under test is present and attributed.
+//
+// SEEDING IS SEPARATE FROM READING because #1869's twin reads the same row
+// TWICE — standing, then under the latch. Sending `MESSAGE_BODY` a second time
+// puts two identical rows in the scrollback and the locator dies of strict
+// mode, which is exactly what it did before this split.
+async function seedNick(page: import("@playwright/test").Page) {
   const vjt = specUser();
   await loginAs(page, vjt);
   await selectChannel(page, NETWORK_SLUG, CHANNEL, { ownNick: specNick() });
@@ -58,7 +71,10 @@ async function nickSelectionStyles(page: import("@playwright/test").Page) {
 
   const nick = row.locator(".scrollback-sender.nick-clickable");
   await expect(nick).toContainText(specNick());
+  return nick;
+}
 
+function nickStyles(nick: import("@playwright/test").Locator) {
   return nick.evaluate((el) => {
     const cs = getComputedStyle(el);
     return {
@@ -72,7 +88,7 @@ async function nickSelectionStyles(page: import("@playwright/test").Page) {
 test("#250 desktop — .nick-clickable is user-select:text unconditionally (not is-ios-gated)", async ({
   page,
 }) => {
-  const styles = await nickSelectionStyles(page);
+  const styles = await nickStyles(await seedNick(page));
 
   // chromium project → NON-is-ios path: proving `text` here proves the
   // rule is unconditional. Fails (inherited `auto`) on unfixed code.
@@ -81,16 +97,37 @@ test("#250 desktop — .nick-clickable is user-select:text unconditionally (not 
   expect(styles.webkitUserSelect).toBe("text");
 });
 
-test("@webkit #250 iOS — .nick-clickable stays user-select:text (regression guard)", async ({
+// #1869 SUPERSEDED the touch half of #250, deliberately, and this guard moved
+// with it. #250 gave the token its own `user-select: text` so it would ride
+// inside a native drag-selection — written when Android had no `.scrollback`
+// re-enable at all. #1869 ends that state: there is no native drag-selection on
+// the scrollback any more, on any coarse pointer, because that selection WAS
+// the second menu. The token therefore follows the row — `none` standing,
+// `text` under the `is-selecting` latch — and #250's guarantee arrives instead
+// through `Select…`, which takes the whole row (`selectNodeContents`) with the
+// token inside it.
+//
+// The token is named explicitly in the CSS rather than left to inherit: it
+// matches its element DIRECTLY and so beats the inherited `none`. Without that
+// the bug survived in a narrower place — a long-press landing on a nick.
+// This asserting `text` under the latch is what proves the token was not simply
+// killed. The desktop sibling above is untouched: `pointer: fine` never enters
+// the gate, so #250's mouse-drag case still holds unconditionally.
+test("@webkit #250/#1869 iOS — .nick-clickable follows the row, unselectable until latched", async ({
   page,
 }) => {
-  const styles = await nickSelectionStyles(page);
+  const nick = await seedNick(page);
+  const styles = await nickStyles(nick);
 
-  // iPhone 15 UA → is-ios: the nick was already selectable via the
-  // `.scrollback` cascade; guard that the unconditional rule keeps it so.
   // WebKit reflects only the PREFIXED `webkitUserSelect` in computed
   // style (the unprefixed `userSelect` reads `undefined` there) — same
   // property the sibling text-selection-restored.spec asserts on iOS.
   expect(styles.htmlIsIos).toBe(true);
-  expect(styles.webkitUserSelect).toBe("text");
+  expect(styles.webkitUserSelect).toBe("none");
+
+  await page.evaluate(() => document.documentElement.classList.add("is-selecting"));
+
+  // Same locator, re-read: seeding again would send a second identical row.
+  const latched = await nickStyles(nick);
+  expect(latched.webkitUserSelect).toBe("text");
 });

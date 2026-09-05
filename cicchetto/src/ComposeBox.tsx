@@ -530,8 +530,13 @@ const ComposeBox: Component<Props> = (props) => {
     const input = e.currentTarget as HTMLInputElement;
     // Picker path does NOT pre-filter by category: normalizeUploadFile in
     // the orchestrator relabels iOS .m4r ringtones (octet-stream → audio)
-    // that categoryOf would otherwise drop.
+    // that categoryOf would otherwise drop. This is why the picker calls
+    // `triggerUploads` and deliberately NOT `dropUpload`, which does filter.
     const files = input.files ? Array.from(input.files) : [];
+    // #1883 — the confirm lives in `triggerUploads`, so it is inherited here
+    // rather than wired here. #1884's picker-only `pickerUpload` was reversed
+    // (vjt's ruling, 2026-08-31) so drop, paste and the OS share-target are
+    // guarded by the same door instead of each remembering to ask.
     if (files.length > 0) {
       triggerUploads(key(), props.networkSlug, props.channelName, files);
     }

@@ -370,6 +370,149 @@ defmodule GrappaWeb.UserSettingsControllerTest do
     end
   end
 
+  describe "/me/settings/upload-confirm-enabled (#1883)" do
+    test "401 without bearer", %{conn: conn} do
+      assert json_response(get(conn, "/me/settings/upload-confirm-enabled"), 401) ==
+               %{"error" => "unauthorized"}
+    end
+
+    # Visitor parity: the confirm is a cic dialog and applies to any subject,
+    # so a visitor gets the same door and the same default as a user.
+    test "200 + false for an unset visitor", %{conn: conn} do
+      {_, session} = visitor_and_session()
+
+      conn = conn |> put_bearer(session.id) |> get("/me/settings/upload-confirm-enabled")
+      assert json_response(conn, 200) == %{"upload_confirm_enabled" => false}
+    end
+
+    test "defaults to false — the opt-IN default, never asked until switched on",
+         %{conn: conn} do
+      {_, session} = user_and_session()
+
+      conn = conn |> put_bearer(session.id) |> get("/me/settings/upload-confirm-enabled")
+      assert json_response(conn, 200) == %{"upload_confirm_enabled" => false}
+    end
+
+    test "PUT true round-trips, and PUT false clears back to the default", %{conn: conn} do
+      {_, session} = user_and_session()
+      conn = put_bearer(conn, session.id)
+
+      on = put(conn, "/me/settings/upload-confirm-enabled", %{"upload_confirm_enabled" => true})
+      assert json_response(on, 200) == %{"upload_confirm_enabled" => true}
+
+      assert json_response(get(conn, "/me/settings/upload-confirm-enabled"), 200) ==
+               %{"upload_confirm_enabled" => true}
+
+      off = put(conn, "/me/settings/upload-confirm-enabled", %{"upload_confirm_enabled" => false})
+      assert json_response(off, 200) == %{"upload_confirm_enabled" => false}
+    end
+
+    test "400 on a non-boolean body", %{conn: conn} do
+      {_, session} = user_and_session()
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> put("/me/settings/upload-confirm-enabled", %{"upload_confirm_enabled" => "yes"})
+
+      assert json_response(conn, 400) == %{"error" => "bad_request"}
+    end
+  end
+
+  describe "GET /me/settings/show-peer-profiles — auth gating" do
+    test "401 without bearer", %{conn: conn} do
+      conn = get(conn, "/me/settings/show-peer-profiles")
+      assert json_response(conn, 401) == %{"error" => "unauthorized"}
+    end
+
+    test "200 + false for an unset visitor (visitor-parity)", %{conn: conn} do
+      {_, session} = visitor_and_session()
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> get("/me/settings/show-peer-profiles")
+
+      assert json_response(conn, 200) == %{"show_peer_profiles" => false}
+    end
+  end
+
+  describe "GET /me/settings/show-peer-profiles — happy path" do
+    setup %{conn: conn} do
+      {user, session} = user_and_session()
+      {:ok, conn: put_bearer(conn, session.id), user: user}
+    end
+
+    test "returns false when never persisted", %{conn: conn} do
+      conn = get(conn, "/me/settings/show-peer-profiles")
+      assert json_response(conn, 200) == %{"show_peer_profiles" => false}
+    end
+
+    test "reflects the most-recent PUT", %{conn: conn, user: user} do
+      {:ok, _} = UserSettings.put_show_peer_profiles({:user, user.id}, true)
+
+      conn = get(conn, "/me/settings/show-peer-profiles")
+      assert json_response(conn, 200) == %{"show_peer_profiles" => true}
+    end
+  end
+
+  describe "PUT /me/settings/show-peer-profiles — auth gating" do
+    test "401 without bearer", %{conn: conn} do
+      conn = put(conn, "/me/settings/show-peer-profiles", %{"show_peer_profiles" => true})
+      assert json_response(conn, 401) == %{"error" => "unauthorized"}
+    end
+
+    test "200 + persisted for a visitor (visitor-parity)", %{conn: conn} do
+      {visitor, session} = visitor_and_session()
+
+      conn =
+        conn
+        |> put_bearer(session.id)
+        |> put("/me/settings/show-peer-profiles", %{"show_peer_profiles" => true})
+
+      assert json_response(conn, 200) == %{"show_peer_profiles" => true}
+      assert UserSettings.get_show_peer_profiles({:visitor, visitor.id}) == true
+    end
+  end
+
+  describe "PUT /me/settings/show-peer-profiles — happy path" do
+    setup %{conn: conn} do
+      {user, session} = user_and_session()
+      {:ok, conn: put_bearer(conn, session.id), user: user}
+    end
+
+    test "200 + persisted for true", %{conn: conn, user: user} do
+      conn = put(conn, "/me/settings/show-peer-profiles", %{"show_peer_profiles" => true})
+      assert json_response(conn, 200) == %{"show_peer_profiles" => true}
+      assert UserSettings.get_show_peer_profiles({:user, user.id}) == true
+    end
+
+    test "200 + cleared back to false", %{conn: conn, user: user} do
+      {:ok, _} = UserSettings.put_show_peer_profiles({:user, user.id}, true)
+
+      conn = put(conn, "/me/settings/show-peer-profiles", %{"show_peer_profiles" => false})
+      assert json_response(conn, 200) == %{"show_peer_profiles" => false}
+      assert UserSettings.get_show_peer_profiles({:user, user.id}) == false
+    end
+  end
+
+  describe "PUT /me/settings/show-peer-profiles — validation" do
+    setup %{conn: conn} do
+      {_, session} = user_and_session()
+      {:ok, conn: put_bearer(conn, session.id)}
+    end
+
+    test "400 when body is missing the key entirely", %{conn: conn} do
+      conn = put(conn, "/me/settings/show-peer-profiles", %{})
+      assert json_response(conn, 400) == %{"error" => "bad_request"}
+    end
+
+    test "400 when value is not a boolean", %{conn: conn} do
+      conn = put(conn, "/me/settings/show-peer-profiles", %{"show_peer_profiles" => "yes"})
+      assert json_response(conn, 400) == %{"error" => "bad_request"}
+    end
+  end
+
   describe "upload_ttl_seconds — key isolation" do
     setup %{conn: conn} do
       {user, session} = user_and_session()
@@ -522,8 +665,9 @@ defmodule GrappaWeb.UserSettingsControllerTest do
   # ===========================================================================
   # display_prefs (#449) — server-backed display preferences, so one account
   # converges its UI across devices. Wrapped-envelope endpoint mirroring
-  # aliases; full-map PUT, no PATCH/diff. Three prefs: time_format,
-  # colored_nicklist, presence_filter (per-channel tri-state map).
+  # aliases; full-map PUT, no PATCH/diff. Four prefs: time_format,
+  # colored_nicklist, presence_filter (per-channel tri-state map), and
+  # show_bottom_bar (#1766).
   #
   # A/B-INDEPENDENT core: font-size (Fork A, escalated to vjt) and the
   # client-side seed-up-once migration (Fork B) are NOT exercised here.
@@ -534,7 +678,8 @@ defmodule GrappaWeb.UserSettingsControllerTest do
     %{
       "time_format" => "hms",
       "colored_nicklist" => false,
-      "presence_filter" => %{}
+      "presence_filter" => %{},
+      "show_bottom_bar" => true
     }
   end
 
@@ -569,6 +714,10 @@ defmodule GrappaWeb.UserSettingsControllerTest do
       assert prefs == default_display_prefs_wire()
     end
 
+    # The write below is deliberately the PRE-#1766 three-key body: it is what
+    # a cic bundle predating the fourth key sends, and the GET has to answer
+    # the complete four-key shape anyway (the missing key filled from the
+    # default, not dropped and not false).
     test "reflects the most-recent PUT", %{conn: conn, user: user} do
       {:ok, _} =
         UserSettings.put_display_prefs({:user, user.id}, %{
@@ -584,7 +733,8 @@ defmodule GrappaWeb.UserSettingsControllerTest do
       assert prefs == %{
                "time_format" => "hm",
                "colored_nicklist" => true,
-               "presence_filter" => %{"libera #bofh" => "hide"}
+               "presence_filter" => %{"libera #bofh" => "hide"},
+               "show_bottom_bar" => true
              }
     end
 
@@ -631,6 +781,32 @@ defmodule GrappaWeb.UserSettingsControllerTest do
       stored = UserSettings.get_display_prefs({:user, user.id})
       assert stored.time_format == "hm"
       assert stored.presence_filter == %{"libera #cat" => "show"}
+    end
+
+    # #1766 — the fourth key through the HTTP door, both directions. The `false`
+    # is the whole point of the pref, so a payload that carried the key but
+    # silently normalised it back to the default would pass every other test
+    # here.
+    test "200 + round-trips show_bottom_bar: false", %{conn: conn, user: user} do
+      body = %{"display_prefs" => Map.put(default_display_prefs_wire(), "show_bottom_bar", false)}
+
+      conn = put(conn, "/me/settings/display-prefs", body)
+
+      assert %{"display_prefs" => returned} = json_response(conn, 200)
+      assert returned["show_bottom_bar"] == false
+      assert UserSettings.get_display_prefs({:user, user.id}).show_bottom_bar == false
+    end
+
+    # A bundle predating #1766 keeps PUTting three keys. It must not start
+    # 422ing the moment the server grows the fourth — that would silently break
+    # the operator's OTHER display toggles until the tab reloaded.
+    test "200 for a pre-#1766 three-key body (no show_bottom_bar)", %{conn: conn} do
+      body = %{"display_prefs" => Map.delete(default_display_prefs_wire(), "show_bottom_bar")}
+
+      conn = put(conn, "/me/settings/display-prefs", body)
+
+      assert %{"display_prefs" => returned} = json_response(conn, 200)
+      assert returned["show_bottom_bar"] == true
     end
 
     test "PUT response carries persisted:true", %{conn: conn} do

@@ -997,7 +997,11 @@ defmodule Grappa.Operator do
             Integer.to_string(row.n),
             fmt_ms(row.total_ms),
             fmt_ms(row.queue_ms),
-            fmt_ms(row.mean_ms)
+            fmt_ms(row.mean_ms),
+            fmt_ms(row.max_ms),
+            fmt_ms(row.p50_ms),
+            fmt_ms(row.p95_ms),
+            fmt_ms(row.p99_ms)
           ],
           "\t"
         )
@@ -1019,6 +1023,7 @@ defmodule Grappa.Operator do
           Integer.to_string(c.n),
           Integer.to_string(c.queue_timeout),
           Integer.to_string(c.busy_locked),
+          Integer.to_string(c.interrupted),
           Integer.to_string(c.dropped)
         ],
         "\t"
@@ -1032,8 +1037,10 @@ defmodule Grappa.Operator do
 
     Enum.each(snapshot.lock_stalls, fn stall ->
       IO.puts(
-        "#{stall.phase}\tholder=#{lock_stall_field(stall.holder_pid)}" <>
-          "\theld_ms=#{lock_stall_field(stall.held_ms)}\twaiters=#{stall.waiter_count}"
+        "#{stall.phase}\tat=#{stall.observed_at}\tholder=#{lock_stall_field(stall.holder_pid)}" <>
+          "\theld_ms=#{lock_stall_field(stall.held_ms)}" <>
+          "\twaiters=#{waiters_column(stall.waiter_count)}" <>
+          "#{announced_column(stall.announced)}#{parked_column(stall)}"
       )
 
       Enum.each(lock_stall_detail_lines(stall), &IO.puts/1)
@@ -1049,6 +1056,23 @@ defmodule Grappa.Operator do
   defp lock_stall_field(nil), do: "unattributed"
   defp lock_stall_field(value), do: to_string(value)
 
+  # #1888 — a closing bracket counts no queue, and the column has to SAY that
+  # rather than print `waiters=` (reads as a formatting slip) or `waiters=0`
+  # (asserts a measurement nobody took). `lock_stall_field/1` is the wrong
+  # voice here: its `unattributed` names the #1687 finding, not an uncounted
+  # column.
+  @spec waiters_column(non_neg_integer() | nil) :: String.t()
+  defp waiters_column(nil), do: "not counted"
+  defp waiters_column(count), do: to_string(count)
+
+  # Only the closing bracket can answer this, so the column appears only
+  # there. Printing `announced=` on the two phases where the question does not
+  # arise would invite the reader to interpret a nil as a "no".
+  @spec announced_column(boolean() | nil) :: String.t()
+  defp announced_column(nil), do: ""
+  defp announced_column(true), do: "\tannounced=yes"
+  defp announced_column(false), do: "\tannounced=NO"
+
   # The two blocks are separate because the phases carry different halves.
   # A `:resolved` row has neither (the episode is over, nothing left to
   # inspect) and still renders as its header line alone — `waiters` is `[]`
@@ -1060,9 +1084,39 @@ defmodule Grappa.Operator do
   # they are what separates "blocked on the lock" from "queued for a
   # connection".
   @spec lock_stall_detail_lines(DbLatency.lock_stall_row()) :: [String.t()]
-  defp lock_stall_detail_lines(%{holder: holder, waiters: waiters}) do
+  defp lock_stall_detail_lines(%{holder: holder, caller: caller, waiters: waiters, parked: parked}) do
     holder_lines(holder) ++
-      Enum.map(waiters, &"  waiter #{&1.pid} waiting #{&1.elapsed_ms}ms at #{&1.current_function}")
+      caller_lines(caller) ++
+      Enum.map(waiters, &"  waiter #{&1.pid} waiting #{&1.elapsed_ms}ms at #{&1.current_function}") ++
+      Enum.map(parked, &"  parked #{&1.pid} in the NIF #{&1.elapsed_ms}ms at #{&1.current_function}")
+  end
+
+  # #1901 — the census counts a ROSTER, not a queue, and the two must not be
+  # read off the same column: `waiters=` says how many writers were provably
+  # blocked, while this says how many processes were inside the SQLite NIF,
+  # one of which IS the holder and none of which can be singled out.
+  # Conditional for the same reason `announced_column/1` is — printing
+  # `parked=0` on the three phases that never took a census would invite the
+  # reader to interpret it as "the NIF was empty".
+  @spec parked_column(DbLatency.lock_stall_row()) :: String.t()
+  defp parked_column(%{parked: []}), do: ""
+
+  defp parked_column(%{parked: parked} = stall) do
+    "\tparked=#{length(parked)}" <>
+      "\tregistered=#{stall.registered_holders}h/#{stall.registered_waiters}w"
+  end
+
+  # #1888 — the write path a `:resolved` row names. Labelled "write path" and
+  # not "holder at", deliberately: this stack was taken as the transaction
+  # ENDED, so it says which caller opened it and says nothing about where the
+  # holder paused. Rendering it under the holder's wording would hand an
+  # operator a frame to blame that was never measured.
+  @spec caller_lines(map() | nil) :: [String.t()]
+  defp caller_lines(nil), do: []
+
+  defp caller_lines(caller) do
+    ["  write path #{caller.pid} (#{caller.initial_call})"] ++
+      Enum.map(caller.stacktrace, &"    #{&1}")
   end
 
   @spec holder_lines(map() | nil) :: [String.t()]
@@ -1108,19 +1162,39 @@ defmodule Grappa.Operator do
       "memory_kb"
     ]
 
+  # #1901 — `max_ms` and the three quantiles sit AFTER `mean_ms` rather than
+  # replacing it: the mean is what mechanisms 1 and 3 of #357 are read from
+  # (`send_privmsg.mean_ms − persist.mean_ms`), and removing it to tidy the
+  # table would break a reading that is documented above and in OPERATIONS.
+  # The quantiles are bucket UPPER bounds — `Grappa.DbLatency.Distribution`
+  # says why they are not interpolated.
   defp query_latency_columns,
-    do: ["source", "op", "n", "total_ms", "queue_ms", "mean_ms"]
+    do: ["source", "op", "n", "total_ms", "queue_ms", "mean_ms", "max_ms", "p50_ms", "p95_ms", "p99_ms"]
 
   defp span_latency_columns,
-    do: ["span", "n", "total_ms", "mean_ms", "outcomes"]
+    do: ["span", "n", "total_ms", "mean_ms", "max_ms", "p50_ms", "p95_ms", "p99_ms", "outcomes"]
 
+  # #1657 shipped the `interrupted` counter and this header never learned
+  # about it, so `bin/grappa db-latency` has been printing four values under
+  # four names while the row carried five — a shipped signal that reached no
+  # operator. The row printer below gains it in the same place.
   defp contention_columns,
-    do: ["n", "queue_timeout", "busy_locked", "dropped"]
+    do: ["n", "queue_timeout", "busy_locked", "interrupted", "dropped"]
 
   @spec span_row_text(String.t(), Grappa.DbLatency.span_row()) :: String.t()
-  defp span_row_text(label, %{n: n, total_ms: total, mean_ms: mean, outcomes: outcomes}) do
+  defp span_row_text(label, row) do
     Enum.join(
-      [label, Integer.to_string(n), fmt_ms(total), fmt_ms(mean), fmt_outcomes(outcomes)],
+      [
+        label,
+        Integer.to_string(row.n),
+        fmt_ms(row.total_ms),
+        fmt_ms(row.mean_ms),
+        fmt_ms(row.max_ms),
+        fmt_ms(row.p50_ms),
+        fmt_ms(row.p95_ms),
+        fmt_ms(row.p99_ms),
+        fmt_outcomes(row.outcomes)
+      ],
       "\t"
     )
   end

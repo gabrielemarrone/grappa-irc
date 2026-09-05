@@ -95,6 +95,13 @@ defmodule GrappaWeb.RouterScopeTest do
     {"PUT", "/me/settings/notification-prefs"},
     {"GET", "/me/settings/upload-ttl-seconds"},
     {"PUT", "/me/settings/upload-ttl-seconds"},
+    # #1883 — the pre-upload confirm opt-in. Client-usable for the same
+    # reason its upload-retention sibling above is: it configures how this
+    # client SENDS, not who the account is, and a headless client that can
+    # upload has every business deciding whether it is asked first. It
+    # changes no credential and reveals nothing about the account.
+    {"GET", "/me/settings/upload-confirm-enabled"},
+    {"PUT", "/me/settings/upload-confirm-enabled"},
     {"GET", "/me/settings/auto-away-debounce-seconds"},
     {"PUT", "/me/settings/auto-away-debounce-seconds"},
     {"GET", "/me/settings/vhost"},
@@ -102,7 +109,15 @@ defmodule GrappaWeb.RouterScopeTest do
     {"GET", "/me/settings/aliases"},
     {"PUT", "/me/settings/aliases"},
     {"GET", "/me/settings/display-prefs"},
-    {"PUT", "/me/settings/display-prefs"}
+    {"PUT", "/me/settings/display-prefs"},
+    # M2 — the peer-profile opt-in. Client-usable by the same reasoning as
+    # `display-prefs` above: it is a per-subject switch over what the
+    # connection this client reads on may ASK other users, not a
+    # credential and not an account-management verb. It carries no
+    # secret, and refusing it would leave a headless client unable to
+    # tell whether the badges it renders are even being populated.
+    {"GET", "/me/settings/show-peer-profiles"},
+    {"PUT", "/me/settings/show-peer-profiles"}
   ]
 
   # Routes with no bearer gate at all — the login doors, the public

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { closeMediaViewer, mediaViewerState, openMediaViewer } from "../lib/mediaViewer";
 import {
   __resetForTest,
@@ -7,6 +7,7 @@ import {
   overlayEscapeDepth,
   runTopmostOverlayEscape,
 } from "../lib/overlayScrollLock";
+import { TEXT_VIEW_MAX_BYTES } from "../lib/textResource";
 import MediaViewerModal from "../MediaViewerModal";
 import { resetPlatformStubs, stubIosStandalone } from "./helpers/platformStubs";
 import { fireTouchAt } from "./helpers/touchEvents";
@@ -36,6 +37,35 @@ vi.mock("../lib/platform", async (importOriginal) => {
 
 const IMAGE_URL = "https://grappa.example/uploads/abcdefghijklmnopqrstuvwxyz";
 const VIDEO_URL = "https://grappa.example/uploads/zyxwvutsrqponmlkjihgfedcba";
+const TEXT_URL = "https://grappa.example/uploads/abcdefghijklmnopqrstuvwxyz.txt";
+
+// Response-shaped stub, same reason as textResource.test.ts: the component
+// depends on `res.body.getReader()`, and the platform's own Response is not
+// what is under test here. Module-scoped because the #1764 pane suite and the
+// #1839 copy suite need the same fetch, and two copies of it could drift into
+// two different notions of what the viewer is looking at.
+const stubBody = (text: string): void => {
+  const chunk = new TextEncoder().encode(text);
+  vi.stubGlobal("fetch", () =>
+    Promise.resolve({
+      ok: true,
+      status: 206,
+      body: {
+        getReader: () => {
+          let sent = false;
+          return {
+            read: () => {
+              if (sent) return Promise.resolve({ done: true });
+              sent = true;
+              return Promise.resolve({ done: false, value: chunk });
+            },
+            cancel: () => Promise.resolve(),
+          };
+        },
+      },
+    }),
+  );
+};
 
 beforeEach(() => {
   closeMediaViewer();
@@ -261,6 +291,137 @@ describe("MediaViewerModal — loading state", () => {
   });
 });
 
+// issue 1889 — a deleted or expired upload 404s, and the viewer used to render
+// that exactly like a broken image: "failed to load — try open in browser",
+// where "open in browser" lands on the same route and serves
+// `{"error":"not_found"}` as JSON. Two operators went hunting a client bug.
+//
+// The probe's own decision table lives in mediaAvailability.test.ts against a
+// bare function. What is pinned HERE is the wiring only this component can get
+// wrong: that the failure transition asks at all, that a 404 changes what the
+// reader is told, and — the constraint that matters most — that nothing short
+// of a read 404 ever does.
+describe("MediaViewerModal — gone vs broken (issue 1889)", () => {
+  // The probe is same-origin gated, so the href has to BE same-origin for the
+  // component to reach the fetch at all. Built from the live origin rather
+  // than spelled out: jsdom's URL is config, not a fact this suite owns.
+  const OWN_UPLOAD_URL = `${window.location.origin}/uploads/abcdefghijklmnopqrstuvwxyz.png`;
+
+  const stubProbe = (respond: () => Promise<unknown>): Mock => {
+    const fetchMock = vi.fn(respond);
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a 404 on the failed upload says it is GONE, not that the load failed", async () => {
+    stubProbe(() => Promise.resolve({ status: 404 }));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(OWN_UPLOAD_URL, "image");
+    container.querySelector("img")?.dispatchEvent(new Event("error"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/gone/i)).not.toBeNull();
+    });
+    // The generic line is REPLACED, not joined: it is the sentence that sent
+    // two operators after a client bug, and "open in browser" is bad advice
+    // for a route that answers JSON.
+    expect(screen.queryByText(/failed to load/i)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  // 🔴 The hard constraint, from three directions. Saying "gone" when the
+  // upload is fine is worse than the generic message this change replaces.
+  it("a 200 keeps the generic text — the element failed for some other reason", async () => {
+    const fetchMock = stubProbe(() => Promise.resolve({ status: 200 }));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(OWN_UPLOAD_URL, "image");
+    container.querySelector("img")?.dispatchEvent(new Event("error"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(screen.getByText(/failed to load/i)).not.toBeNull();
+    expect(screen.queryByText(/gone/i)).toBeNull();
+  });
+
+  it("a probe that never answers keeps the generic text — a dead network is not a deleted upload", async () => {
+    const fetchMock = stubProbe(() => Promise.reject(new TypeError("Failed to fetch")));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(OWN_UPLOAD_URL, "image");
+    container.querySelector("img")?.dispatchEvent(new Event("error"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(screen.getByText(/failed to load/i)).not.toBeNull();
+    expect(screen.queryByText(/gone/i)).toBeNull();
+  });
+
+  it("a cross-host failure is never probed at all — connect-src would refuse it", async () => {
+    // Not merely "answers unknown": the request must not be ISSUED, because a
+    // blocked fetch is a securitypolicyviolation and the e2e _cspGuard fixture
+    // fails any spec whose journey raises one.
+    const fetchMock = stubProbe(() => Promise.resolve({ status: 404 }));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer("https://elsewhere.example/pic.png", "image");
+    container.querySelector("img")?.dispatchEvent(new Event("error"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/failed to load/i)).not.toBeNull();
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a media element that LOADS is never probed — the refinement belongs to the failure", async () => {
+    const fetchMock = stubProbe(() => Promise.resolve({ status: 404 }));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(OWN_UPLOAD_URL, "image");
+    container.querySelector("img")?.dispatchEvent(new Event("load"));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).toBeNull();
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByText(/gone/i)).toBeNull();
+  });
+
+  // The header anchor is the SAME advice in another form: it lands on the same
+  // route and shows the reader `{"error":"not_found"}`. A line saying the file
+  // is gone beside a live control that opens it contradicts itself.
+  it("takes 'open in browser' away once the upload is known gone", async () => {
+    stubProbe(() => Promise.resolve({ status: 404 }));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(OWN_UPLOAD_URL, "image");
+    expect(screen.getByRole("link", { name: /open in browser/i })).not.toBeNull();
+
+    container.querySelector("img")?.dispatchEvent(new Event("error"));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("link", { name: /open in browser/i })).toBeNull();
+    });
+  });
+
+  it("KEEPS 'open in browser' on a generic failure — there the advice is still live", async () => {
+    // The suppression is scoped to `gone` on purpose. On an ordinary failed
+    // load "maybe it is your browser, try it over there" is still a real
+    // hypothesis, and the escape hatch still earns its place.
+    const fetchMock = stubProbe(() => Promise.reject(new TypeError("Failed to fetch")));
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(OWN_UPLOAD_URL, "image");
+    container.querySelector("img")?.dispatchEvent(new Event("error"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(screen.getByText(/failed to load/i)).not.toBeNull();
+    expect(screen.getByRole("link", { name: /open in browser/i })).not.toBeNull();
+  });
+});
+
 // #1438 — swipe up or down to dismiss. The binder's decision table (which
 // drags commit, which spring back, what it refuses to claim) is pinned in
 // mediaViewerGesture.test.ts against a bare element; what is asserted HERE is
@@ -357,17 +518,465 @@ describe("MediaViewerModal — swipe to dismiss (#1438)", () => {
     expect(backdrop.style.opacity).toBe("");
   });
 
-  it("a zoomed image keeps its pan — the dismiss stands down until it is back at fit", () => {
+  it("a zoomed image keeps the drag — the dismiss stands down until it is back at fit", () => {
     const { container } = render(() => <MediaViewerModal />);
     openMediaViewer(IMAGE_URL, "image");
     const img = container.querySelector<HTMLElement>("img");
     if (img === null) throw new Error("no image rendered");
     // Double-tap zoom (#213), the same two touchstarts the viewer reads: it is
     // the published scale, not a test seam, that stands the dismiss down.
+    // Since #1805 the drag it stands down FOR is the browser's own scroll
+    // rather than a synthesized pan, but the gate and its reason are unchanged.
     fireTouchAt(img, "touchstart", 1_000, { clientX: X, clientY: Y0 });
     fireTouchAt(img, "touchend", 1_020, { clientX: X, clientY: Y0 });
     fireTouchAt(img, "touchstart", 1_100, { clientX: X, clientY: Y0 });
     dragAndLift(dialogIn(container), 400);
     expect(mediaViewerState()).not.toBeNull();
+  });
+});
+
+// #1805 — the pan is the browser's scroller now, not a synthesized transform.
+// The pure arithmetic (rescaleScroll, applyPinch, toggleZoom) is pinned in
+// pinchZoom.test.ts; what is asserted HERE is what only this component can get
+// wrong, and each item is one that a plausible-looking implementation gets
+// wrong silently:
+//
+//   - a single-finger touchmove must NOT be claimed. A blanket preventDefault
+//     is exactly what shipped before, and it leaves every other symptom intact
+//     while the scroll simply never happens (measured on the #1805 bench:
+//     claiming while zoomed pins scrollTop at 0 with the scroller otherwise
+//     correct in every respect).
+//   - the sizer must be ZERO at fit. Non-zero there is a browser pan at fit,
+//     which is the swipe-to-dismiss taken away.
+//   - the zoom must be anchored to the touched point. Anchoring to the corner
+//     also "works": it zooms, it scrolls, and it is wrong.
+//
+// jsdom has no layout, so the fit box the component MIRRORS and the scroll
+// offsets it WRITES are injected below. That is a seam on the DOM, not on the
+// component — nothing in production code knows these tests exist.
+describe("MediaViewerModal — native pan for the zoomed image (#1805)", () => {
+  const FIT = { width: 300, height: 200 };
+
+  const openZoomable = (container: HTMLElement) => {
+    openMediaViewer(IMAGE_URL, "image");
+    const scroller = container.querySelector<HTMLElement>(".media-viewer-zoom-scroller");
+    const sizer = container.querySelector<HTMLElement>(".media-viewer-zoom-sizer");
+    const img = container.querySelector<HTMLImageElement>("img.media-viewer-media--zoomable");
+    if (scroller === null || sizer === null || img === null) {
+      throw new Error("no zoomable image rendered");
+    }
+    Object.defineProperty(img, "clientWidth", { value: FIT.width, configurable: true });
+    Object.defineProperty(img, "clientHeight", { value: FIT.height, configurable: true });
+    scroller.getBoundingClientRect = (): DOMRect =>
+      ({
+        left: 0,
+        top: 0,
+        right: FIT.width,
+        bottom: FIT.height,
+        width: FIT.width,
+        height: FIT.height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    let scrollLeft = 0;
+    let scrollTop = 0;
+    Object.defineProperty(scroller, "scrollLeft", {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (v: number) => {
+        scrollLeft = v;
+      },
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = v;
+      },
+    });
+    // The load handler is where the fit is first measured — no ResizeObserver
+    // in jsdom, which the component tolerates on purpose.
+    fireEvent.load(img);
+    return { scroller, sizer, img };
+  };
+
+  const doubleTapAt = (el: HTMLElement, clientX: number, clientY: number): void => {
+    fireTouchAt(el, "touchstart", 1_000, { clientX, clientY });
+    fireTouchAt(el, "touchend", 1_020, { clientX, clientY });
+    fireTouchAt(el, "touchstart", 1_100, { clientX, clientY });
+  };
+
+  it("leaves a single-finger touchmove unclaimed, so the browser can scroll with it", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { img } = openZoomable(container);
+    doubleTapAt(img, 150, 100);
+    fireTouchAt(img, "touchstart", 2_000, { clientX: 150, clientY: 100 });
+    const move = fireTouchAt(img, "touchmove", 2_050, { clientX: 150, clientY: 40 });
+    expect(move.defaultPrevented).toBe(false);
+  });
+
+  it("still claims a TWO-finger touchmove — the native pinch it replaces does not exist", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { img } = openZoomable(container);
+    fireTouchAt(
+      img,
+      "touchstart",
+      2_000,
+      { clientX: 100, clientY: 100 },
+      { clientX: 200, clientY: 100 },
+    );
+    const move = fireTouchAt(
+      img,
+      "touchmove",
+      2_050,
+      { clientX: 0, clientY: 100 },
+      { clientX: 300, clientY: 100 },
+    );
+    expect(move.defaultPrevented).toBe(true);
+    expect(img.style.transform).toBe("scale(3)");
+  });
+
+  it("carries NO scrollable area at fit, so the dismiss keeps the single-finger drag", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { sizer } = openZoomable(container);
+    expect(sizer.style.width).toBe("0px");
+    expect(sizer.style.height).toBe("0px");
+  });
+
+  it("grows the scrollable area to fit x scale once zoomed — a transform alone would grow nothing", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { sizer, img } = openZoomable(container);
+    doubleTapAt(img, 150, 100);
+    expect(img.style.transform).toBe("scale(2)");
+    expect(sizer.style.width).toBe(`${FIT.width * 2}px`);
+    expect(sizer.style.height).toBe(`${FIT.height * 2}px`);
+  });
+
+  it("anchors a double-tap zoom to the tapped point, not to the corner", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { scroller, img } = openZoomable(container);
+    // Tap dead centre of a 300x200 box: at 2x the point that was at (150,100)
+    // paints at (300,200), so holding it under the finger costs exactly one
+    // half-box of scroll on each axis.
+    doubleTapAt(img, 150, 100);
+    expect(scroller.scrollLeft).toBe(150);
+    expect(scroller.scrollTop).toBe(100);
+  });
+
+  it("holds the top-left corner when THAT is what was tapped", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { scroller, img } = openZoomable(container);
+    doubleTapAt(img, 0, 0);
+    expect(scroller.scrollLeft).toBe(0);
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("unwinds the scroll when the second double-tap returns the image to fit", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    const { scroller, sizer, img } = openZoomable(container);
+    doubleTapAt(img, 150, 100);
+    doubleTapAt(img, 150, 100);
+    expect(img.style.transform).toBe("scale(1)");
+    expect(sizer.style.width).toBe("0px");
+    expect(scroller.scrollLeft).toBe(0);
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("marks the modal as the image variant, so the stylesheet can re-open the touch stream", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    openZoomable(container);
+    const dialog = container.querySelector<HTMLElement>(".media-viewer-modal");
+    if (dialog === null) throw new Error("no media viewer dialog rendered");
+    expect(dialog.classList.contains("media-viewer-modal--zoomable")).toBe(true);
+  });
+
+  it("does NOT mark a video as the image variant — a <video> has no scroller under it", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(VIDEO_URL, "video");
+    const dialog = container.querySelector<HTMLElement>(".media-viewer-modal");
+    if (dialog === null) throw new Error("no media viewer dialog rendered");
+    expect(dialog.classList.contains("media-viewer-modal--zoomable")).toBe(false);
+    expect(container.querySelector(".media-viewer-zoom-scroller")).toBeNull();
+  });
+});
+
+// #1764 — .txt / .md open as SOURCE in the same modal: monospace, line
+// numbers, no rendering of any kind (vjt, #sbiffo 2026-08-24: "nono nessun
+// rendering di gesu, assolutamente solo il sorgente txt e md"). The fetch/cap
+// arithmetic is pinned in textResource.test.ts against the raw verb; what is
+// asserted HERE is what only this component can get wrong — that the bytes
+// reach the pane, that the gutter numbers the lines the pane shows, that the
+// truncation is VISIBLE, and that a scrolled pane does not lose its scroll to
+// the dismiss gesture.
+describe("MediaViewerModal — text source viewer (#1764)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const textPane = (container: HTMLElement): HTMLElement => {
+    const el = container.querySelector<HTMLElement>(".media-viewer-text");
+    if (el === null) throw new Error("no text pane rendered");
+    return el;
+  };
+
+  it("renders the fetched source verbatim in a <pre>", async () => {
+    stubBody("alpha\nbeta\ngamma\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text-source")?.textContent).toBe(
+        "alpha\nbeta\ngamma",
+      );
+    });
+    // The whole point of the ruling: nothing was interpreted on the way in.
+    expect(container.querySelector(".media-viewer-text-source")?.tagName).toBe("PRE");
+  });
+
+  it("numbers every line, and exactly the lines the pane shows", async () => {
+    stubBody("one\ntwo\nthree\nfour\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text-gutter")?.textContent).toBe("1\n2\n3\n4");
+    });
+  });
+
+  it("markdown source is shown as SOURCE — no heading, no emphasis, no anchor", async () => {
+    stubBody("# Title\n\n**bold** and [a link](https://example.com)\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer("https://grappa.example/uploads/abcdefghijklmnopqrstuvwxyz.md", "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text-source")?.textContent).toContain(
+        "**bold**",
+      );
+    });
+    const pane = textPane(container);
+    // The three shapes a renderer would have produced. cic has no sanitisation
+    // surface anywhere today and this change must not be the reason it grows
+    // one — so the assertion is about generated HTML, not about looks.
+    expect(pane.querySelector("h1")).toBeNull();
+    expect(pane.querySelector("strong")).toBeNull();
+    expect(pane.querySelector("a")).toBeNull();
+  });
+
+  it("says so, in the pane, when the source was cut at the cap", async () => {
+    stubBody("x".repeat(TEXT_VIEW_MAX_BYTES + 1));
+    render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(screen.getByText(/first .* of this file/i)).not.toBeNull();
+    });
+  });
+
+  it("says nothing about truncation when the whole file arrived", async () => {
+    stubBody("short\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text-source")).not.toBeNull();
+    });
+    expect(container.querySelector(".media-viewer-text-truncated")).toBeNull();
+  });
+
+  it("a failed fetch shows the shared failure text, not a forever-spinner", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve({ ok: false, status: 404, body: null }));
+    render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(screen.getByText(/failed to load/i)).not.toBeNull();
+    });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("a downward drag on a SCROLLED pane does not dismiss — the pane owns its own axis", async () => {
+    stubBody("a\nb\nc\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text")).not.toBeNull();
+    });
+    const dialog = container.querySelector<HTMLElement>(".media-viewer-modal");
+    if (dialog === null) throw new Error("no media viewer dialog rendered");
+    // jsdom has no layout, so scrollTop is a plain writable property here —
+    // which is exactly the state the gate reads on a real phone.
+    textPane(container).scrollTop = 120;
+    fireTouchAt(dialog, "touchstart", 0, { clientX: 160, clientY: 300 });
+    fireTouchAt(dialog, "touchmove", 1_000, { clientX: 160, clientY: 700 });
+    fireTouchAt(dialog, "touchend", 2_000, { clientX: 160, clientY: 700 });
+    expect(mediaViewerState()).not.toBeNull();
+  });
+
+  it("an UPWARD drag never dismisses a text pane — that gesture is 'read on'", async () => {
+    stubBody("a\nb\nc\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text")).not.toBeNull();
+    });
+    const dialog = container.querySelector<HTMLElement>(".media-viewer-modal");
+    if (dialog === null) throw new Error("no media viewer dialog rendered");
+    fireTouchAt(dialog, "touchstart", 0, { clientX: 160, clientY: 300 });
+    fireTouchAt(dialog, "touchmove", 1_000, { clientX: 160, clientY: -100 });
+    fireTouchAt(dialog, "touchend", 2_000, { clientX: 160, clientY: -100 });
+    expect(mediaViewerState()).not.toBeNull();
+  });
+
+  it("a long downward drag from the TOP of the pane still dismisses", async () => {
+    stubBody("a\nb\nc\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text")).not.toBeNull();
+    });
+    const dialog = container.querySelector<HTMLElement>(".media-viewer-modal");
+    if (dialog === null) throw new Error("no media viewer dialog rendered");
+    fireTouchAt(dialog, "touchstart", 0, { clientX: 160, clientY: 300 });
+    fireTouchAt(dialog, "touchmove", 1_000, { clientX: 160, clientY: 700 });
+    fireTouchAt(dialog, "touchend", 2_000, { clientX: 160, clientY: 700 });
+    expect(mediaViewerState()).toBeNull();
+  });
+
+  it("carries the text modifier class, which is what re-opens touch panning for the pane", async () => {
+    stubBody("a\n");
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text")).not.toBeNull();
+    });
+    expect(container.querySelector(".media-viewer-modal--text")).not.toBeNull();
+  });
+
+  it("an image open carries NO text modifier — `touch-action: none` must survive there", () => {
+    const { container } = render(() => <MediaViewerModal />);
+    openMediaViewer(IMAGE_URL, "image");
+    expect(container.querySelector(".media-viewer-modal--text")).toBeNull();
+  });
+});
+
+// issue 1839 — a copy control on the text arm's header. Selecting a long source
+// pane by hand is a fight on a phone (the pane owns the drag as a scroll), so
+// the button is the whole affordance; what is asserted here is the three ways
+// it can be shipped wrong and look right:
+//
+//   - copying the DOM instead of the resource. The pane is a gutter <pre> and a
+//     source <pre> side by side, so `textContent` off the pane carries the line
+//     NUMBERS. The fixtures below are deliberately digit-free, which makes a
+//     gutter leak provable rather than eyeballed.
+//   - copying a TRUNCATED view without saying so. `TEXT_VIEW_MAX_BYTES` caps
+//     the fetch, and a silent prefix of a config file is the failure worth
+//     designing against.
+//   - swallowing a clipboard failure. `navigator.clipboard` is
+//     `[SecureContext]`-only and undefined on the plain-http LAN deploys this
+//     project supports, which is not a hypothetical arm.
+describe("MediaViewerModal — copy the source (issue 1839)", () => {
+  const restoreClipboard: Array<() => void> = [];
+
+  const withClipboard = (value: unknown): void => {
+    const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { value, configurable: true });
+    restoreClipboard.push(() => {
+      if (original === undefined) Reflect.deleteProperty(navigator, "clipboard");
+      else Object.defineProperty(navigator, "clipboard", original);
+    });
+  };
+
+  const stubClipboard = (): Mock<(t: string) => Promise<void>> => {
+    const writeText = vi.fn<(t: string) => Promise<void>>(() => Promise.resolve());
+    withClipboard({ writeText });
+    return writeText;
+  };
+
+  afterEach(() => {
+    for (const restore of restoreClipboard.splice(0)) restore();
+    vi.unstubAllGlobals();
+  });
+
+  const openTextAndCopy = async (container: HTMLElement, href: string): Promise<void> => {
+    openMediaViewer(href, "text");
+    await waitFor(() => {
+      expect(container.querySelector(".media-viewer-text-source")).not.toBeNull();
+    });
+    await fireEvent.click(screen.getByRole("button", { name: /^copy$/i }));
+  };
+
+  it("puts the SOURCE on the clipboard — the gutter's line numbers stay out of it", async () => {
+    stubBody("alpha\nbeta\ngamma\n");
+    const writeText = stubClipboard();
+    const { container } = render(() => <MediaViewerModal />);
+    await openTextAndCopy(container, TEXT_URL);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const payload = writeText.mock.calls[0]?.[0] ?? "";
+    expect(payload).toBe("alpha\nbeta\ngamma");
+    // The gutter really is rendered, and really does carry digits — without
+    // this the negative below would pass against an empty pane.
+    expect(container.querySelector(".media-viewer-text-gutter")?.textContent).toBe("1\n2\n3");
+    // The fixture has no digits of its own, so ANY digit in the payload is a
+    // number that came off the gutter. This is the assertion a `textContent`
+    // scrape of the pane fails.
+    expect(payload).not.toMatch(/[0-9]/);
+  });
+
+  it("says the clipboard holds only a slice when the fetch was cut at the cap", async () => {
+    stubBody("x".repeat(TEXT_VIEW_MAX_BYTES + 1));
+    const writeText = stubClipboard();
+    const { container } = render(() => <MediaViewerModal />);
+    await openTextAndCopy(container, TEXT_URL);
+
+    // The slice is still delivered — refusing to copy would be worse than
+    // copying and saying so.
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toMatch(new RegExp(`first ${TEXT_VIEW_MAX_BYTES / 1024} KiB`));
+  });
+
+  it("does NOT claim a slice when the whole file arrived", async () => {
+    stubBody("alpha\nbeta\n");
+    stubClipboard();
+    const { container } = render(() => <MediaViewerModal />);
+    await openTextAndCopy(container, TEXT_URL);
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toMatch(/copied/i);
+    expect(status.textContent).not.toMatch(/first/i);
+  });
+
+  it("names a missing clipboard API instead of failing inert", async () => {
+    stubBody("alpha\nbeta\n");
+    withClipboard(undefined);
+    const { container } = render(() => <MediaViewerModal />);
+    await openTextAndCopy(container, TEXT_URL);
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toMatch(/secure \(HTTPS\)/);
+    // The source stays on screen: the way out the message names is real.
+    expect(container.querySelector(".media-viewer-text-source")?.textContent).toBe("alpha\nbeta");
+  });
+
+  it("names a rejected write too (denied permission)", async () => {
+    stubBody("alpha\nbeta\n");
+    withClipboard({ writeText: () => Promise.reject(new Error("NotAllowedError")) });
+    const { container } = render(() => <MediaViewerModal />);
+    await openTextAndCopy(container, TEXT_URL);
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toMatch(/NotAllowedError/);
+  });
+
+  it("offers no copy control on the image arm — the header is shared chrome", () => {
+    render(() => <MediaViewerModal />);
+    openMediaViewer(IMAGE_URL, "image");
+    expect(screen.queryByRole("button", { name: /^copy$/i })).toBeNull();
+  });
+
+  it("offers no copy control when the text fetch failed — there is nothing to take", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve({ ok: false, status: 404, body: null }));
+    render(() => <MediaViewerModal />);
+    openMediaViewer(TEXT_URL, "text");
+    await waitFor(() => {
+      expect(screen.getByText(/failed to load/i)).not.toBeNull();
+    });
+    expect(screen.queryByRole("button", { name: /^copy$/i })).toBeNull();
   });
 });

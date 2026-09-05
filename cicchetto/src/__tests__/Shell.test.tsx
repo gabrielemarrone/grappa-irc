@@ -1,7 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { closeAudio, playAudio } from "../lib/audioPlayer";
+import { setShowBottomBar } from "../lib/showBottomBar";
 import { LIST_WINDOW_NAME } from "../lib/windowKinds";
+import { nestedRuleBodies } from "./helpers/themeCss";
 import { swipeHorizontally } from "./helpers/touchEvents";
 
 // #500 — RailActions collapsed every rail affordance behind ONE launcher, so a
@@ -63,7 +66,30 @@ const selectionState = vi.hoisted(() => {
 });
 
 // Mutable isMobile ref so individual tests can flip to mobile mode.
-const mobileState = vi.hoisted(() => ({ value: false }));
+//
+// #1896 — a REAL Solid signal (lazy-init, same reason and shape as
+// `userHolder` below), because the regime is no longer only a start-up
+// condition: rotating a phone CROSSES the breakpoint mid-session, and a plain
+// object stored the new value without notifying the `<Show when={isMobile()}>`
+// that switches the two shells. Every pre-#1896 site assigns `.value` before
+// its `render(() => <Shell />)` (measured: 40 assignments, 0 after a render),
+// so making it notify changes nothing for them and is the only way to mount a
+// shell and then rotate it.
+const mobileState = vi.hoisted(() => {
+  let sig: [() => boolean, (v: boolean) => boolean] | null = null;
+  const ensure = () => {
+    if (sig === null) sig = createSignal<boolean>(false);
+    return sig;
+  };
+  return {
+    get value() {
+      return ensure()[0]();
+    },
+    set value(v: boolean) {
+      ensure()[1](v);
+    },
+  };
+});
 // UX-4 bucket M (2026-05-19) — bearer state for the post-login bootstrap
 // effect that loads the upload-TTL preference. Default null = no token
 // yet; tests that exercise the bootstrap set it before mount.
@@ -137,6 +163,9 @@ vi.mock("@solidjs/router", () => ({
 }));
 
 vi.mock("../lib/networks", () => ({
+  // #1861 — casemappingForSlug (lib/casemapping.ts) resolves the fold
+  // through this map, so the mock has to carry it.
+  networkIdBySlug: () => undefined,
   networks: () => [{ id: 1, slug: "freenode", nick: "vjt", inserted_at: "", updated_at: "" }],
   channelsBySlug: () => channelsHolder.current,
   user: () => userHolder.current,
@@ -1554,5 +1583,415 @@ describe("Shell — #608 overlay-refcount leak on same-tick open→close", () =>
     selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
     await flushMacrotask();
     expect(overlayCount()).toBe(0);
+  });
+});
+
+// #1701 — vjt's ruling (relayed from IRC, 2026-08-24): the docked player stays
+// at the bottom of the main view but moves BELOW the compose box, between it
+// and the bottom bar. It is none of the three options that were on the table,
+// and taking the player out of the contested corner is the whole point: nothing
+// is hidden and nothing is gated by window kind, so #1051's ☰ ruling and the
+// four e2e specs that pin it are untouched.
+//
+// TWO assertions, and the pair is what carries the meaning. Document order
+// alone says only "later in the tree" — satisfied equally by a player hoisted
+// out to a sibling of `.shell-main`, which renders BELOW the bottom bar and not
+// between the two. Shared parent alone says only "same column" — satisfied
+// equally by today's above-compose mount. Together they say "inside the compose
+// box's own flex column, after it", which is the ruling verbatim.
+//
+// jsdom applies no stylesheet and computes no layout, so the fact that turns
+// document order into VISUAL order is read off the CSS text instead — the same
+// reason `audioMiniPlayerLayout` guards this bar's flex contract that way.
+describe("#1701 — the docked player sits below the compose box", () => {
+  beforeEach(() => {
+    // jsdom implements no HTMLMediaElement playback, and mounting the bar drives
+    // `play()` through the open effect. Same stubs `AudioMiniPlayer.test` installs.
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => Promise.resolve());
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    // The audio store is a module singleton: a bar left mounted here leaks into
+    // every sibling suite that counts elements in the shell.
+    closeAudio();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["mobile", true],
+    ["desktop", false],
+  ])("on %s it renders in the compose box's column, after it", async (_form, mobile) => {
+    mobileState.value = mobile;
+    selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+    // An UPLOAD href on purpose. `radio.ts` derives the tuned station by matching
+    // this against the curated table's exact `streamUrl`, and a station tunes
+    // `nowPlaying`'s poll at `api.somafm.com` — a live third-party request from a
+    // unit test. An `/uploads/` URL cannot match, so nothing reaches the network.
+    playAudio("https://grappa.example/uploads/abc", null);
+    const { container } = render(() => <Shell />);
+
+    // Anti-false-green: assert the bar is actually mounted before measuring
+    // where it is. An unmounted player trivially satisfies "not above compose".
+    const player = await waitFor(() => {
+      const el = container.querySelector(".audio-mini-player");
+      expect(el, "the docked bar must be mounted for this to measure anything").not.toBeNull();
+      return el as HTMLElement;
+    });
+    const compose = container.querySelector(".compose-box") as HTMLElement | null;
+    expect(compose, "the compose box must be mounted").not.toBeNull();
+    if (compose === null) return;
+
+    // #1896 — `closest`, not `parentElement`, and the change is forced rather
+    // than chosen: the bar is portalled into `<AudioDock />` now, so between it
+    // and the column sit the dock and the container Solid's <Portal> builds.
+    // The RULING is unchanged and so is what this rejects — a player hoisted
+    // out to a sibling of `.shell-main` has no `.drop-upload-zone` ancestor at
+    // all, which is the shape the original assertion was written against. What
+    // it can no longer see on its own is the two wrappers turning "flex item of
+    // the column" into "grandchild of it", so the sibling assertion below reads
+    // that off the stylesheet: `display: contents` is what keeps document
+    // ancestry and LAYOUT saying the same thing here.
+    expect(
+      player.closest(".drop-upload-zone"),
+      "the bar sits in the compose box's column — hoisting it out puts it under the bottom bar",
+    ).toBe(compose.parentElement);
+    expect(
+      compose.compareDocumentPosition(player) & Node.DOCUMENT_POSITION_FOLLOWING,
+      "the bar must come AFTER the compose box, not before it",
+    ).toBeTruthy();
+  });
+
+  it("the boxes the dock adds are out of layout, so the bar is still a flex item of that column", () => {
+    // #1896 — the other half of the assertion above. Two wrappers now stand
+    // between `.drop-upload-zone` and `.audio-mini-player`; `display: contents`
+    // removes them from layout so the column lays the bar out directly. Read
+    // off the CSS text for the reason `audioMiniPlayerLayout` gives: jsdom
+    // applies no stylesheet, so a DOM assertion cannot see this at all.
+    //
+    // Asserted through the GROUP, spelled verbatim, the way that file reads its
+    // unshrinkable-controls rule: `nestedRuleBodies` matches the selector list
+    // exactly, so dropping either member throws `CSS rule not found` instead of
+    // quietly measuring a rule that no longer covers both wrappers. One wrapper
+    // left in layout is enough to make the bar a grandchild of the column.
+    const bodies = nestedRuleBodies(".audio-dock,\n.audio-dock-portal");
+    expect(bodies.length, "the dock pair must be declared in exactly one block").toBe(1);
+    expect(bodies[0]).toMatch(/display:\s*contents/);
+  });
+
+  it("that column is a plain top-to-bottom flex, so document order IS visual order", () => {
+    // `order` would break the equivalence silently; measured, the property
+    // appears nowhere in the sheet, so this one declaration is the whole link.
+    const bodies = nestedRuleBodies(".drop-upload-zone");
+    expect(bodies.length, ".drop-upload-zone must be declared in exactly one block").toBe(1);
+    expect(bodies[0]).toMatch(/flex-direction:\s*column/);
+  });
+});
+
+// #1896 — ROTATION. The two shells are a JSX branch, not a CSS toggle, and a
+// phone whose landscape CSS width clears 768px crosses it every time it is
+// turned. Solid then destroys one subtree and builds the other, and the player
+// used to be mounted INSIDE both — so the `<audio>` on the far side was a
+// different element, its open effect ran as a first tune, and for a STREAM
+// `mustRefetch()` is true: a new HTTP connection to the station. That is the
+// audible gap the reporter heard, and the autoplay is the "restarts on its own".
+//
+// WHY THE ELEMENT'S IDENTITY IS THE ASSERTION AND NOT `play()` CALL COUNTS.
+// Counting `play()` would pass just as well for a rebuilt element that happened
+// not to autoplay — a green that says nothing about the transport surviving.
+// The element is what holds the connection, so the element is what must be the
+// same object. It is marked before the flip rather than compared by tag: a
+// fresh `<audio>` is `toBeInstanceOf`-identical to the old one and `querySelector`
+// would happily hand back the replacement.
+//
+// The three controls around it are load-bearing:
+//   * the bar must be MOUNTED before the flip (an absent player trivially
+//     survives one);
+//   * the branch must actually have SWITCHED (a resize that does not cross the
+//     breakpoint is the false green this whole file is about);
+//   * the chrome must be present again AFTER the flip — the element surviving
+//     is worthless if the transport it drives went with the old subtree.
+describe("#1896 — crossing the mobile breakpoint does not rebuild the audio element", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => Promise.resolve());
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    closeAudio();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["portrait → landscape", true],
+    ["landscape → portrait", false],
+  ])("%s keeps the SAME <audio> element and re-docks the bar", async (_turn, startMobile) => {
+    mobileState.value = startMobile;
+    selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+    // An UPLOAD href, for the same reason #1701's sibling gives: a station href
+    // would tune `nowPlaying`'s poll at a third party from a unit test.
+    playAudio("https://grappa.example/uploads/abc", null);
+    const { container } = render(() => <Shell />);
+
+    const before = await waitFor(() => {
+      const el = container.querySelector("audio");
+      expect(el, "the player must be mounted for a rotation to mean anything").not.toBeNull();
+      expect(
+        container.querySelector(".audio-mini-player"),
+        "the transport must be docked before the flip",
+      ).not.toBeNull();
+      return el as HTMLAudioElement;
+    });
+    before.dataset.rotationProbe = "survived";
+
+    // THE ROTATION.
+    mobileState.value = !startMobile;
+
+    // Control: the branch really did switch. Without this the assertions below
+    // would pass on a rotation that never crossed the breakpoint.
+    expect(
+      container.querySelector(startMobile ? ".shell-mobile" : ".shell:not(.shell-mobile)"),
+      "the shell that was live before the flip must be gone",
+    ).toBeNull();
+
+    const after = container.querySelector("audio");
+    expect(after, "there must still be exactly one player").not.toBeNull();
+    expect(container.querySelectorAll("audio").length).toBe(1);
+    expect(after, "the element must be the SAME object, not a fresh one").toBe(before);
+    expect((after as HTMLAudioElement).dataset.rotationProbe).toBe("survived");
+    expect(
+      container.querySelector(".audio-mini-player"),
+      "the transport must have followed into the other shell's dock",
+    ).not.toBeNull();
+  });
+});
+
+// #1766 — the mobile window bar becomes opt-OUT, and turning it off must not
+// leave the phone navigable only by an invisible edge swipe.
+//
+// Two halves, and the second is the one worth the file. The gate itself is one
+// `<Show>`; what needs pinning is that it is a MOUNT gate and not a CSS one
+// (BottomBar carries no internal display guard by design, and a hidden bar
+// would keep running #327's double-rAF scroll-into-view against a strip nobody
+// can see), and that the door which replaces it actually appears — #71's
+// second ruling refused drawer-only navigation as a default, and #1041's
+// left-edge swipe is gesture-only with zero affordance.
+//
+// The default-ON case is asserted next to the off case on purpose: a dozen e2e
+// specs address `.bottom-bar`, so a gate that got the polarity backwards would
+// be caught here rather than in the e2e cascade.
+describe("#1766 — the mobile window bar is opt-out, and the ☰ ships with the opt-out", () => {
+  afterEach(() => {
+    setShowBottomBar(true);
+  });
+
+  it("renders the bar by default — the preference ships ON", () => {
+    mobileState.value = true;
+    const { container } = render(() => <Shell />);
+    expect(container.querySelector(".bottom-bar")).not.toBeNull();
+  });
+
+  it("drops the bar from the DOM when the preference is off (a MOUNT gate, not display:none)", () => {
+    mobileState.value = true;
+    setShowBottomBar(false);
+    const { container } = render(() => <Shell />);
+    expect(container.querySelectorAll(".bottom-bar").length).toBe(0);
+  });
+
+  it("re-mounts the bar live when the preference flips back on", async () => {
+    mobileState.value = true;
+    setShowBottomBar(false);
+    const { container } = render(() => <Shell />);
+    expect(container.querySelector(".bottom-bar")).toBeNull();
+
+    setShowBottomBar(true);
+    await waitFor(() => {
+      expect(container.querySelector(".bottom-bar")).not.toBeNull();
+    });
+  });
+
+  describe("the left ☰ on a CHANNEL window (PaneTopBar's leading slot)", () => {
+    it("is absent while the bar is shown — no second door nobody asked for", async () => {
+      mobileState.value = true;
+      selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+      const { container } = render(() => <Shell />);
+      await waitFor(() => {
+        expect(container.querySelector(".topic-bar")).not.toBeNull();
+      });
+      // The members ☰ is the only one: same count the C6.3 pin above asserts.
+      expect(container.querySelectorAll(".topic-bar .topic-bar-hamburger").length).toBe(1);
+    });
+
+    it("appears FIRST in the band when the bar is off, with the members ☰ still LAST", async () => {
+      mobileState.value = true;
+      setShowBottomBar(false);
+      selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+      const { container } = render(() => <Shell />);
+      const bar = await waitFor(() => {
+        const b = container.querySelector(".topic-bar");
+        expect(b).not.toBeNull();
+        return b as HTMLElement;
+      });
+
+      // Side is CHILD ORDER, not a CSS override — the same fact #1073's
+      // characterization pins for the trailing side.
+      expect(bar.firstElementChild).toHaveClass("topic-bar-windows-opener");
+      expect(bar.lastElementChild).toHaveClass("topic-bar-hamburger");
+      expect(bar.children.length).toBe(3);
+      expect(bar.children[1]).toHaveClass("topic-bar-header");
+    });
+
+    // 🔴 `.topic-bar-hamburger` is not a style hook, it is the NAME OF ONE
+    // DOOR, and #1073 wrote that down where it is consumed: `openMembersDrawer`
+    // locates the opener BY CLASS and takes `.first()`, because "the class is
+    // what they have in common, and it is the thing this helper actually needs
+    // — the in-flow opener, whichever pane is mounted". Singular.
+    //
+    // The first cut of #1766 reused `PaneTopBarRailOpener` for the left door,
+    // so with the bar off two buttons wore that class and `.first()` resolved
+    // to this one — which opens the WINDOW sidebar, not the members rail.
+    // Measured on the integration run, not reasoned about: the fixture opened
+    // the sidebar, `.shell-members.open` never appeared, and the retry was
+    // occluded by `aside.shell-sidebar.open` until the click deadline elapsed.
+    // Twenty-odd specs reach the rail through that helper, so the left door
+    // carries its own class and this pins that it keeps doing so.
+    it("does NOT wear the members ☰'s class — that class names ONE door", async () => {
+      mobileState.value = true;
+      setShowBottomBar(false);
+      selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+      const { container } = render(() => <Shell />);
+      await waitFor(() => {
+        expect(container.querySelector(".topic-bar-windows-opener")).not.toBeNull();
+      });
+      expect(container.querySelectorAll(".topic-bar-hamburger").length).toBe(1);
+      expect(container.querySelector(".topic-bar-hamburger")).toHaveAttribute(
+        "aria-label",
+        "open members sidebar",
+      );
+    });
+
+    it("names the two doors apart — left is windows, right is members", async () => {
+      mobileState.value = true;
+      setShowBottomBar(false);
+      selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+      render(() => <Shell />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/open windows sidebar/i)).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText(/open members sidebar/i)).toBeInTheDocument();
+    });
+
+    // The slot is a PROP, so it is evaluated once when the band mounts. What
+    // keeps it live is the `<Show>` INSIDE it: `Show` reads its `when` in its
+    // own memo, so the toggle re-runs that memo and not the whole band. Pinned
+    // because the alternative — reading the signal where the slot is built —
+    // compiles, renders identically on first paint, and then never updates.
+    it("appears live when the preference flips, without a remount", async () => {
+      mobileState.value = true;
+      selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+      const { container } = render(() => <Shell />);
+      await waitFor(() => {
+        expect(container.querySelector(".topic-bar")).not.toBeNull();
+      });
+      expect(screen.queryByLabelText(/open windows sidebar/i)).toBeNull();
+
+      setShowBottomBar(false);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/open windows sidebar/i)).toBeInTheDocument();
+      });
+
+      setShowBottomBar(true);
+      await waitFor(() => {
+        expect(screen.queryByLabelText(/open windows sidebar/i)).toBeNull();
+      });
+    });
+
+    it("opens the #1041 channel sidebar — the door the swipe already opens", async () => {
+      mobileState.value = true;
+      setShowBottomBar(false);
+      selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+      const { container } = render(() => <Shell />);
+      const opener = await waitFor(() => screen.getByLabelText(/open windows sidebar/i));
+
+      expect(container.querySelector(".shell-sidebar")).toBeNull();
+      fireEvent.click(opener);
+      await waitFor(() => {
+        expect(container.querySelector(".shell-sidebar")).not.toBeNull();
+      });
+    });
+  });
+
+  describe("the left ☰ on a NON-channel window (.shell-chrome)", () => {
+    it("is absent while the bar is shown", async () => {
+      mobileState.value = true;
+      selectionState.setSelSig({
+        networkSlug: "freenode",
+        channelName: "$server",
+        kind: "server",
+      });
+      const { container } = render(() => <Shell />);
+      await waitFor(() => {
+        expect(container.querySelector(".shell-chrome")).not.toBeNull();
+      });
+      const chrome = container.querySelector(".shell-chrome") as HTMLElement;
+      expect(chrome.children.length).toBe(1);
+      expect(chrome.firstElementChild).toHaveClass("shell-chrome-rail-opener");
+    });
+
+    it("appears FIRST when the bar is off, with the rail opener still LAST", async () => {
+      mobileState.value = true;
+      setShowBottomBar(false);
+      selectionState.setSelSig({
+        networkSlug: "freenode",
+        channelName: "$server",
+        kind: "server",
+      });
+      const { container } = render(() => <Shell />);
+      const chrome = await waitFor(() => {
+        const c = container.querySelector(".shell-chrome");
+        expect(c).not.toBeNull();
+        return c as HTMLElement;
+      });
+
+      expect(chrome.children.length).toBe(2);
+      expect(chrome.firstElementChild).toHaveClass("topic-bar-windows-opener");
+      expect(chrome.lastElementChild).toHaveClass("shell-chrome-rail-opener");
+    });
+
+    it("opens the channel sidebar from a non-channel window too", async () => {
+      mobileState.value = true;
+      setShowBottomBar(false);
+      selectionState.setSelSig({
+        networkSlug: "freenode",
+        channelName: "$server",
+        kind: "server",
+      });
+      const { container } = render(() => <Shell />);
+      const opener = await waitFor(() => screen.getByLabelText(/open windows sidebar/i));
+
+      fireEvent.click(opener);
+      await waitFor(() => {
+        expect(container.querySelector(".shell-sidebar")).not.toBeNull();
+      });
+    });
+  });
+
+  // DESKTOP is untouched. The preference is about a bar that only ever renders
+  // on mobile, so a desktop shell must gain no ☰ from it — the permanent
+  // sidebar is already there, and the topic bar's own ☰ is `display: none`
+  // above the breakpoint. This is a JSX assertion and not a CSS one on
+  // purpose: the desktop branch must not MOUNT a door it then hides.
+  it("desktop mounts no left ☰, whatever the preference says", async () => {
+    mobileState.value = false;
+    setShowBottomBar(false);
+    selectionState.setSelSig({ networkSlug: "freenode", channelName: "#a", kind: "channel" });
+    const { container } = render(() => <Shell />);
+    await waitFor(() => {
+      expect(container.querySelector(".topic-bar")).not.toBeNull();
+    });
+    expect(screen.queryByLabelText(/open windows sidebar/i)).toBeNull();
+    expect(container.querySelector(".topic-bar")?.children.length).toBe(2);
   });
 });

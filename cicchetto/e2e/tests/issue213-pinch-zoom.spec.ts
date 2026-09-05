@@ -1,47 +1,68 @@
 // #213 — the media-viewer modal image must pinch-zoom + pan, and the gesture
 // must stay CONFINED to the viewer (no page-zoom, no body-scroll bleed).
+// #1805 — the PAN half is the browser's own scroller now; only the pinch is
+// still synthesized.
 //
-// WHY hand-rolled instead of native pinch: iOS-1 (2026-05-17) locked the app
-// viewport (`maximum-scale=1, user-scalable=no`) so cic feels like an app, not
-// a website — that kills the browser's native pinch app-wide with no
-// per-element opt-out. So the modal image synthesizes the gesture in JS
-// (lib/pinchZoom.ts geometry + element-level {passive:false} touch listeners in
-// MediaViewerModal's ZoomableImage) and applies a CSS `transform` to the <img>
-// alone. Element-scoped transform + preventDefault'd touchmove = the gesture
-// can't reach the page.
+// WHY the pinch is hand-rolled: iOS-1 (2026-05-17) locked the app viewport
+// (`maximum-scale=1, user-scalable=no`) so cic feels like an app, not a
+// website — that kills the browser's native pinch app-wide with no per-element
+// opt-out. So the modal image synthesizes it in JS (lib/pinchZoom.ts geometry +
+// element-level {passive:false} touch listeners in MediaViewerModal's
+// ZoomableImage) and applies a CSS `transform` to the <img> alone.
 //
-// TWO guards, one per what's provable where (issue123 precedent):
+// WHY the pan is NOT, since #1805: that lock governs PAGE ZOOM and says nothing
+// about element scrolling. Measured on a standalone chromium/iPhone-15 bench
+// through the real touch pipeline: an `overflow: auto` box scrolled 112px under
+// the lock against 128px without it, where the whole question was whether it
+// would be zero.
+//
+// FOUR guards, one per what is provable where:
 //
 //   1. WIRING (chromium, untagged): the synthesized pinch is wired end-to-end.
-//      A two-finger TouchEvent whose fingers move APART scales the <img>'s
-//      transform above 1; a single-finger touchmove is preventDefault'd (the
-//      confinement signal — `dispatchEvent` returns false iff a listener called
-//      preventDefault, a JS-level fact independent of `touch-action`, so it's
-//      deterministic in chromium even though synthetic events can't drive real
-//      pixel zoom). Chromium supports the Touch/TouchEvent constructors;
-//      webkit's are unreliable (feedback_playwright_webkit_not_ios_scroll).
+//      Chromium supports the Touch/TouchEvent constructors; webkit's are
+//      unreliable (feedback_playwright_webkit_not_ios_scroll).
+//   2. NON-CLAIM (chromium, untagged): a ONE-finger touchmove must come back
+//      un-prevented. This is the inverse of what #213 asserted, and it is the
+//      whole of #1805 at the JS layer — a blanket preventDefault leaves every
+//      other symptom in place while the browser simply never scrolls.
+//   3. GEOMETRY (chromium, untagged): a REAL one-finger drag, dispatched
+//      through chromium's own input pipeline over CDP rather than as a DOM
+//      event, moves the visible portion of the picture. Asserted as pixels of
+//      painted displacement, not as "the node exists".
+//   4. CSS CONTRACT + scrollable area (@webkit, iPhone 15): the declarations
+//      and the fact that zooming creates real overflow, on the engine this
+//      issue is actually about.
 //
-//   2. CSS CONTRACT (@webkit, iPhone 15): the zoomable image must be
-//      `touch-action: none` so the real target browser hands EVERY touch to our
-//      JS handlers instead of interpreting it as a scroll/zoom pan.
-//      getComputedStyle on the real webkit target (ux-6-a / issue123 guard-3
-//      precedent). Reverting the CSS turns this red.
-//
-// The pinch/pan PHYSICS (does it FEEL right on a real iPhone?) is a device
-// call — vjt dogfoods post-ship. The load-bearing geometry (clamp, pan bound,
-// scale ratio) is covered by the pinchZoom.ts unit tests (jsdom); these e2es
-// guard the DOM wiring + the CSS contract, not the physics.
+// 🔴 What NO leg here proves, and what therefore stays a dogfood call: the
+// touch DRAG itself on WebKit. Playwright's WebKit backend exposes
+// `Input.dispatchTapEvent` and nothing else for touch (playwright-core
+// wkInput.js), and `mouse.wheel` is refused outright in mobile WebKit, so there
+// is no way to drive a pan there — a zero from that engine would measure the
+// harness, not the product. Momentum, rubber-band, and whether iOS starts a
+// rubber-band before the dismiss binder's claim lands are all on a real phone.
 
-import type { Page } from "@playwright/test";
+import type { CDPSession, Page } from "@playwright/test";
 import { loginAs, selectChannel } from "../fixtures/cicchettoPage";
-import { openMediaViewerInPlace, uploadImageAndGetLink } from "../fixtures/mediaViewer";
+import { openMediaViewerInPlace, uploadSizedImageAndGetLink } from "../fixtures/mediaViewer";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
 const CHANNEL = AUTOJOIN_CHANNELS[0];
 
-// Upload a tiny image and open it in the media viewer, then narrow to the
-// ZOOMABLE <img> — the element these three tests actually drive.
+// Big enough that the viewer renders a MEASURABLE box on both projects. The
+// shared 1×1 constant cannot be used for anything geometric: the viewer caps an
+// image with max-width/max-height and never scales one up, so on 1×1 every
+// assertion about displacement is answered by one pixel whether or not the
+// feature works (see uploadSizedImageAndGetLink).
+const IMAGE_SIZE = { width: 400, height: 300 };
+
+// Must match DOUBLE_TAP_MS in MediaViewerModal.tsx. Used only to SEPARATE two
+// attempts so they cannot pair into a spurious double-tap — it is the
+// protocol's own window, not a guess at how slow the machine is.
+const DOUBLE_TAP_MS = 300;
+
+// Upload an image and open it in the media viewer, then narrow to the ZOOMABLE
+// <img> and the scroller that now wraps it.
 //
 // The door itself (upload → anchor → in-place click → dialog visible) is
 // fixtures/mediaViewer.ts since #1441. The extra barrier below stays here: it
@@ -55,12 +76,111 @@ async function openImageViewer(page: Page) {
   await loginAs(page, vjt);
   await selectChannel(page, NETWORK_SLUG, CHANNEL, { ownNick: specNick() });
 
-  const { link } = await uploadImageAndGetLink(page, "x213.png");
+  const { link } = await uploadSizedImageAndGetLink(page, "x213.png", IMAGE_SIZE);
   const viewer = await openMediaViewerInPlace(page, link);
 
   const img = viewer.locator(".media-viewer-media--zoomable");
   await expect(img).toBeVisible({ timeout: 5_000 });
-  return { viewer, img };
+  const scroller = viewer.locator(".media-viewer-zoom-scroller");
+  await expect(scroller).toBeVisible({ timeout: 5_000 });
+  return { viewer, img, scroller };
+}
+
+// Chromium's real input pipeline. `Emulation.setTouchEmulationEnabled` rather
+// than a `test.use({ hasTouch: true })` on the project: the context options
+// stay exactly what every other chromium spec boots with, so nothing about the
+// app's own startup changes to serve this one file.
+async function touchPipeline(page: Page): Promise<CDPSession> {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 2 });
+  return cdp;
+}
+
+async function cdpTap(cdp: CDPSession, x: number, y: number): Promise<void> {
+  const point = [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 1 }];
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: point });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+// Double-tap to the 2× toggle, retried up to four times.
+//
+// A bounded retry rather than one attempt, and it is not a timeout in disguise:
+// the pairing window is 300ms of WALL CLOCK, and a loaded CI box can miss it
+// between two round trips. A missed attempt leaves the scale AT 1 — the toggle
+// only fires when the pair lands — so the loop cannot overshoot into a zoom-out,
+// and the wait between attempts is the window itself, which is what makes two
+// attempts unable to pair with each other. The caller asserts the scale
+// afterwards, so a loop that never lands is a red and not a silent skip.
+//
+// `tap` is the engine's own tap verb in both projects: CDP on chromium,
+// `page.touchscreen.tap` (`Input.dispatchTapEvent`) on webkit, which is the ONE
+// touch verb Playwright's WebKit backend exposes.
+async function zoomByDoubleTap(
+  page: Page,
+  cdp: CDPSession | null,
+  x: number,
+  y: number,
+): Promise<void> {
+  const tap = async (): Promise<void> => {
+    if (cdp === null) await page.touchscreen.tap(x, y);
+    else await cdpTap(cdp, x, y);
+  };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if ((await zoomState(page)).scale > 1) return;
+    await tap();
+    await tap();
+    await page.waitForTimeout(DOUBLE_TAP_MS + 100);
+  }
+}
+
+// Drag one finger from (x, y) upward by `dy`, in steps, through the browser's
+// own gesture recogniser.
+async function cdpDragUp(
+  cdp: CDPSession,
+  page: Page,
+  x: number,
+  y: number,
+  dy: number,
+): Promise<void> {
+  const point = (at: number) => [{ x, y: at, radiusX: 8, radiusY: 8, force: 1, id: 1 }];
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: point(y) });
+  for (let moved = 10; moved <= dy; moved += 10) {
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: point(y - moved),
+    });
+    await page.waitForTimeout(16);
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+// Where the picture is PAINTED, relative to the scroller's own frame. This is
+// the geometric oracle: with `transform-origin: 0 0` the painted top sits at
+// exactly minus the scroll offset, so it moves if and only if the scroller
+// really panned. Reading `scrollTop` alone would pass on a scroller that
+// scrolls nothing visible.
+async function paintedOffset(page: Page): Promise<{ dx: number; dy: number; scrollTop: number }> {
+  return page.evaluate(() => {
+    const scroller = document.querySelector(".media-viewer-zoom-scroller");
+    const img = document.querySelector(".media-viewer-media--zoomable");
+    if (scroller === null || img === null) throw new Error("zoomable image gone");
+    const s = scroller.getBoundingClientRect();
+    const i = img.getBoundingClientRect();
+    return { dx: i.left - s.left, dy: i.top - s.top, scrollTop: scroller.scrollTop };
+  });
+}
+
+async function zoomState(page: Page) {
+  return page.evaluate(() => {
+    const scroller = document.querySelector(".media-viewer-zoom-scroller");
+    const img = document.querySelector(".media-viewer-media--zoomable");
+    if (scroller === null || img === null) throw new Error("zoomable image gone");
+    return {
+      scale: new DOMMatrixReadOnly(getComputedStyle(img).transform).a,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+    };
+  });
 }
 
 test("#213 — a synthesized two-finger pinch scales the modal image (chromium)", async ({
@@ -105,46 +225,179 @@ test("#213 — a synthesized two-finger pinch scales the modal image (chromium)"
   expect(scaledUp).toBeGreaterThan(1.5);
 });
 
-test("#213 — a touchmove on the modal image is preventDefault'd (confined to the viewer, chromium)", async ({
+test("#1805 — a ONE-finger touchmove is claimed at fit and released once zoomed (chromium)", async ({
   page,
 }) => {
   test.slow();
-  const { img } = await openImageViewer(page);
+  const { img, scroller } = await openImageViewer(page);
+  const cdp = await touchPipeline(page);
 
-  // A single-finger touchmove must be claimed (preventDefault) so the gesture
-  // can never bleed to a page pan/zoom. dispatchEvent returns false iff a
-  // listener called preventDefault on a cancelable event.
-  const prevented = await img.evaluate((el) => {
-    const touch = (x: number) => new Touch({ identifier: 1, target: el, clientX: x, clientY: 200 });
-    const fire = (type: "touchstart" | "touchmove", x: number): boolean => {
-      const t = touch(x);
-      return el.dispatchEvent(
-        new TouchEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          touches: [t],
-          targetTouches: [t],
-          changedTouches: [t],
-        }),
-      );
-    };
-    fire("touchstart", 200);
-    const notPrevented = fire("touchmove", 260);
-    return !notPrevented;
-  });
+  // `dispatchEvent` returns false iff a listener called preventDefault — a
+  // JS-level fact independent of `touch-action`, deterministic in chromium even
+  // though a synthetic event cannot drive a real pixel scroll.
+  //
+  // 🔴 The one-finger answer is DIFFERENT at fit and when zoomed, and the first
+  // draft of this spec asserted "never claimed" and went red on the real stack.
+  // It was the spec that was wrong. At fit the drag IS still claimed, by
+  // `overlayScrollLock`'s document-level touchmove handler (#219): it walks the
+  // gesture target's ancestors and lets the gesture through only when it finds
+  // an ancestor that is genuinely scrollable — `overflow: auto` AND
+  // `scrollHeight > clientHeight`. At fit the sizer is zero, so nothing
+  // overflows, so nothing is scrollable, so the page is held still. That is the
+  // behaviour #219 exists for and #1805 must not break.
+  //
+  // Which makes the pair below the real contract, and neither half alone says
+  // it: the pan is released EXACTLY when there is something to pan, and the two
+  // mechanisms compose through the lock's overflow test rather than by anyone
+  // knowing about anyone.
+  const probe = () =>
+    img.evaluate((el) => {
+      const touch = (x: number, id: number) =>
+        new Touch({ identifier: id, target: el, clientX: x, clientY: 200 });
+      const fire = (type: "touchstart" | "touchmove", touches: Touch[]): boolean =>
+        el.dispatchEvent(
+          new TouchEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            touches,
+            targetTouches: touches,
+            changedTouches: touches,
+          }),
+        );
+      fire("touchstart", [touch(200, 1)]);
+      const oneFinger = !fire("touchmove", [touch(260, 1)]);
+      fire("touchstart", [touch(150, 1), touch(250, 2)]);
+      const twoFingers = !fire("touchmove", [touch(100, 1), touch(300, 2)]);
+      return { oneFinger, twoFingers };
+    });
 
-  expect(prevented).toBe(true);
+  const atFit = await probe();
+  expect(atFit.oneFinger).toBe(true);
+  expect(atFit.twoFingers).toBe(true);
+
+  // Longer than the pairing window, so the taps below cannot pair with the
+  // synthetic touchstart above — the protocol's own 300ms, not a guess.
+  await page.waitForTimeout(DOUBLE_TAP_MS + 100);
+  const box = await scroller.boundingBox();
+  if (box === null) throw new Error("scroller has no box");
+  await zoomByDoubleTap(page, cdp, box.x + box.width / 2, box.y + box.height / 2);
+
+  // PRECONDITION: without real overflow the lock would still (correctly) claim
+  // the drag, and the assertion below would be measuring the absence of a zoom.
+  const zoomed = await zoomState(page);
+  expect(zoomed.scale).toBeGreaterThan(1.5);
+  expect(zoomed.scrollHeight).toBeGreaterThan(zoomed.clientHeight + 50);
+
+  await page.waitForTimeout(DOUBLE_TAP_MS + 100);
+  const whenZoomed = await probe();
+  expect(whenZoomed.oneFinger).toBe(false);
+  expect(whenZoomed.twoFingers).toBe(true);
 });
 
-test("@webkit #213 — the zoomable modal image is touch-action:none (iPhone 15)", async ({
+test("#1805 — a real one-finger drag moves the visible portion of the zoomed image (chromium)", async ({
   page,
 }) => {
   test.slow();
-  const { img } = await openImageViewer(page);
+  const { scroller } = await openImageViewer(page);
+  const cdp = await touchPipeline(page);
 
-  // The load-bearing CSS contract: `touch-action: none` reclaims the raw touch
-  // stream for our JS pinch handlers on the real webkit target. Reverting it
-  // turns this red.
-  const touchAction = await img.evaluate((el) => getComputedStyle(el).touchAction);
-  expect(touchAction).toBe("none");
+  const box = await scroller.boundingBox();
+  if (box === null) throw new Error("scroller has no box");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+
+  await zoomByDoubleTap(page, cdp, cx, cy);
+
+  // PRECONDITION, and the load-bearing half of #1805: a CSS transform does not
+  // change layout, so without the sizer the scaled image would create no
+  // overflow at all and there would be nothing for any drag to move. Asserted
+  // before the gesture (anti-hollow-green) — if this is an equality the test
+  // that follows is measuring nothing.
+  const zoomed = await zoomState(page);
+  expect(zoomed.scale).toBeGreaterThan(1.5);
+  expect(zoomed.scrollHeight).toBeGreaterThan(zoomed.clientHeight + 50);
+
+  const before = await paintedOffset(page);
+  await cdpDragUp(cdp, page, cx, cy, 80);
+  const after = await paintedOffset(page);
+
+  // The picture moved UP by the distance the scroller scrolled: painted
+  // displacement and scroll offset are the same number seen twice, and
+  // asserting both is what separates "the scroller moved" from "the reader saw
+  // a different part of the picture".
+  expect(after.scrollTop).toBeGreaterThan(before.scrollTop);
+  expect(after.dy).toBeLessThan(before.dy - 20);
+  expect(Math.abs(after.dy + after.scrollTop)).toBeLessThan(2);
+});
+
+test("@webkit @touch #1805 — the zoomable modal image and its scroller declare the pan (iPhone 15)", async ({
+  page,
+}) => {
+  test.slow();
+  const { img, scroller } = await openImageViewer(page);
+
+  // The load-bearing CSS contract, on the real webkit target. `none` on the
+  // <img> — the pre-#1805 value — closes the scroller that wraps it, because
+  // the UA intersects touch-action from the HIT TARGET up to the scroll
+  // container: measured on the bench at 0px against 130px. Reverting either
+  // declaration turns this red.
+  expect(await img.evaluate((el) => getComputedStyle(el).touchAction)).toBe("pan-x pan-y");
+  expect(await img.evaluate((el) => getComputedStyle(el).transformOrigin)).toBe("0px 0px");
+  const style = await scroller.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      touchAction: s.touchAction,
+      overflowY: s.overflowY,
+      overscroll: s.overscrollBehaviorY,
+    };
+  });
+  expect(style.touchAction).toBe("pan-x pan-y");
+  expect(style.overflowY).toBe("auto");
+  expect(style.overscroll).toBe("contain");
+});
+
+test("@webkit @touch #1805 — zooming creates a real scrollable area, and scrolling moves the picture (iPhone 15)", async ({
+  page,
+}) => {
+  test.slow();
+  const { scroller } = await openImageViewer(page);
+
+  const box = await scroller.boundingBox();
+  if (box === null) throw new Error("scroller has no box");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+
+  // Real taps, via the ONE touch verb Playwright's WebKit backend exposes.
+  await zoomByDoubleTap(page, null, cx, cy);
+
+  const zoomed = await zoomState(page);
+  expect(zoomed.scale).toBeGreaterThan(1.5);
+  // The whole point of the sizer, on the engine the issue is about: a transform
+  // alone leaves scrollHeight === clientHeight and there is nothing to pan.
+  expect(zoomed.scrollHeight).toBeGreaterThan(zoomed.clientHeight + 50);
+
+  // PRE-STATE, asserted rather than assumed: `dy === -scrollTop` is the whole
+  // geometric invariant (a 0 0 transform-origin puts the painted top at minus
+  // the scroll offset), and the double-tap has ALREADY scrolled — it anchors to
+  // the tapped point, which was the centre. The first draft of this spec
+  // assumed the pre-state was zero and asserted a 60px displacement against it;
+  // it went red by 128px, which is exactly the half-box the anchoring had
+  // correctly applied. The spec was wrong and the anchoring was right, so the
+  // fix is to measure the DELTA and to pin the invariant at both ends.
+  const before = await paintedOffset(page);
+  expect(Math.abs(before.dy + before.scrollTop)).toBeLessThan(2);
+
+  // The DRAG cannot be driven here (see the header), so what is asserted is the
+  // consequence a drag would produce: the scroller is real, and moving it moves
+  // the painted picture rather than leaving it pinned under a clipped box.
+  const target = before.scrollTop + 60;
+  await page.evaluate((to) => {
+    const el = document.querySelector(".media-viewer-zoom-scroller");
+    if (el !== null) el.scrollTop = to;
+  }, target);
+
+  const after = await paintedOffset(page);
+  expect(after.scrollTop).toBe(target);
+  expect(Math.abs(after.dy + after.scrollTop)).toBeLessThan(2);
+  expect(after.dy).toBeLessThan(before.dy - 50);
 });

@@ -104,6 +104,13 @@ function count_signatures(line) {
     # connection, so counting it as a checkout that never happened would
     # misreport where the write died.
     if (line ~ /statement cancelled by a pool timeout/) CNT["interrupted"]++
+    # #1708 — the fourth BusyRetry terminal state, and the only one whose row
+    # is NOT lost: the statement completed and committed, and what the pool
+    # took away was the connection the driver then asked for the row count.
+    # Its own counter for the reason #1687 gives above, plus one more — folding
+    # it into `dropped` would count a durable row as a lost one, and `dropped`
+    # is the number the #1429 census exists to be trusted on.
+    if (line ~ /SQLite connection closed after the write completed/) CNT["orphaned"]++
 
     # `index` before the three regexes: every lock signature carries the
     # literal "lock", and the stream is ~10^6 lines. The known-answer
@@ -118,6 +125,15 @@ function count_signatures(line) {
         # an episode the instrument could not attribute be read off the
         # artefact as one it did.
         if (line ~ /db lock stall UNATTRIBUTED/) CNT["lockstall_unattributed"]++
+        # #1901 — LockWatch's fourth edge, and the only one taken WITHOUT
+        # reading the BEGIN IMMEDIATE seam: a roster of the processes sitting
+        # inside the SQLite NIF. Its own counter for the reason the two above
+        # have theirs, one step further out — `lockstall` means a holder was
+        # NAMED and `lockstall_unattributed` means a QUEUE was measured with
+        # nobody to blame, while this one means neither was established and a
+        # cohort was photographed instead. Folding it into either would let a
+        # census be read off the artefact as an attribution.
+        if (line ~ /db lock stall NIF CENSUS/) CNT["lockstall_nif"]++
     }
 }
 
@@ -130,8 +146,8 @@ function zero_counters(   i) {
 function summary_line(svc, nlines, mg, mat) {
     return sprintf(SUMFMT, svc, nlines, mg, mat, THRESH, ngap, \
         CNT["db30"], CNT["idle30"], CNT["dropped"], CNT["saturated"], \
-        CNT["interrupted"], CNT["lockheld"], CNT["lockstall"], \
-        CNT["lockstall_resolved"], CNT["lockstall_unattributed"])
+        CNT["interrupted"], CNT["orphaned"], CNT["lockheld"], CNT["lockstall"], \
+        CNT["lockstall_resolved"], CNT["lockstall_unattributed"], CNT["lockstall_nif"])
 }
 
 function bail(msg) {
@@ -202,8 +218,8 @@ BEGIN {
 
     SUMFMT = "%s\tSUMMARY\tlines=%d\tmaxgap=%.1f\tmaxgap_at=%s\tgaps_ge_%d=%d" \
         "\tdb30=%d\tidle30=%d\tdropped=%d\tsaturated=%d\tinterrupted=%d" \
-        "\tlockheld=%d\tlockstall=%d\tlockstall_resolved=%d" \
-        "\tlockstall_unattributed=%d\n"
+        "\torphaned=%d\tlockheld=%d\tlockstall=%d\tlockstall_resolved=%d" \
+        "\tlockstall_unattributed=%d\tlockstall_nif=%d\n"
 
     # Samples copied from the emitting call site. Keep them verbatim: a
     # sample edited to fit the pattern turns the control into a mirror.
@@ -211,6 +227,23 @@ BEGIN {
     #   dropped            — Grappa.Scrollback, #336 never-crash contract.
     #   saturated          — Repo.BusyRetry, pool queue_timeout arm.
     #   interrupted        — Repo.BusyRetry, interrupted arm (#1657).
+    #   orphaned           — Repo.BusyRetry, connection_closed arm (#1708):
+    #                      the pool closed the connection AFTER the statement
+    #                      completed, so the row is DURABLE and only its
+    #                      RETURNING id and live broadcast were lost. 22 of
+    #                      these killed 22 live IRC sessions on 2026-08-22
+    #                      while losing no message at all.
+    #                      🔴 It OVERLAPS `dropped`, it does not sit beside it.
+    #                      Scrollback maps this fault onto the same
+    #                      `:persist_unavailable` as a row that never landed
+    #                      (the engine cannot hand the kind back without a
+    #                      fourth terminal atom, and ~150 `@spec`s carry the
+    #                      current three), so every orphaned fault on the
+    #                      scrollback path ALSO raises `dropped`. Read it as:
+    #                      `dropped` is the UPPER bound on lost rows and
+    #                      `dropped - orphaned` the LOWER one — orphaned also
+    #                      counts the non-scrollback write paths, which emit
+    #                      no `dropped` line of their own.
     #   lockheld           — Repo.BusyRetry, busy_locked arm (#1420).
     #   lockstall{,_resolved} — Grappa.Repo.LockWatch's two episode edges.
     #   lockstall_unattributed — LockWatch's third edge (#1687): a queue past
@@ -218,6 +251,13 @@ BEGIN {
     #                      through the whole 2026-08-22 prod episode because
     #                      the line did not exist; a census blind to it reads
     #                      exactly like a clean run.
+    #   lockstall_nif      — LockWatch's fourth edge (#1901): the roster of
+    #                      processes inside `Exqlite.Sqlite3NIF` past the
+    #                      threshold. It is the ONLY lock signature that does
+    #                      not depend on a writer having gone through the
+    #                      BEGIN IMMEDIATE seam, which is why it is the one
+    #                      that can be non-zero while all three above are
+    #                      zero — the shape all four #1888 episodes had.
     sig("db30", "QUERY OK source=\"messages\" db=30064.1ms queue=0.1ms")
     sig("idle30", "client #PID<0.700.0> checked out, idle=30062.4ms")
     sig("dropped", "scrollback row dropped for #bofh: :persist_unavailable")
@@ -227,6 +267,10 @@ BEGIN {
     sig("interrupted", \
         "db write unavailable: SQLite statement cancelled by a pool timeout for 15042ms" \
         " across 1 attempts (1500ms retry budget) — returning :db_unavailable")
+    sig("orphaned", \
+        "db write landed but its result was lost: SQLite connection closed after the" \
+        " write completed, 15042ms into the write, on attempt 1 (not retried — the row" \
+        " is durable, a retry would duplicate it) — returning :db_unavailable")
     sig("lockheld", \
         "db write unavailable: SQLite write lock held by another writer for 30067ms" \
         " across 1 attempts (1500ms retry budget) — returning :db_unavailable")
@@ -240,6 +284,12 @@ BEGIN {
         " 31303ms — no holder registered, so the holder is NOT attributable at the" \
         " BEGIN IMMEDIATE seam; longest waiter #PID<0.512.0> status=:waiting at" \
         " :gen_server.loop/7, stack: …")
+    sig("lockstall_nif", \
+        "db lock stall NIF CENSUS: 2 process(es) parked inside Exqlite.Sqlite3NIF past the" \
+        " threshold, longest 31402ms — none of them registered at the BEGIN IMMEDIATE seam," \
+        " so all 2 are writers it cannot name; roster: #PID<0.512.0> 31402ms" \
+        " Exqlite.Sqlite3NIF.step/2, #PID<0.513.0> 30011ms Exqlite.Sqlite3NIF.execute/2;" \
+        " longest #PID<0.512.0> status=:running at Exqlite.Sqlite3NIF.step/2, stack: …")
 
     # Deliberately ordinary: a real line from the same stream that names
     # none of the signatures. It DOES carry the word "lock" so the

@@ -26,6 +26,10 @@ defmodule Grappa.Application do
       Grappa.ShareTokens,
       Grappa.Uploads,
       Grappa.Uploads.Reaper,
+      # M3b — start/2 calls Avatars.boot/1 (storage-root DI-seam, mirrors
+      # Uploads.boot/1 above) and supervises Avatars.Reaper.
+      Grappa.Avatars,
+      Grappa.Avatars.Reaper,
       Grappa.Vault,
       # #1404 — start/2 calls Vhosts.boot/1 to seed the deployment's
       # source-mapping key, the same boot-time DI-seam shape as the
@@ -36,6 +40,10 @@ defmodule Grappa.Application do
       # #364 J/cross-module-S2: start/2 calls WindowCounts.PushSource.boot/0
       # + Themes.boot/0 to inject the two remaining DI-seams at boot.
       Grappa.WindowCounts,
+      # #1768 — supervises WindowCounts.Pusher.Coalescer. This edge is on
+      # the SUPERVISOR, not on Session: the DI seam exists so `Session`
+      # carries no static edge onto the impl, and it still does not.
+      Grappa.WindowCounts.Pusher,
       Grappa.Themes,
       Grappa.WSPresence,
       GrappaWeb
@@ -57,6 +65,11 @@ defmodule Grappa.Application do
     # runtime. Boot-time read of `Application.get_env/2` is the
     # CLAUDE.md-designated boundary (mirrors Admission.Config.boot/0).
     :ok = Grappa.Uploads.boot(uploads_storage_root())
+
+    # M3b — same boot-time :persistent_term seeding for the peer-avatar
+    # cache's storage root (a separate directory/context from uploads —
+    # see `Grappa.Avatars` moduledoc).
+    :ok = Grappa.Avatars.boot(peer_avatars_storage_root())
 
     # H16 (REV-D 2026-05-22): pin the VAPID public key in
     # `:persistent_term` so PushVapidController reads lock-free per
@@ -363,6 +376,14 @@ defmodule Grappa.Application do
         # is a visible SASL report. Must precede SessionSupervisor so a
         # session terminating on its start path can already reach it.
         {Task.Supervisor, name: Grappa.TaskSupervisor},
+        # #1768 — window_counts snapshot coalescer. AFTER TaskSupervisor
+        # (every flush hands its snapshot to it) and BEFORE
+        # SessionSupervisor, because the first persisted row of the first
+        # session touches it. Its absence is not fatal — `touch/1` is a
+        # cast, so an un-started coalescer silently skips the live-render
+        # optimization instead of crashing the persist path — but that is
+        # a degradation contract, not a licence to start it late.
+        Grappa.WindowCounts.Pusher.Coalescer,
         # max_restarts: 10_000, max_seconds: 60 — DynamicSupervisor's
         # default (3 restarts in 5s) is GLOBAL across all children; one
         # upstream network-wide outage causing several Session.Server
@@ -411,7 +432,7 @@ defmodule Grappa.Application do
           # anyway — ordering is
           # belt-and-braces. Reaper consumes Grappa.Visitors; the
           # Application boundary has it listed in deps for that reason.
-          {Grappa.Visitors.Reaper, interval_ms: reaper_interval_ms()},
+          {Grappa.Visitors.Reaper, [interval_ms: reaper_interval_ms()] ++ incognito_grace_opt()},
 
           # UX-6-B1 (2026-05-20): embedded image uploader Reaper. Same
           # rationale as Visitors.Reaper for the ordering: after Repo
@@ -425,6 +446,11 @@ defmodule Grappa.Application do
           # thereafter (CLAUDE.md "Application.{put,get}_env: boot-time
           # only").
           {Grappa.Uploads.Reaper, storage_root: uploads_storage_root(), interval_ms: reaper_interval_ms()},
+
+          # M3b — sibling sweep for the peer-avatar cache. Same "why after
+          # Endpoint" rationale as Uploads.Reaper above (the serving route
+          # must be reachable before sweeps start removing rows/files).
+          {Grappa.Avatars.Reaper, storage_root: peer_avatars_storage_root(), interval_ms: reaper_interval_ms()},
 
           # #223: auth-session housekeeping GC. Sibling of Visitors.Reaper
           # / Uploads.Reaper — a THIRD domain (Accounts) gets its OWN
@@ -456,6 +482,38 @@ defmodule Grappa.Application do
         # loops (the flag stays `true` from the last successful boot,
         # but Repo + ETS checks in the controller catch the wedge).
         :ok = Grappa.Health.mark_ready()
+
+        # M3a: the absolute base URL a stored upload's public URL is
+        # built against (`Grappa.Uploads.public_url/2`) — needed by
+        # `Grappa.Networks.Wire.avatar_url/1` for the CTCP AVATAR
+        # reply, which (unlike the JSON wire response) goes out over
+        # IRC to an arbitrary remote client with no origin of its own
+        # to resolve a relative path against. Seeded HERE, after
+        # `Supervisor.start_link/2` returns, not alongside the other
+        # `boot/1` calls above `children` is built: `Endpoint.url/0`
+        # reads a `:persistent_term` Phoenix itself populates only once
+        # the `GrappaWeb.Endpoint` CHILD has actually started — calling
+        # it earlier (measured) crashes boot with "could not find
+        # persistent term for endpoint GrappaWeb.Endpoint."
+        #
+        # Guarded on the SAME flag `endpoint_child/0` reads: when
+        # `:start_endpoint` is false there is no Endpoint child, so
+        # Phoenix never writes that `:persistent_term` and `url/0`
+        # raises the very error the paragraph above describes — which
+        # is what the one-shot `grappa.*` mix tasks
+        # (`Mix.Tasks.Grappa.Boot.start_app_silent/0`) and the
+        # integration testnet boot hit, measured. Skipping the seed
+        # there is correct rather than merely tolerable: `base_url/0`
+        # feeds `Uploads.public_url/2`, reached only from the CTCP
+        # AVATAR reply on a live IRC session, and a node with no HTTP
+        # surface runs no sessions (`:start_bootstrap` is off in the
+        # same breath). It stays a raise, not a nil, so a caller that
+        # DOES reach it on such a node is a contract violation and says
+        # so.
+        if Application.get_env(:grappa, :start_endpoint, true) do
+          :ok = Grappa.Uploads.boot_base_url(GrappaWeb.Endpoint.url())
+        end
+
         result
 
       other ->
@@ -530,6 +588,11 @@ defmodule Grappa.Application do
     Application.fetch_env!(:grappa, :uploads_storage_root)
   end
 
+  # M3b — mirrors `uploads_storage_root/0` for the peer-avatar cache.
+  defp peer_avatars_storage_root do
+    Application.fetch_env!(:grappa, :peer_avatars_storage_root)
+  end
+
   # #893: the shared tick cadence of the three ambient sweepers
   # (Visitors / Uploads / Accounts). 60s everywhere except `:test`,
   # where it is pushed past any suite runtime so NO ambient sweep ever
@@ -544,6 +607,20 @@ defmodule Grappa.Application do
   # boundary only (CLAUDE.md "Application.get_env: boot-time only").
   defp reaper_interval_ms do
     Application.get_env(:grappa, :reaper_interval_ms, 60_000)
+  end
+
+  # #1770 — the incognito fast-close grace, passed ONLY when an env actually
+  # configures one. Deliberately not `get_env(..., 30_000)` like its sibling
+  # above: that shape puts the production default in two files, and the pair
+  # drifts the day one of them moves. The single source is
+  # `Grappa.Visitors.Reaper`'s own `@default_incognito_grace_ms`; this reader
+  # exists so `config/test.exs` can shorten the window without the suite
+  # sleeping 30s per assertion.
+  defp incognito_grace_opt do
+    case Application.fetch_env(:grappa, :incognito_close_grace_ms) do
+      {:ok, ms} -> [incognito_grace_ms: ms]
+      :error -> []
+    end
   end
 
   # #399: the built cicchetto SPA dist root. Configured via

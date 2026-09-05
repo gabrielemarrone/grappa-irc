@@ -20,9 +20,20 @@
 pkgname=grappa
 # pkgver is DERIVED, not hand-edited. The single source of truth is the
 # repo-root `VERSION` file; `regen.sh` (run by release.yml's Arch job and by
-# the human AUR publish) fills this from `version.sh` before makepkg. The
-# `@GRAPPA_VERSION@` sentinel is deliberate: makepkg's pkgver lint REFUSES '@',
-# so an underived build fails loudly instead of shipping `grappa-@GRAPPA_VERSION@`.
+# the human AUR publish) fills this from `version.sh` before makepkg.
+#
+# `regen.sh` IS NOT OPTIONAL — and until #1592 this comment told you why with
+# a mechanism that does not exist. It said makepkg's pkgver lint bars '@', so
+# an underived build could not ship. It does not bar it: `check_pkgver`'s
+# whole rejecting surface is `*[[:space:]/:-]*` and `*[![:ascii:]]*` (the
+# first is transcribed, cited and measured in `pkgver.sh`'s header), and '@'
+# is ASCII and in neither. Measured rc=0 through `makepkg -sf` and through
+# `--printsrcinfo`, against rc=12 for `1.3.0-rc1`.
+#
+# WHICH stage would actually stop an underived build is NOT MEASURED, so this
+# file names none. The `v@GRAPPA_VERSION@.tar.gz` download below is a
+# candidate, not a finding. Read the sentinel as a MARKER that regen.sh has
+# not run, never as a net that will catch you if it did not.
 #
 # DERIVED ≠ EQUAL, since #1591: makepkg's same lint refuses the hyphen a
 # semver pre-release spells its suffix with, so `regen.sh` fills this through
@@ -110,6 +121,16 @@ build() {
 	# and every other cic build uses. cwd is the extracted repo root here.
 	GRAPPA_VERSION="$(infra/packaging/version.sh)"
 	export GRAPPA_VERSION
+
+	# #1773 — the git facts behind the credit roll, on the same channel.
+	# THIS recipe is one of the two substrates where they do not exist: the
+	# build runs on the extracted source TARBALL, which carries no `.git`, so
+	# credits.sh reports the absence honestly (sha:null, contributors:[]) and
+	# the roll degrades to the version alone — exactly as Grappa.Version
+	# reports the bare tag here for the same reason. It must NOT be a hard
+	# failure, or the package stops building over an easter egg.
+	GRAPPA_CREDITS="$(infra/packaging/credits.sh)"
+	export GRAPPA_CREDITS
 
 	echo "==> cicchetto SPA (bun + vite)"
 	cd cicchetto

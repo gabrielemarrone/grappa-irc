@@ -86,8 +86,11 @@ const WhoisCard: Component<Props> = (props) => {
   // first. Gated on `onDismiss`: it is the dismissability of the mount site,
   // and the rail card (which omits it) must NOT be closable — a persistent
   // per-window surface Escape can close is one the operator cannot bring back.
-  // Escape-only, no scroll-lock refcount: the card sits IN the scrollback flow,
-  // not over it.
+  // No COVERING refcount: the card sits IN the scrollback flow, not over it, so
+  // the pane behind must keep scrolling and must not freeze its snapshot.
+  // #1772 — the iOS touch lock is NOT part of what that gives up (it was, and a
+  // drag with the card open panned the whole app shell). The gate below decides
+  // both: the rail card, which cannot be dismissed, takes neither.
   createOverlayEscape(
     () => bundle() !== undefined && props.onDismiss !== undefined,
     () => props.onDismiss?.(),
@@ -102,6 +105,15 @@ const WhoisCard: Component<Props> = (props) => {
       {(b) => (
         <div class="whois-card" data-testid="whois-card">
           <div class="whois-card-header">
+            {/* M3b — the authenticated `/networks/:id/peer_avatar/:slug`
+                path from `Grappa.Avatars`, NEVER the peer's raw declared
+                URL (see docs/DESIGN_NOTES.md #1280: fetched/sanitized
+                server-side, served same-origin, WHOIS-card-only — not
+                the member list, not scrollback). Absent when never
+                queried / still fetching / the peer never answered. */}
+            <Show when={b().avatar_url}>
+              {(url) => <img class="whois-card-avatar" src={url()} alt="" />}
+            </Show>
             <NickText nick={b().target} extraClass="whois-card-target" />
             <For each={collectTags(b())}>
               {(tag) => (

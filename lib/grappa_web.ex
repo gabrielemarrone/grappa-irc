@@ -21,6 +21,11 @@ defmodule GrappaWeb do
         Grappa.AdminEvents,
         Grappa.AdminOverview,
         Grappa.Auth.IdentifierClassifier,
+        # M3b — `NetworksController.peer_avatar/2` serves a cached peer
+        # avatar; `Grappa.Uploads.MimeExt`-shaped serving lives on
+        # `Grappa.Avatars` directly (a separate trust domain from
+        # `Grappa.Uploads` — see that module's moduledoc).
+        Grappa.Avatars,
         Grappa.ChannelDirectory,
         Grappa.Cic.Bundle,
         Grappa.Cic.Wire,
@@ -67,6 +72,10 @@ defmodule GrappaWeb do
         Grappa.Version,
         Grappa.Vhosts,
         Grappa.Visitors,
+        # #1770 — the channel arms the incognito fast close on `client_closing`.
+        # The Reaper is its own `top_level?: true` boundary, so this declares
+        # the leaf that owns the verb rather than widening `Grappa.Visitors`.
+        Grappa.Visitors.Reaper,
         Grappa.Visitors.Visitor,
         Grappa.WindowCounts,
         Grappa.WSPresence,

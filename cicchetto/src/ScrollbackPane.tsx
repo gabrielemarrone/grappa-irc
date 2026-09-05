@@ -12,16 +12,25 @@ import {
 } from "solid-js";
 import LusersCard from "./LusersCard";
 import { isContentKind, ownNickForNetwork, type ScrollbackMessage } from "./lib/api";
+import { casemappingForSlug } from "./lib/casemapping";
 import { acceptInvite, confirmJoinChannel } from "./lib/channelJoin";
 import { channelKey, decodeChannelKey } from "./lib/channelKey";
 import { statusmsgDescription } from "./lib/channelModes";
-import { hasNoTopic, type TopicJoinLine, topicByChannel, topicJoinLine } from "./lib/channelTopic";
+import {
+  hasNoTopic,
+  type TopicJoinLine,
+  type TopicShowLine,
+  topicByChannel,
+  topicJoinLine,
+  topicShowLine,
+} from "./lib/channelTopic";
 import { isChannelName } from "./lib/chantypes";
 import { stripCtcpAction } from "./lib/ctcpAction";
 import { isDocumentVisible } from "./lib/documentVisibility";
 import { highlightPatterns } from "./lib/highlightList";
 import { type InviteAckEntry, inviteAckBySlug } from "./lib/inviteAck";
 import { chantypesForNetwork, prefixForNetwork } from "./lib/isupport";
+import { jumpToUnreadRequest } from "./lib/jumpToUnreadCommand";
 import { membersByChannel } from "./lib/members";
 import { matchesWatchlist } from "./lib/mentionMatch";
 import {
@@ -67,6 +76,7 @@ import { setCursorIfAdvances, setSelectedChannel } from "./lib/selection";
 import type { Point } from "./lib/swipe";
 import { isMobile } from "./lib/theme";
 import { formatTimestamp } from "./lib/timeFormat";
+import { type TopicShowEntry, topicShowByWindow } from "./lib/topicShow";
 import { dismissWhoisCard, whoisCardBySlug } from "./lib/whoisCard";
 import { SERVER_WINDOW_NAME, type WindowKind } from "./lib/windowKinds";
 import MessageContextMenu from "./MessageContextMenu";
@@ -713,11 +723,12 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
   // event, not a frozen send, so the current grade is the correct glyph.
   const prefixFor = (nick: string): "@" | "%" | "+" | "" => {
     if (!msg.channel) return "";
-    if (isContentKind(msg.kind) && nickEquals(nick, msg.sender)) {
+    const casemapping = casemappingForSlug(handlers.networkSlug);
+    if (isContentKind(msg.kind) && nickEquals(nick, msg.sender, casemapping)) {
       return snapshotSenderPrefix(msg.meta);
     }
     const key = channelKey(handlers.networkSlug, msg.channel);
-    return senderPrefix(membersByChannel()[key], nick);
+    return senderPrefix(membersByChannel()[key], nick, casemapping);
   };
 
   // C7.6: sender button for content kinds — left-click (→ query) or
@@ -1007,10 +1018,18 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       if (meta && typeof meta.raw_verb === "string") {
         return renderRawEvent(meta, msg, bareSenderSpan, handlers);
       }
-      // Defensive: a :server_event row with no raw_verb is a server
-      // bug, but render the body so it isn't invisible. Server-generated
-      // → the #455 marker layer stays OFF here, like the sibling ERROR /
-      // generic-numeric arms (only the wire mIRC layer renders).
+      // No raw_verb. This used to be described here as a server bug
+      // rendered defensively; since issue 1832 it is also the ORDINARY
+      // shape of the connect-time server-info burst — MOTD lines and the
+      // unprimed ADMIN / INFO / VERSION replies, which the server persists
+      // as `:server_event` with `meta.sender_kind` and no verb, precisely
+      // so they count in the low `events` tier instead of badging $server
+      // with unread messages. This arm is what keeps those lines READABLE,
+      // which is the only reason to keep them in the window at all — do
+      // not "tidy" it into a drop. Server-generated → the #455 marker
+      // layer stays OFF here, like the sibling ERROR / generic-numeric
+      // arms (only the wire mIRC layer renders, so a colour-coded MOTD
+      // banner keeps its colours).
       return (
         <span class="scrollback-body">
           *** {bareSenderSpan(msg.sender)} <MircBody body={msg.body ?? ""} />
@@ -1113,7 +1132,14 @@ type InviteAckRow = { type: "invite-ack"; entry: InviteAckEntry; channel: string
 // from `ScrollbackMessage.kind === "topic"` (the persisted mid-session change
 // row) so the two never blur — distinct rows, distinct code paths.
 type TopicRow = { type: "topic-join"; line: TopicJoinLine; id: string };
-type Row = SeparatorRow | UnreadMarkerRow | MessageRow | InviteAckRow | TopicRow;
+// #1914: the `/topic` answer — a SECOND presentational topic row, and a
+// separate variant on purpose. `topic-join` is unsolicited, at most one per
+// window, anchored to the own-JOIN and derived LIVE from `topicByChannel`;
+// this one is operator-requested, may repeat, sits at the moment it was
+// asked, and carries a FROZEN snapshot. Same look, different lifecycle —
+// collapsing them into one variant with a flag would fuse those.
+type TopicShowRow = { type: "topic-show"; line: TopicShowLine; id: string };
+type Row = SeparatorRow | UnreadMarkerRow | MessageRow | InviteAckRow | TopicRow | TopicShowRow;
 
 const ScrollbackPane: Component<Props> = (props) => {
   let listRef!: HTMLDivElement;
@@ -1184,6 +1210,19 @@ const ScrollbackPane: Component<Props> = (props) => {
   // messages they missed, and lost tail-follow for it. Captured with the px,
   // spent on the intent; the geometry signal is measured fresh instead.
   let overlaySnapshotDistance: number | null = null;
+  // #1701 — the height of the BOX the px above was measured in, captured at the
+  // same instant for the same reason #1121 captured the distance. A scrollTop is
+  // meaningless on its own: it names a position only relative to the viewport it
+  // was read through. Chrome mounting UNDER the freeze — the docked audio player
+  // is the reported case, tuned from a rail picker that deliberately stays open
+  // after a station is picked — shortens `.scrollback` while the snapshot is
+  // held, and the #778 ResizeObserver re-pin that exists for exactly that class
+  // is gated out by `isOverlayFrozen()` (correctly: a mid-list reader must not be
+  // yanked). No overlay edge fires again until the close, so without this the
+  // restore replays a px that is short of the tail by the bar's height. Comparing
+  // it against the LIVE clientHeight makes the correction event-independent —
+  // it holds whether or not the observer fired. `null` when no snapshot is held.
+  let overlaySnapshotClientHeight: number | null = null;
   // #608 (deep-review §6.1) — the overloaded `atBottom` split into its two
   // independent concerns, the PRIMARY reshape of the single-scroll-authority
   // work:
@@ -1393,7 +1432,10 @@ const ScrollbackPane: Component<Props> = (props) => {
     if (!nick) return [];
     const members = membersByChannel()[key()];
     if (!members) return [];
-    return members.find((m) => nickEquals(m.nick, nick))?.modes ?? [];
+    return (
+      members.find((m) => nickEquals(m.nick, nick, casemappingForSlug(props.networkSlug)))?.modes ??
+      []
+    );
   };
 
   // C7.6: left-click a nick → open query window + switch focus.
@@ -1499,7 +1541,13 @@ const ScrollbackPane: Component<Props> = (props) => {
         }
       }
     }
-    if (msgs.length === 0 && inviteAckEntries.length === 0) return [];
+    // #1914 — the `/topic` answers for THIS window. Keyed by the submitting
+    // window (not the target channel), so a `/topic #other` answers where the
+    // operator typed it. Every window kind can carry one: `/topic #chan` is
+    // legal from a query or the $server window too.
+    const topicShowEntries: TopicShowEntry[] = topicShowByWindow()[key()] ?? [];
+    if (msgs.length === 0 && inviteAckEntries.length === 0 && topicShowEntries.length === 0)
+      return [];
     // Freeze contract: read the FROZEN snapshot, not live getReadCursor.
     const cursor = markerCursorId();
     const sessionTop = sessionTopId();
@@ -1515,6 +1563,10 @@ const ScrollbackPane: Component<Props> = (props) => {
     // `/part → /join` cycle. `isOwnPresenceEvent` is the shared
     // single-source predicate (see lib/ownPresenceEvent.ts).
     const ownNick = userNick();
+    // #1861 — resolved ONCE for the whole projection: the fold is a property
+    // of the network, not of a row, and the two predicates below plus the
+    // own-JOIN anchor scan all have to agree on it.
+    const casemapping = casemappingForSlug(props.networkSlug);
     const unreadCount =
       cursor !== null && sessionTop !== null
         ? msgs.filter(
@@ -1522,7 +1574,7 @@ const ScrollbackPane: Component<Props> = (props) => {
               m.id > cursor &&
               m.id <= sessionTop &&
               !isOperatorActionEcho(m) &&
-              !isOwnPresenceEvent(m, ownNick),
+              !isOwnPresenceEvent(m, ownNick, casemapping),
           ).length
         : 0;
     // #947 — the LABEL, which is not always the count above. `unreadCount`
@@ -1576,7 +1628,7 @@ const ScrollbackPane: Component<Props> = (props) => {
         msg.id > cursor &&
         msg.id <= sessionTop &&
         !isOperatorActionEcho(msg) &&
-        !isOwnPresenceEvent(msg, ownNick)
+        !isOwnPresenceEvent(msg, ownNick, casemapping)
       ) {
         result.push({ type: "unread-marker", count: unreadLabel, id: "unread-marker" });
         markerInjected = true;
@@ -1659,7 +1711,7 @@ const ScrollbackPane: Component<Props> = (props) => {
         for (const m of allMsgs) {
           if (
             m.kind === "join" &&
-            nickEquals(m.sender, ownNick) &&
+            nickEquals(m.sender, ownNick, casemapping) &&
             (anchor === null ||
               m.server_time > anchor.server_time ||
               (m.server_time === anchor.server_time && m.id > anchor.id))
@@ -1681,6 +1733,27 @@ const ScrollbackPane: Component<Props> = (props) => {
           }
           result.splice(insertAt, 0, { type: "topic-join", line: tjl, id: "topic-join" });
         }
+      }
+    }
+    // #1914 — the `/topic` answers, interleaved by wallclock `at` exactly like
+    // invite-acks: an answer belongs at the moment it was asked, not pinned to
+    // the bottom where later arrivals would make it look like a reply to them.
+    // Sorted on a COPY — `topicShowEntries` is the store's own array.
+    if (topicShowEntries.length > 0) {
+      for (const entry of [...topicShowEntries].sort((a, b) => a.at - b.at || a.ts - b.ts)) {
+        let insertAt = result.length;
+        for (let i = 0; i < result.length; i += 1) {
+          const r = result[i];
+          if (r?.type === "message" && r.msg.server_time > entry.at) {
+            insertAt = i;
+            break;
+          }
+        }
+        result.splice(insertAt, 0, {
+          type: "topic-show",
+          line: topicShowLine(entry.channel, entry.topic),
+          id: `topic-show-${entry.ts}`,
+        });
       }
     }
     return result;
@@ -1720,7 +1793,8 @@ const ScrollbackPane: Component<Props> = (props) => {
     if (autoFocusedJoins.has(key())) return false;
     const msgs = messages();
     if (!msgs) return false;
-    return msgs.some((m) => m.kind === "join" && nickEquals(m.sender, nick));
+    const casemapping = casemappingForSlug(props.networkSlug);
+    return msgs.some((m) => m.kind === "join" && nickEquals(m.sender, nick, casemapping));
   });
 
   // UX-3 Z3 R4 — actual-overflow gate. CSS-only fix is impossible:
@@ -2119,11 +2193,16 @@ const ScrollbackPane: Component<Props> = (props) => {
           // #1121 — same instant, same epoch as the px above. See its
           // declaration for why the restore cannot recompute this later.
           overlaySnapshotDistance = listRef.scrollHeight - listRef.scrollTop - listRef.clientHeight;
+          // #1701 — same instant again, and the third member of one snapshot:
+          // position, what it meant, and the box it meant it in.
+          overlaySnapshotClientHeight = listRef.clientHeight;
         }
         const target = overlayScrollSnapshot;
         const snapKey = overlaySnapshotKey;
         const snapDistance = overlaySnapshotDistance;
+        const snapClientHeight = overlaySnapshotClientHeight;
         if (target === null || snapKey === null || snapDistance === null) return;
+        if (snapClientHeight === null) return;
         // Re-assert across rAF×2 (matching scrollToActivation's frame budget so
         // it lands after the overlay's layout commits) via the applier's W1
         // restore entrypoint — the single owner of this write, key-guarded there.
@@ -2137,7 +2216,9 @@ const ScrollbackPane: Component<Props> = (props) => {
         // close→reopen nulling a just-re-armed snapshot) is now structurally
         // impossible, as is the field-bug "frozen forever under a leaked count".
         requestAnimationFrame(() =>
-          requestAnimationFrame(() => applyOverlayRestore(target, snapKey, snapDistance)),
+          requestAnimationFrame(() =>
+            applyOverlayRestore(target, snapKey, snapDistance, snapClientHeight),
+          ),
         );
       },
       { defer: true },
@@ -3130,7 +3211,12 @@ const ScrollbackPane: Component<Props> = (props) => {
   // mid-overlay channel switch owns its own activation; never stamp the leaving
   // channel's px onto it) and skips a no-op write. `target` is the px captured on
   // the open edge; `snapKey` the channel it was captured on.
-  const applyOverlayRestore = (target: number, snapKey: string, snapDistance: number): void => {
+  const applyOverlayRestore = (
+    target: number,
+    snapKey: string,
+    snapDistance: number,
+    snapClientHeight: number,
+  ): void => {
     if (!listRef || snapKey !== key()) return;
     // #608 (regression fix) — reconcile the follow INTENT with the reader's
     // trusted position. The snapshot is the authoritative position across the
@@ -3154,14 +3240,38 @@ const ScrollbackPane: Component<Props> = (props) => {
     // edge it also counts every line that arrived under the overlay, which reads
     // as a scroll-up the reader never performed. #608's mid-list case is
     // unchanged — a snapshot taken mid-list carries a large distance either way.
-    setFollowMode(snapDistance <= SCROLL_BOTTOM_THRESHOLD_PX);
+    const wasFollowing = snapDistance <= SCROLL_BOTTOM_THRESHOLD_PX;
+    setFollowMode(wasFollowing);
+    // #1701 — WHERE to put them, once the intent is known. The px is a proxy for
+    // a position and it stops being one the moment the viewport it was read
+    // through changes size: chrome mounting under the freeze (the docked audio
+    // player, tuned from a picker that stays open) shortens the box, so the same
+    // scrollTop now sits the bar's height ABOVE the tail. Restore the INTENT
+    // instead of the proxy when the two have come apart — and only then. Gated on
+    // the box, NOT on the extent: content arriving underneath is #1121's axis and
+    // its ruling stands (a held position is not a scroll-up the reader never
+    // performed), so a steady box still replays the px whatever landed under it.
+    // A mid-list reader asked for a position, not for the tail, and a shorter box
+    // does not change what they asked for — `wasFollowing` is the whole
+    // difference, and it is the SAME predicate the intent above is set from
+    // rather than a second one free to drift from it.
+    const boxMoved = listRef.clientHeight !== snapClientHeight;
+    // The bottom of the scrollable range, spelled out rather than leaning on the
+    // browser clamping `scrollTop = scrollHeight`: this value is also what the
+    // geometry below is published from, and a number that has to be clamped
+    // before it is true cannot be measured against.
+    const restoreTo =
+      wasFollowing && boxMoved ? listRef.scrollHeight - listRef.clientHeight : target;
     // #1121 — and the GEOMETRY is republished for the close edge, where it
     // belongs. It is the SAME expression the intent used to be computed from —
     // current extent against the restored position — because that expression was
     // never wrong, only misaddressed: it answers "is the pane at the tail now",
     // which is `atBottomNow`'s question, not `followMode`'s. Measured against
-    // `target` rather than the live `scrollTop`: both exits below leave the pane
-    // there, so this is the position the reader is about to be looking from.
+    // `restoreTo` rather than the live `scrollTop`: both exits below leave the
+    // pane there, so this is the position the reader is about to be looking from.
+    // (#1701 renamed the operand from `target`; on the unchanged-box path the two
+    // ARE the same number, and on the corrected path the old one would publish a
+    // staleness the write on the next line is about to remove.)
     //
     // This is the only place the pane can learn that the tail moved away from it
     // while it was held: nothing scrolled, so no `scroll` event fires and
@@ -3171,12 +3281,12 @@ const ScrollbackPane: Component<Props> = (props) => {
     // suppress this window's unread badge. Published BEFORE the no-op early
     // return, because the held-position case IS the one that goes stale.
     setAtBottomNow(
-      listRef.scrollHeight - target - listRef.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX,
+      listRef.scrollHeight - restoreTo - listRef.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX,
     );
-    if (listRef.scrollTop === target) return;
+    if (listRef.scrollTop === restoreTo) return;
     const intent: ScrollIntent = { kind: "overlay-freeze", key: snapKey, lifetime: "sticky" };
     logScrollDecision("overlay-restore", [intent], intent, "overlay-restore");
-    listRef.scrollTop = target;
+    listRef.scrollTop = restoreTo;
   };
 
   // #608 — the applier's smooth-scroll INTERRUPT (W9). The mention-jump is the
@@ -3743,6 +3853,32 @@ const ScrollbackPane: Component<Props> = (props) => {
   // re-latch below is the half a second caller would forget — see #997's
   // measurement in DESIGN_NOTES: dropping it slams a stale divider across
   // the top of the buffer.
+  // #693's OTHER exit, the bar's primary one — lifted out of the button's
+  // inline handler by #1765 so a second door can reach the same gesture
+  // (`»N` on a far-behind window; see `jumpToUnreadCommand`). It is a named
+  // function for exactly the reason the dismiss below is: the latch arming is
+  // the half a direct caller of `scrollback.jumpToUnread` would forget.
+  const jumpToUnreadGesture = () => {
+    // Arm the EXISTING marker-activation latch (#168) before the swap:
+    // clearing the far-behind flag re-injects the divider, and the rows-change
+    // that lands the anchor region is exactly the content change that latch
+    // scrolls to. Set synchronously so it is armed when the awaited rows
+    // arrive — one more trigger on the existing scroll writer, not a second
+    // scroll authority. Stood back down if the fetch failed, so a dead latch
+    // can't yank a later unrelated rows() change.
+    setMarkerActivationPending(true);
+    void jumpToUnread(props.networkSlug, props.channelName).then((jumped) => {
+      if (!jumped) setMarkerActivationPending(false);
+    });
+  };
+
+  // #1765 — the `»N` affordance resolves to THIS window when it is the only
+  // one with unread, and on a far-behind window #1178's scroll-to-bottom exit
+  // cannot move the frozen cursor. The jump back is the live verb there, and
+  // it is the same one the bar fires. `defer` skips the value read at mount,
+  // so only a genuine request runs it.
+  createEffect(on(jumpToUnreadRequest, () => jumpToUnreadGesture(), { defer: true }));
+
   const dismissFarBehindGesture = () => {
     // Re-latch the frozen divider to whatever was marked read. Dismiss is an
     // explicit "I've read to here" gesture — the same class as the
@@ -3816,20 +3952,7 @@ const ScrollbackPane: Component<Props> = (props) => {
               type="button"
               class="scrollback-far-behind-jump"
               data-testid="far-behind-jump"
-              onClick={() => {
-                // Arm the EXISTING marker-activation latch (#168) before the
-                // swap: clearing the far-behind flag re-injects the divider,
-                // and the rows-change that lands the anchor region is exactly
-                // the content change that latch scrolls to. Set synchronously
-                // so it is armed when the awaited rows arrive — one more
-                // trigger on the existing scroll writer, not a second scroll
-                // authority. Stood back down if the fetch failed, so a dead
-                // latch can't yank a later unrelated rows() change.
-                setMarkerActivationPending(true);
-                void jumpToUnread(props.networkSlug, props.channelName).then((jumped) => {
-                  if (!jumped) setMarkerActivationPending(false);
-                });
-              }}
+              onClick={jumpToUnreadGesture}
             >
               {far().missed} unread — jump back
             </button>
@@ -3992,6 +4115,39 @@ const ScrollbackPane: Component<Props> = (props) => {
                     </span>
                     <Show when={row.line.meta}>
                       <span class="scrollback-topic-join-meta"> — {row.line.meta}</span>
+                    </Show>
+                  </div>
+                );
+              }
+              if (row.type === "topic-show") {
+                // #1914 — the `/topic` answer. Wears the join line's classes on
+                // purpose: it is the same fact, and an operator who has seen one
+                // should not have to learn a second look for the other. Its own
+                // testid keeps the two separable in tests and, like the join
+                // line, keeps it out of the unread/cursor math and row counts.
+                // `text: null` is the "no topic set" answer — printed, because
+                // the operator ASKED and silence would read as a broken verb.
+                return (
+                  <div
+                    class="scrollback-topic-join"
+                    data-testid="topic-show-line"
+                    data-kind="topic-show"
+                  >
+                    <Show
+                      when={row.line.text !== null}
+                      fallback={
+                        <span class="scrollback-topic-join-label">
+                          No topic set for {row.line.channel}
+                        </span>
+                      }
+                    >
+                      <span class="scrollback-topic-join-label">Topic for {row.line.channel}:</span>{" "}
+                      <span class="scrollback-body">
+                        <MircBody body={row.line.text ?? ""} emphasis />
+                      </span>
+                      <Show when={row.line.meta}>
+                        <span class="scrollback-topic-join-meta"> — {row.line.meta}</span>
+                      </Show>
                     </Show>
                   </div>
                 );

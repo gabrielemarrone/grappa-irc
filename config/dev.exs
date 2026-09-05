@@ -1,8 +1,38 @@
 import Config
 
+# #1770 — shorten the incognito fast-close grace for the dev stack, which is
+# also the stack `scripts/integration.sh` boots (`MIX_ENV: dev` in
+# `cicchetto/e2e/compose.yaml`). Production's 30s is chosen so a RELOAD gets to
+# land its replacement socket before the wipe; an e2e that closes a page and
+# asserts the row is gone would otherwise idle out the whole window inside
+# Playwright's 30s per-test default.
+#
+# The divergence is deliberate and it is named here rather than hidden behind
+# an env var: dev is where you WANT the behaviour to be observable inside one
+# attention span. A developer debugging the reload-protection window itself
+# must read `Grappa.Visitors.Reaper`'s `@default_incognito_grace_ms`, which is
+# the production number and the single source of it.
+config :grappa, :incognito_close_grace_ms, 2_000
+
 config :grappa, Grappa.Repo,
   database: Path.expand("../runtime/grappa_dev.db", __DIR__),
-  pool_size: 5,
+  # #1759c — a MEASUREMENT LEVER, not a behaviour change and not a cure.
+  #
+  # `config/runtime.exs:187` already reads `POOL_SIZE` this way, but that
+  # block is gated on `config_env() == :prod` (`:137`), and the e2e stack
+  # runs `MIX_ENV: dev` (`cicchetto/e2e/compose.yaml:61`). So the pool the
+  # e2e suite exercises was a literal `5` that nothing could move — and a
+  # question of the form "at what N does a `pool_size: 10` pool saturate?"
+  # could only have been answered at HALF the production pool and then
+  # extrapolated, which is the one move the investigation is not allowed.
+  #
+  # The default is `5`, so an unset environment is byte-for-byte the
+  # behaviour that shipped before this line. What it buys is the ability to
+  # take the SAME reading at two pool sizes: if the saturation point tracks
+  # the pool, the mechanism is the pool; if it does not, the hypothesis is
+  # dead and that is a result. A lever that only ever reads one value cannot
+  # tell those two apart.
+  pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5"),
   # CP24 cluster `post-cr-review` bucket B, persistence/S2: mirror prod's
   # 30s busy_timeout so iex sessions + integration scripts hit the same
   # "database is locked" cushion as prod. Default ~2s otherwise.
@@ -19,6 +49,9 @@ config :grappa, Grappa.Repo,
 # of the sqlite DB under `runtime/` so the existing host bind-mount
 # covers both.
 config :grappa, :uploads_storage_root, Path.expand("../runtime/uploads_dev", __DIR__)
+
+# M3b — cached peer CTCP AVATAR images. Sibling dir, same runtime/ bind-mount.
+config :grappa, :peer_avatars_storage_root, Path.expand("../runtime/peer_avatars_dev", __DIR__)
 
 config :grappa, GrappaWeb.Endpoint,
   http: [ip: {0, 0, 0, 0}, port: 4000],

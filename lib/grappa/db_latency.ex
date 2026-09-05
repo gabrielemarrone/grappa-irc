@@ -60,8 +60,12 @@ defmodule Grappa.DbLatency do
       `:unattributed` is the same ring for the episodes that seam CANNOT
       name — an autocommit writer holds the same file lock and never
       registers — and it carries the queue's stacks with explicit nils
-      where the holder would be. Filing it elsewhere would mean an operator
-      asking what the write lock did has to already know that a third,
+      where the holder would be. `:nif_census` (#1901) is the fourth phase
+      and the only one taken WITHOUT reading the seam at all: the roster of
+      processes sitting inside `Exqlite.Sqlite3NIF`, which is how the
+      autocommit writers that dominate this system's write volume become
+      visible to any door. Filing any of them elsewhere would mean an
+      operator asking what the write lock did has to already know that a
       differently-shaped answer exists somewhere else.
 
   ## Reading a window
@@ -95,6 +99,8 @@ defmodule Grappa.DbLatency do
 
   use GenServer
 
+  alias Grappa.DbLatency.Distribution
+
   @handler_id "grappa-db-latency"
   @events [
     [:grappa, :repo, :query],
@@ -103,7 +109,8 @@ defmodule Grappa.DbLatency do
     [:grappa, :scrollback, :persist, :contention],
     [:grappa, :repo, :lock_stall, :detected],
     [:grappa, :repo, :lock_stall, :resolved],
-    [:grappa, :repo, :lock_stall, :unattributed]
+    [:grappa, :repo, :lock_stall, :unattributed],
+    [:grappa, :repo, :lock_stall, :nif_census]
   ]
 
   # #1420 — the lock-stall ring is bounded: these rows carry sampled
@@ -114,19 +121,40 @@ defmodule Grappa.DbLatency do
 
   @type op :: :select | :insert | :update | :delete | :count | :other
 
+  @typedoc """
+  One `{source, op}` bucket. Everything but `queue_ms` comes from a
+  `t:Grappa.DbLatency.Distribution.reading/0`, so `max_ms` is exact and the
+  three quantiles are UPPER bounds — see that module for why an interpolated
+  quantile was refused.
+
+  🔴 `queue_ms` stays a plain cumulative sum, and that is a KNOWN GAP rather
+  than a judgement that the pool axis does not matter. #1687 measured a
+  victim's 62 s as ~31 s of DBConnection checkout PLUS ~31 s of
+  `busy_timeout`, so a queue-time outlier is exactly as invisible in a mean
+  as an execution-time one. #1901 asks for the execution axis; giving the
+  queue its own histogram is the same change again and has not been made.
+  """
   @type query_row :: %{
           source: String.t() | nil,
           op: op(),
           n: non_neg_integer(),
           total_ms: float(),
           queue_ms: float(),
-          mean_ms: float()
+          mean_ms: float(),
+          max_ms: float(),
+          p50_ms: float(),
+          p95_ms: float(),
+          p99_ms: float()
         }
 
   @type span_row :: %{
           n: non_neg_integer(),
           total_ms: float(),
           mean_ms: float(),
+          max_ms: float(),
+          p50_ms: float(),
+          p95_ms: float(),
+          p99_ms: float(),
           outcomes: %{atom() => non_neg_integer()}
         }
 
@@ -156,14 +184,52 @@ defmodule Grappa.DbLatency do
   own figure is the longest WAIT, which rides the telemetry measurements and
   is derivable from `waiters` rather than duplicated here. It gets no
   `:resolved` bracket, because there is no hold to total.
+
+  #1888 adds three fields, on the same rule — a phase that did not observe a
+  thing carries an explicit `nil` for it rather than a plausible value:
+
+    * `observed_at` — the instant the EMITTER observed the episode, on every
+      phase. Without it a ring row cannot be lined up against `erlang.log`,
+      which is the only artefact that dates a freeze, and the ring is exactly
+      the door that survives a log that went quiet.
+    * `caller` — WHO held the lock, on `:resolved` only. It is not a holder
+      `sample()` and the two must not be read as one: a sample names the
+      frame the holder PAUSED in, this names the write path that opened the
+      transaction. `holder` therefore stays `nil` on a `:resolved` row, as it
+      always has.
+    * `announced` — whether the watchdog got to report the episode WHILE it
+      held. `false` means this row is the only record of it, which is the
+      #1888 case; `nil` on the two phases where the question does not arise.
+
+  `waiter_count` is nilable for the same reason: a closing bracket counts no
+  queue, and the `0` it used to carry asserted an empty one was measured.
+
+  #1901 adds the fourth phase, `:nif_census`, and with it `parked` plus two
+  counts. It is the arm that does not read the seam at all — it reports every
+  process sitting inside `Exqlite.Sqlite3NIF` past the threshold — so on that
+  row EVERY seam-derived field is nil, including `holder_pid`, and that is a
+  stronger statement than `:unattributed`'s: a holder is certainly IN
+  `parked`, and nothing BEAM-visible says which entry it is.
+  `registered_holders` / `registered_waiters` count how many of the parked
+  processes the seam could already name, so an operator can tell "widen
+  coverage" from "the other two arms already told you". `parked` follows
+  `waiters` in being a plain list defaulting to `[]` rather than a nilable:
+  an empty roster and no roster are the same fact here, since a census with
+  nobody in it emits nothing at all.
   """
   @type lock_stall_row :: %{
-          phase: :detected | :resolved | :unattributed,
+          phase: :detected | :resolved | :unattributed | :nif_census,
+          observed_at: String.t(),
           holder_pid: String.t() | nil,
           held_ms: non_neg_integer() | nil,
-          waiter_count: non_neg_integer(),
+          waiter_count: non_neg_integer() | nil,
           holder: map() | nil,
-          waiters: [map()]
+          caller: map() | nil,
+          announced: boolean() | nil,
+          waiters: [map()],
+          parked: [map()],
+          registered_holders: non_neg_integer() | nil,
+          registered_waiters: non_neg_integer() | nil
         }
 
   @type snapshot :: %{
@@ -174,18 +240,20 @@ defmodule Grappa.DbLatency do
           lock_stalls: [lock_stall_row()]
         }
 
-  # Internal accumulators carry NATIVE time units (integer sums); the
-  # native → millisecond conversion happens once, at snapshot time.
+  # Internal accumulators carry NATIVE time units; the native → millisecond
+  # conversion happens once, at snapshot time. Since #1901 the duration half
+  # of every family is a `Distribution` rather than an `{n, total}` pair —
+  # same exactness for those two, plus the max and the tail a mean erases.
   defstruct queries: %{},
-            send_privmsg: %{n: 0, total: 0, outcomes: %{}},
-            persist: %{n: 0, total: 0, outcomes: %{}},
+            send_privmsg: %{dist: %Distribution{}, outcomes: %{}},
+            persist: %{dist: %Distribution{}, outcomes: %{}},
             contention: %{n: 0, queue_timeout: 0, busy_locked: 0, interrupted: 0, dropped: 0},
             lock_stalls: []
 
   @type t :: %__MODULE__{
-          queries: %{{String.t() | nil, op()} => %{n: non_neg_integer(), total: integer(), queue: integer()}},
-          send_privmsg: %{n: non_neg_integer(), total: integer(), outcomes: %{atom() => non_neg_integer()}},
-          persist: %{n: non_neg_integer(), total: integer(), outcomes: %{atom() => non_neg_integer()}},
+          queries: %{{String.t() | nil, op()} => %{dist: Distribution.t(), queue: integer()}},
+          send_privmsg: %{dist: Distribution.t(), outcomes: %{atom() => non_neg_integer()}},
+          persist: %{dist: Distribution.t(), outcomes: %{atom() => non_neg_integer()}},
           contention: contention_row(),
           lock_stalls: [lock_stall_row()]
         }
@@ -202,6 +270,20 @@ defmodule Grappa.DbLatency do
   @doc "Zero every counter — call before opening a fresh sample window."
   @spec reset() :: :ok
   def reset, do: GenServer.call(__MODULE__, :reset)
+
+  @doc """
+  The telemetry events this handler binds at `init/1`.
+
+  Exposed because `fold/4` has NO catch-all clause: an event added to
+  `@events` without a matching clause crashes the singleton, and a clause
+  added without the event folds nothing — and the second failure is silent,
+  which is how it presented while #1901 was being built (a new emitter, a
+  green suite, and an empty ring). `Grappa.DbLatencyTest` keeps its own
+  independent copy of the set as the oracle and asserts it equals this one, so
+  the drift is a named failure rather than a missing row.
+  """
+  @spec attached_events() :: nonempty_list(nonempty_list(atom()))
+  def attached_events, do: @events
 
   ## ----- GenServer callbacks ------------------------------------------
 
@@ -257,11 +339,10 @@ defmodule Grappa.DbLatency do
   @spec fold([atom()], map(), map(), t()) :: t()
   defp fold([:grappa, :repo, :query], measurements, metadata, state) do
     key = {Map.get(metadata, :source), classify_op(Map.get(metadata, :query))}
-    prev = Map.get(state.queries, key, %{n: 0, total: 0, queue: 0})
+    prev = Map.get(state.queries, key, %{dist: %Distribution{}, queue: 0})
 
     updated = %{
-      n: prev.n + 1,
-      total: prev.total + native(measurements, :total_time),
+      dist: Distribution.add(prev.dist, native(measurements, :total_time)),
       queue: prev.queue + native(measurements, :queue_time)
     }
 
@@ -291,11 +372,17 @@ defmodule Grappa.DbLatency do
   defp fold([:grappa, :repo, :lock_stall, :detected], measurements, metadata, state) do
     push_stall(state, %{
       phase: :detected,
+      observed_at: metadata.observed_at,
       holder_pid: metadata.holder.pid,
       held_ms: measurements.held_ms,
       waiter_count: measurements.waiter_count,
       holder: metadata.holder,
-      waiters: metadata.waiters
+      caller: nil,
+      announced: nil,
+      waiters: metadata.waiters,
+      parked: [],
+      registered_holders: nil,
+      registered_waiters: nil
     })
   end
 
@@ -307,22 +394,69 @@ defmodule Grappa.DbLatency do
   defp fold([:grappa, :repo, :lock_stall, :unattributed], measurements, metadata, state) do
     push_stall(state, %{
       phase: :unattributed,
+      observed_at: metadata.observed_at,
       holder_pid: nil,
       held_ms: nil,
       waiter_count: measurements.waiter_count,
       holder: nil,
-      waiters: metadata.waiters
+      caller: nil,
+      announced: nil,
+      waiters: metadata.waiters,
+      parked: [],
+      registered_holders: nil,
+      registered_waiters: nil
     })
   end
 
+  # #1888 — the closing bracket, which since that issue also fires for an
+  # episode the watchdog never announced. `caller` is the identity such a row
+  # carries INSTEAD of a holder sample (there is no pause site left to sample
+  # by then), and `announced: false` is the finding: this row is the only
+  # record that episode left anywhere.
   defp fold([:grappa, :repo, :lock_stall, :resolved], measurements, metadata, state) do
     push_stall(state, %{
       phase: :resolved,
+      observed_at: metadata.observed_at,
       holder_pid: metadata.holder_pid,
       held_ms: measurements.held_ms,
-      waiter_count: 0,
+      # nil, not 0: nothing in a closing bracket counted a queue, and a zero
+      # would assert an empty one was measured.
+      waiter_count: nil,
       holder: nil,
-      waiters: []
+      caller: metadata.caller,
+      announced: metadata.announced,
+      waiters: [],
+      parked: [],
+      registered_holders: nil,
+      registered_waiters: nil
+    })
+  end
+
+  # #1901 — the arm that reads `Process.list/0` rather than the seam, so it is
+  # the one phase where `holder_pid` being nil is not a gap the instrument
+  # might have closed: a holder IS among `parked`, and exqlite's busy handler
+  # sleeping inside the same dirty-IO NIF as the writer that holds the lock
+  # makes the cohort indivisible from the BEAM's side. Synthesising a
+  # `holder_pid` to fill the column would turn the one honest thing this row
+  # says into a guess. `registered_holders` / `registered_waiters` are what
+  # separate "the seam is blind here" from "the other two arms already spoke".
+  defp fold([:grappa, :repo, :lock_stall, :nif_census], _, metadata, state) do
+    push_stall(state, %{
+      phase: :nif_census,
+      observed_at: metadata.observed_at,
+      holder_pid: nil,
+      held_ms: nil,
+      # nil, not `parked_count`: nothing here observed a QUEUE. The count of
+      # parked processes is a different measurement and rides its own field,
+      # exactly as #1687 refused to reuse `held_ms` for a longest WAIT.
+      waiter_count: nil,
+      holder: nil,
+      caller: nil,
+      announced: nil,
+      waiters: [],
+      parked: metadata.parked,
+      registered_holders: metadata.registered_holders,
+      registered_waiters: metadata.registered_waiters
     })
   end
 
@@ -335,8 +469,7 @@ defmodule Grappa.DbLatency do
   @spec add_span(map(), map(), map()) :: map()
   defp add_span(acc, measurements, metadata) do
     %{
-      n: acc.n + 1,
-      total: acc.total + native(measurements, :duration),
+      dist: Distribution.add(acc.dist, native(measurements, :duration)),
       outcomes: Map.update(acc.outcomes, Map.get(metadata, :outcome), 1, &(&1 + 1))
     }
   end
@@ -379,15 +512,10 @@ defmodule Grappa.DbLatency do
   defp to_snapshot(state) do
     queries =
       state.queries
-      |> Enum.map(fn {{source, op}, %{n: n, total: total, queue: queue}} ->
-        %{
-          source: source,
-          op: op,
-          n: n,
-          total_ms: to_ms(total),
-          queue_ms: to_ms(queue),
-          mean_ms: mean_ms(total, n)
-        }
+      |> Enum.map(fn {{source, op}, %{dist: dist, queue: queue}} ->
+        dist
+        |> Distribution.reading()
+        |> Map.merge(%{source: source, op: op, queue_ms: Distribution.to_ms(queue)})
       end)
       |> Enum.sort_by(& &1.total_ms, :desc)
 
@@ -401,14 +529,7 @@ defmodule Grappa.DbLatency do
   end
 
   @spec span_snapshot(map()) :: span_row()
-  defp span_snapshot(%{n: n, total: total, outcomes: outcomes}) do
-    %{n: n, total_ms: to_ms(total), mean_ms: mean_ms(total, n), outcomes: outcomes}
+  defp span_snapshot(%{dist: dist, outcomes: outcomes}) do
+    dist |> Distribution.reading() |> Map.put(:outcomes, outcomes)
   end
-
-  @spec to_ms(integer()) :: float()
-  defp to_ms(native), do: System.convert_time_unit(native, :native, :microsecond) / 1000.0
-
-  @spec mean_ms(integer(), non_neg_integer()) :: float()
-  defp mean_ms(_, 0), do: 0.0
-  defp mean_ms(total, n), do: to_ms(total) / n
 end

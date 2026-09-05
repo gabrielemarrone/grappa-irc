@@ -24,16 +24,23 @@ setup() {
     # Verbatim from the call sites, so a pin that drifts from production
     # prose fails here rather than reporting a confident zero.
     #   lock_watch.ex — the two edges of one stall episode
-    #   busy_retry.ex — the three terminal arms, one per fault kind
+    #   busy_retry.ex — the four terminal arms, one per fault kind
     LOCKSTALL_LINE='db lock stall: holder #PID<0.512.0> has held RESERVED for 30123ms with 2 waiter(s) queued — holder status=:runnable at :gen_server.loop/7, stack: a <- b'
     LOCKRESOLVED_LINE='db lock stall RESOLVED: holder #PID<0.512.0> released RESERVED after 30456ms'
     LOCKUNATTR_LINE='db lock stall UNATTRIBUTED: 3 writer(s) queued past the threshold, longest 31303ms — no holder registered, so the holder is NOT attributable at the BEGIN IMMEDIATE seam; longest waiter #PID<0.512.0> status=:waiting at :gen_server.loop/7, stack: a <- b'
+    LOCKNIF_LINE='db lock stall NIF CENSUS: 2 process(es) parked inside Exqlite.Sqlite3NIF past the threshold, longest 31402ms — none of them registered at the BEGIN IMMEDIATE seam, so all 2 are writers it cannot name; roster: #PID<0.512.0> 31402ms Exqlite.Sqlite3NIF.step/2, #PID<0.513.0> 30011ms Exqlite.Sqlite3NIF.execute/2; longest #PID<0.512.0> status=:running at Exqlite.Sqlite3NIF.step/2, stack: a <- b'
     LOCKHELD_LINE='db write unavailable: SQLite write lock held by another writer for 30067ms across 1 attempts (1500ms retry budget) — returning :db_unavailable'
     SATURATED_LINE='db write unavailable: SQLite pool saturated for 1512ms across 14 attempts (1500ms retry budget) — returning :db_unavailable'
     # #1657 — the third arm. The elapsed is ~15s because a cancellation is
     # raised only once DBConnection's own `:timeout` has expired, which is
     # also why its attempt count is 1 and not 14 like the saturated line.
     INTERRUPTED_LINE='db write unavailable: SQLite statement cancelled by a pool timeout for 15042ms across 1 attempts (1500ms retry budget) — returning :db_unavailable'
+    # #1708 — the fourth arm, and the only one that does NOT open with "db
+    # write unavailable": its statement completed, so the row is durable and
+    # the prose must not send an operator hunting for it. Attempt count is 1
+    # by VERDICT here (the fault is classified non-retryable) rather than
+    # because a budget expired.
+    ORPHANED_LINE='db write landed but its result was lost: SQLite connection closed after the write completed, 15042ms into the write, on attempt 1 (not retried — the row is durable, a retry would duplicate it) — returning :db_unavailable'
 }
 
 # The scanner as integration.sh invokes it: a service label and a
@@ -99,6 +106,7 @@ stamp() {
         stamp '12:00:05.' "$LOCKSTALL_LINE"
         stamp '12:00:06.' "$LOCKRESOLVED_LINE"
         stamp '12:00:07.' "$INTERRUPTED_LINE"
+        stamp '12:00:08.' "$ORPHANED_LINE"
     } | scan 10 )"
 
     grep -q 'db30=1' <<<"$out"
@@ -107,6 +115,9 @@ stamp() {
     grep -q 'saturated=1' <<<"$out"
     # #1657 — and specifically NOT folded into `saturated`, which stays 1.
     grep -q 'interrupted=1' <<<"$out"
+    # #1708 — nor into `interrupted`, nor into `dropped`: the write LANDED, so
+    # counting it as a lost row is the one reading the census must not offer.
+    grep -q 'orphaned=1' <<<"$out"
     grep -q 'lockheld=1' <<<"$out"
     grep -q 'lockstall=1' <<<"$out"
     grep -q 'lockstall_resolved=1' <<<"$out"
@@ -173,6 +184,40 @@ stamp() {
     # instrument explicitly declined to make.
     grep -q 'lockstall=0' <<<"$out"
     grep -q 'lockstall_resolved=0' <<<"$out"
+}
+
+# --- #1901: the census that reads the NIF, not the seam --------------------
+#
+# All four #1888 episodes had the shape the three counters above cannot
+# express: writers demonstrably stuck, nobody registered at the seam, and no
+# queue the seam could measure either — so `lockstall`, `lockstall_resolved`
+# AND `lockstall_unattributed` all read zero while the node was frozen for
+# 31 s. This is the counter that can be non-zero in exactly that state.
+
+@test "a NIF CENSUS is counted, and not as any of the three seam verdicts" {
+    local out
+    out="$( stamp '12:00:00.' "$LOCKNIF_LINE" | scan 10 )"
+
+    grep -q 'lockstall_nif=1' <<<"$out"
+    # The discrimination, and it runs in both directions. `lockstall` means a
+    # holder was NAMED and `lockstall_unattributed` means a queue was MEASURED
+    # with nobody to blame; a census established neither, it photographed a
+    # cohort. Folding it into either would let an artefact report an
+    # attribution the instrument explicitly declined to make.
+    grep -q 'lockstall=0' <<<"$out"
+    grep -q 'lockstall_resolved=0' <<<"$out"
+    grep -q 'lockstall_unattributed=0' <<<"$out"
+}
+
+@test "a NAMED stall does not score as a NIF census" {
+    local out
+    out="$( {
+        stamp '12:00:00.' "$LOCKSTALL_LINE"
+        stamp '12:00:30.' "$LOCKRESOLVED_LINE"
+        stamp '12:00:31.' "$LOCKUNATTR_LINE"
+    } | scan 60 )"
+
+    grep -q 'lockstall_nif=0' <<<"$out"
 }
 
 @test "a NAMED stall does not score as unattributed" {

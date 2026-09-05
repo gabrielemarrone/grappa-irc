@@ -97,6 +97,11 @@ defmodule GrappaWeb.UploadsController do
     "video/webm" => :video,
     "application/pdf" => :document,
     "text/plain" => :document,
+    # #1764 — accepted so a `.md` can exist on the wire at all: the cic
+    # viewer reads it as SOURCE (no rendering, vjt's ruling), and a type
+    # the server refuses can never be read. Category `:document` like its
+    # sibling text/plain — the cap axis is size, not renderability.
+    "text/markdown" => :document,
     "application/vnd.oasis.opendocument.text" => :document,
     "application/vnd.oasis.opendocument.spreadsheet" => :document,
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => :document,
@@ -374,18 +379,11 @@ defmodule GrappaWeb.UploadsController do
     }
   end
 
-  # #418: append the MIME's canonical extension so the URL carries the
-  # media type (the cic viewer reads the type from the URL, not a fragile
-  # 📸/🎬 emoji in the message body). An unmapped MIME degrades to an
-  # extensionless URL — today's behaviour, never a crash.
-  defp public_url(slug, mime) do
-    base = GrappaWeb.Endpoint.url() <> "/uploads/" <> slug
-
-    case Uploads.ext_for(mime) do
-      {:ok, ext} -> base <> "." <> ext
-      :error -> base
-    end
-  end
+  # #418/M3a: moved to `Grappa.Uploads.public_url/2` so a non-web caller
+  # (`Grappa.Networks.Wire.avatar_url/1`) can build the identical
+  # absolute shape without a second hand-rolled copy. Thin delegate here
+  # keeps every existing call site in this file unchanged.
+  defp public_url(slug, mime), do: Uploads.public_url(slug, mime)
 
   # #418: the public URL now carries a type extension (`/uploads/<slug>.<ext>`).
   # The slug IS the access token; the extension is an advisory type hint for

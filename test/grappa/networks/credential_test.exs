@@ -54,6 +54,87 @@ defmodule Grappa.Networks.CredentialTest do
     end
   end
 
+  describe "profile_changeset/2 (KVIrc-style CTCP USERINFO profile)" do
+    test "casts all 5 profile fields" do
+      cs =
+        Credential.profile_changeset(%Credential{}, %{
+          profile_age: "30",
+          profile_gender: :female,
+          profile_location: "Italy",
+          profile_languages: "it, en",
+          profile_custom: "here for the vibes"
+        })
+
+      assert cs.valid?
+      assert Ecto.Changeset.get_change(cs, :profile_age) == "30"
+      assert Ecto.Changeset.get_change(cs, :profile_gender) == :female
+      assert Ecto.Changeset.get_change(cs, :profile_location) == "Italy"
+      assert Ecto.Changeset.get_change(cs, :profile_languages) == "it, en"
+      assert Ecto.Changeset.get_change(cs, :profile_custom) == "here for the vibes"
+    end
+
+    test "an empty attrs map is a valid no-op" do
+      assert Credential.profile_changeset(%Credential{}, %{}).valid?
+    end
+
+    test "profile_gender rejects a value outside the closed set" do
+      cs = Credential.profile_changeset(%Credential{}, %{profile_gender: :robot})
+      refute cs.valid?
+      assert "is invalid" in errors_on(cs).profile_gender
+    end
+
+    test "profile_gender accepts each of male/female/nonbinary" do
+      for gender <- Credential.genders() do
+        cs = Credential.profile_changeset(%Credential{}, %{profile_gender: gender})
+        assert cs.valid?, "expected #{inspect(gender)} to be a valid gender"
+      end
+    end
+
+    test "rejects a CRLF-injected free-text field (wire-hygiene guard)" do
+      for field <- [:profile_age, :profile_location, :profile_languages, :profile_custom] do
+        cs = Credential.profile_changeset(%Credential{}, %{field => "evil\r\nQUIT"})
+        refute cs.valid?, "expected #{field} with an embedded CRLF to be rejected"
+      end
+    end
+
+    test "rejects a free-text field over the byte cap" do
+      too_long = String.duplicate("a", 101)
+
+      for field <- [:profile_age, :profile_location, :profile_languages, :profile_custom] do
+        cs = Credential.profile_changeset(%Credential{}, %{field => too_long})
+        refute cs.valid?, "expected #{field} over 100 bytes to be rejected"
+        assert "must be at most 100 bytes" in errors_on(cs)[field]
+      end
+    end
+
+    test "accepts a free-text field at exactly the byte cap" do
+      exactly_100 = String.duplicate("a", 100)
+
+      for field <- [:profile_age, :profile_location, :profile_languages, :profile_custom] do
+        cs = Credential.profile_changeset(%Credential{}, %{field => exactly_100})
+        assert cs.valid?, "expected #{field} at exactly 100 bytes to be accepted"
+      end
+    end
+
+    test "profile_snapshot/1 projects the 5 fields into a plain map" do
+      cred = %Credential{
+        profile_age: "30",
+        profile_gender: :nonbinary,
+        profile_location: "Italy",
+        profile_languages: "it",
+        profile_custom: "custom"
+      }
+
+      assert Credential.profile_snapshot(cred) == %{
+               age: "30",
+               gender: :nonbinary,
+               location: "Italy",
+               languages: "it",
+               custom: "custom"
+             }
+    end
+  end
+
   describe "has_nickserv_secret?/1 (#581 — /recover button gate)" do
     # Post-Cloak-load, the `*_encrypted` fields carry DECRYPTED plaintext
     # (accessor contract), so a plain struct exercises the predicate without
@@ -78,9 +159,14 @@ defmodule Grappa.Networks.CredentialTest do
              })
     end
 
-    test "false for :server_pass with only an upstream password (spent on PASS, not NickServ)" do
+    # INVERTED by #1044, and the inversion is the feature. While one slot held
+    # both roles, a `:server_pass` row's password WAS spent on the PASS line,
+    # so it could not also be a NickServ secret. Now the gate secret has its
+    # own column and this one means NickServ here like it does everywhere
+    # else — so such a credential IS recoverable.
+    test "true for :server_pass — its password is the NickServ secret since #1044" do
       cred = %Credential{auth_method: :server_pass, password_encrypted: "shibboleth"}
-      refute Credential.has_nickserv_secret?(cred)
+      assert Credential.has_nickserv_secret?(cred)
     end
 
     test "#1044 — the server-PASS slot does not grant the gate" do
@@ -109,8 +195,18 @@ defmodule Grappa.Networks.CredentialTest do
       assert Credential.recover_secret(%Credential{auth_method: :none}) == nil
     end
 
-    test "nil for :server_pass with only an upstream password (spent on PASS, not NickServ)" do
+    # INVERTED by #1044 — see the sibling in `has_nickserv_secret?/1` above.
+    # The method set widened; the SOURCE did not, which is what keeps #124's
+    # property intact and is pinned by the two tests below.
+    test "returns the :server_pass upstream password — NickServ's since #1044" do
       cred = %Credential{auth_method: :server_pass, password_encrypted: "shibboleth"}
+      assert Credential.recover_secret(cred) == "shibboleth"
+    end
+
+    # SASL is the method that must NOT join the set: it spends `:password` on
+    # the SASL payload, so that column is not a NickServ secret there.
+    test "nil for :sasl — its password is spent on the SASL payload" do
+      cred = %Credential{auth_method: :sasl, password_encrypted: "shibboleth"}
       assert Credential.recover_secret(cred) == nil
     end
 

@@ -337,6 +337,14 @@ export type DisplayPrefs = {
   time_format: TimeFormatKey;
   colored_nicklist: boolean;
   presence_filter: Record<string, PresencePref>;
+  // #1766 — OPTIONAL on the READ side, always sent on the write side. A server
+  // predating #1766 omits it, and this bundle can be deployed ahead of the
+  // server (`deploy-m42.sh --cic` ships the bundle alone). Typed as required,
+  // `applyServerPrefs` would hand `undefined` to the local setter and the bar
+  // would vanish for every user until the server caught up — the mirror of the
+  // skew the server tolerates on the PUT. Absent ⇒ the default, exactly like
+  // `persisted?` below. `buildWireMap()` always populates it.
+  show_bottom_bar?: boolean;
 };
 
 export type DisplayPrefsResponse = {
@@ -377,4 +385,92 @@ export async function putDisplayPrefs(
   // callers already swallow the throw and keep the optimistic local state.
   if (!res.ok) throw await readError(res, false);
   return (await res.json()) as DisplayPrefsResponse;
+}
+
+// ---------------------------------------------------------------------------
+// show_peer_profiles — M2. Opt-in to grappa querying OTHER users' CTCP
+// USERINFO profile (the member-list gender badge's source). Default
+// `false`. No live-broadcast bridge — a live session picks the change up
+// on its next (re)spawn, so there's no cross-device sync signal to mirror
+// here beyond a normal re-fetch on drawer open.
+// ---------------------------------------------------------------------------
+
+export type ShowPeerProfilesResponse = {
+  show_peer_profiles: boolean;
+};
+
+export async function getShowPeerProfiles(token: string): Promise<boolean> {
+  const res = await fetch("/me/settings/show-peer-profiles", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  // #449, same reasoning as `getDisplayPrefs` above — ISOLATED from the
+  // dead-token handler (`fireDeadTokenHandler: false`). This fires at
+  // boot, not on a user action, and it is a COSMETIC read: a transient
+  // 401 here must not clear a valid session's token and bounce the whole
+  // Shell back to the login screen. `loadShowPeerProfiles` already
+  // swallows the throw and leaves the cache at the server's own default.
+  if (!res.ok) throw await readError(res, false);
+  const body = (await res.json()) as ShowPeerProfilesResponse;
+  return body.show_peer_profiles;
+}
+
+export async function putShowPeerProfiles(token: string, enabled: boolean): Promise<boolean> {
+  const res = await fetch("/me/settings/show-peer-profiles", {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ show_peer_profiles: enabled }),
+  });
+  if (!res.ok) throw await readError(res);
+  const body = (await res.json()) as ShowPeerProfilesResponse;
+  return body.show_peer_profiles;
+}
+
+// ---------------------------------------------------------------------------
+// upload_confirm_enabled — #1883. Opt-IN to being asked before an upload
+// leaves the device, for every door `uploadOrchestrator.triggerUploads`
+// serves (picker, drop, pasted file, paste-as-.txt, OS share).
+//
+// Default `false`, so an operator who never opens settings is never asked.
+// That default is the reversal #1883's own note argued against; the whole
+// argument, and what changed, is on the server accessor
+// (`Grappa.UserSettings.get_upload_confirm_enabled/1`) — the one place a
+// reader of either side will find it.
+//
+// Read at UPLOAD time, not at boot: the confirm is a cic dialog and the
+// server only stores the flag, so a flip takes effect on the next upload
+// with no session involvement (unlike show_peer_profiles above, which the
+// bouncer acts on and therefore waits for a respawn).
+// ---------------------------------------------------------------------------
+
+export type UploadConfirmEnabledResponse = {
+  upload_confirm_enabled: boolean;
+};
+
+export async function getUploadConfirmEnabled(token: string): Promise<boolean> {
+  const res = await fetch("/me/settings/upload-confirm-enabled", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  // ISOLATED from the dead-token handler, exactly as `getShowPeerProfiles`
+  // above: this is a cosmetic boot read, and a transient 401 must not clear
+  // a valid session's token and bounce the Shell to the login screen.
+  if (!res.ok) throw await readError(res, false);
+  const body = (await res.json()) as UploadConfirmEnabledResponse;
+  return body.upload_confirm_enabled;
+}
+
+export async function putUploadConfirmEnabled(token: string, enabled: boolean): Promise<boolean> {
+  const res = await fetch("/me/settings/upload-confirm-enabled", {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ upload_confirm_enabled: enabled }),
+  });
+  if (!res.ok) throw await readError(res);
+  const body = (await res.json()) as UploadConfirmEnabledResponse;
+  return body.upload_confirm_enabled;
 }

@@ -39,8 +39,11 @@ defmodule Grappa.UserSettings do
   writer's key — two writers touching completely DIFFERENT keys, last one
   wins, no error anywhere. That is not hypothetical: `put_last_client_prefix64/2`
   fires from `Grappa.Vhosts.record_client_source/2` on every client connect,
-  in the socket's own process and its own pool connection, while the settings
-  drawer PUTs from another.
+  on its own pool connection, while the settings drawer PUTs from another.
+  (Since #1618 the connect-side writer is a detached
+  `Grappa.TaskSupervisor` task rather than the socket process itself — that
+  moves WHICH process races, not WHETHER one does, so the argument below is
+  untouched.)
 
   So there is exactly ONE writer here — `update_data/2` — and it holds the
   read and the write in a single `Repo.immediate_transaction/1`. A new
@@ -65,6 +68,9 @@ defmodule Grappa.UserSettings do
   |                        |                        | `default_notification_prefs/0`  |
   | `"upload_ttl_seconds"` | `pos_integer() \\| nil`| `get_upload_ttl_seconds/1`,     |
   |                        |                        | `put_upload_ttl_seconds/2`      |
+  | `"upload_confirm_enabled"` | `boolean()`        | `get_upload_confirm_enabled/1`, |
+  |                        |                        | `put_upload_confirm_enabled/2`  |
+  |                        |                        | (#1883)                         |
   | `"vhost_selection"`    | `list(String.t())`     | `get_vhost_selection/1`,        |
   |                        |                        | `put_vhost_selection/2`         |
   | `"active_theme_id"`    | `pos_integer() \\| nil`| `get_active_theme_id/1`,        |
@@ -207,6 +213,14 @@ defmodule Grappa.UserSettings do
       stores a third value and never coerces unset into a boolean. Font size
       is deliberately excluded — it is per-DEVICE (vjt, #449) and stays
       client-local (`cicchetto/src/lib/fontSize.ts`).
+    * `show_bottom_bar` — whether cic renders the mobile window bar (#1766).
+      Default TRUE: this is an opt-OUT, carrying #174's standing constraint
+      that the bar is never deleted, only made optional. SYNCED rather than
+      per-device (the split above) because the complaint behind it — "7
+      networks and the strip no longer picks" — is account-scoped: the bar is
+      O(windows), and the window count is the same on the phone and the
+      tablet. That is the whole distinction from #914's `hide_next_active`,
+      which stayed client-local because its complaint was about a viewport.
   """
   # `time_format` + the presence values are closed sets ("hms"|"hm",
   # "show"|"hide"), but they stay `String.t()` on PURPOSE: Elixir typespecs
@@ -219,7 +233,8 @@ defmodule Grappa.UserSettings do
   @type display_prefs :: %{
           time_format: String.t(),
           colored_nicklist: boolean(),
-          presence_filter: %{String.t() => String.t()}
+          presence_filter: %{String.t() => String.t()},
+          show_bottom_bar: boolean()
         }
 
   @notification_prefs_key "notification_prefs"
@@ -864,6 +879,105 @@ defmodule Grappa.UserSettings do
   end
 
   # ---------------------------------------------------------------------------
+  # show_peer_profiles accessor (M2 — peer CTCP USERINFO/gender-badge opt-in)
+  # ---------------------------------------------------------------------------
+
+  @show_peer_profiles_key "show_peer_profiles"
+
+  @doc """
+  Whether `subject` has opted in to grappa querying OTHER users' CTCP
+  USERINFO profile (age/gender/location/languages/custom) — the source
+  for the gender badge in the member list. Default `false`: unset,
+  malformed, or any non-`true` stored value all read back as `false`, so
+  a fresh subject's bouncer stays silent on the wire until they opt in.
+
+  Read at session boot only (mirrors `get_upload_ttl_seconds/1` — no
+  live-broadcast bridge like `auto_away_debounce_seconds` has): flipping
+  this while a session is live takes effect on that session's next
+  (re)spawn, not instantly. The debounce's live-retune exists because a
+  timer already armed needs to change NOW; an opt-in gating a future
+  outbound CTCP query has no equivalent already-in-flight state to
+  correct, so the added live-bridge plumbing isn't earning its keep here.
+  """
+  @spec get_show_peer_profiles(Subject.t()) :: boolean()
+  def get_show_peer_profiles({_, _} = subject) do
+    case fetch_existing_or_nil(subject) do
+      nil -> false
+      %Settings{data: data} -> data[@show_peer_profiles_key] == true
+    end
+  end
+
+  @doc """
+  Sets the peer-profile opt-in preference for `subject`. `true` to opt
+  in; `false` (or omitting the call — a fresh subject already reads
+  `false`) to opt back out.
+
+  Preserves other keys in `data` (merge semantics, mirror of
+  `put_upload_ttl_seconds/2`).
+  """
+  @spec put_show_peer_profiles(Subject.t(), boolean()) ::
+          {:ok, Settings.t()} | {:error, Ecto.Changeset.t() | :db_unavailable}
+  def put_show_peer_profiles({_, _} = subject, value) when is_boolean(value) do
+    # `false` DELETES the key rather than storing it: a fresh subject already
+    # reads `false`, so an explicit `false` row would be a second spelling of
+    # the default. `put_or_delete/3` deletes on `nil`, hence the mapping.
+    update_data(subject, &put_or_delete(&1, @show_peer_profiles_key, value || nil))
+  end
+
+  # ---------------------------------------------------------------------------
+  # upload_confirm_enabled accessor (#1883 — the pre-upload confirm opt-in)
+  # ---------------------------------------------------------------------------
+
+  @upload_confirm_enabled_key "upload_confirm_enabled"
+
+  @doc """
+  Whether `subject` has opted IN to being asked before an upload leaves
+  the device — the confirm `uploadOrchestrator.triggerUploads` shows for
+  every upload door (picker, drop, pasted file, paste-as-`.txt`, OS
+  share).
+
+  Default `false`: unset, malformed, or any non-`true` stored value all
+  read back as `false`, so an operator who never opens settings is never
+  asked. **That default is the product decision, and it is a reversal** —
+  #1883's own note argued the confirm must not be switchable at all,
+  because a gate every returning operator has already turned off is not a
+  gate. What was measured since: the flag behind #1883 was `localStorage`,
+  per-browser, invisible, not revocable from the UI; this is per-user,
+  server-side, and visible beside the upload-retention control. Different
+  object, so that objection is rhetorical rather than mechanical — but the
+  cost is real and belongs here rather than hidden: with the confirm off by
+  default, all five upload doors are unguarded until someone turns it on.
+
+  Read by the CLIENT at upload time, not at session boot: the confirm is a
+  cic-side dialog and the server only stores the preference. Nothing on the
+  IRC wire depends on it, so there is no live-retune bridge and none is
+  needed.
+  """
+  @spec get_upload_confirm_enabled(Subject.t()) :: boolean()
+  def get_upload_confirm_enabled({_, _} = subject) do
+    case fetch_existing_or_nil(subject) do
+      nil -> false
+      %Settings{data: data} -> data[@upload_confirm_enabled_key] == true
+    end
+  end
+
+  @doc """
+  Sets the pre-upload confirm opt-in for `subject`. `true` to be asked
+  before every upload; `false` (the default) to send without asking.
+
+  Preserves other keys in `data` (merge semantics, mirror of
+  `put_show_peer_profiles/2`).
+  """
+  @spec put_upload_confirm_enabled(Subject.t(), boolean()) ::
+          {:ok, Settings.t()} | {:error, Ecto.Changeset.t() | :db_unavailable}
+  def put_upload_confirm_enabled({_, _} = subject, value) when is_boolean(value) do
+    # `false` DELETES the key — a fresh subject already reads `false`, so an
+    # explicit `false` row would be a second spelling of the default. Same
+    # rule as `put_show_peer_profiles/2`.
+    update_data(subject, &put_or_delete(&1, @upload_confirm_enabled_key, value || nil))
+  end
+
+  # ---------------------------------------------------------------------------
   # auto_away_debounce_seconds accessors (#348)
   # ---------------------------------------------------------------------------
 
@@ -1302,12 +1416,13 @@ defmodule Grappa.UserSettings do
   @doc """
   Default display preferences applied when a subject has no row OR the
   `"display_prefs"` key is absent: `"hms"` timestamps, monochrome nicklist,
-  and an empty presence-filter map (every channel follows the size default).
+  an empty presence-filter map (every channel follows the size default), and
+  the mobile window bar SHOWN (#1766 is an opt-out, never a default change).
   """
   @dialyzer {:nowarn_function, default_display_prefs: 0}
   @spec default_display_prefs() :: display_prefs()
   def default_display_prefs do
-    %{time_format: "hms", colored_nicklist: false, presence_filter: %{}}
+    %{time_format: "hms", colored_nicklist: false, presence_filter: %{}, show_bottom_bar: true}
   end
 
   @doc """
@@ -1364,6 +1479,9 @@ defmodule Grappa.UserSettings do
 
     * `time_format` ∈ #{inspect(@display_time_formats)}.
     * `colored_nicklist` is a boolean.
+    * `show_bottom_bar` is a boolean IF PRESENT; an absent key takes the
+      default (#1766). Every other key 422s when missing, and that asymmetry
+      is deliberate — see `fetch_optional_display_bool/3`.
     * `presence_filter` is a `%{channel_key => "show" | "hide"}` map. Any
       other value (a boolean, a third state) is REJECTED — the tri-state's
       unset is the ABSENCE of a key, never a stored value, so the server
@@ -1994,7 +2112,8 @@ defmodule Grappa.UserSettings do
     %{
       time_format: read_display_time_format(stored),
       colored_nicklist: read_display_bool(stored, :colored_nicklist, false),
-      presence_filter: read_presence_filter(stored)
+      presence_filter: read_presence_filter(stored),
+      show_bottom_bar: read_display_bool(stored, :show_bottom_bar, true)
     }
   end
 
@@ -2029,8 +2148,15 @@ defmodule Grappa.UserSettings do
   defp validate_and_normalize_display_prefs(prefs, subject) do
     with {:ok, tf} <- fetch_display_time_format(prefs),
          {:ok, cn} <- fetch_display_bool(prefs, :colored_nicklist),
-         {:ok, pf} <- fetch_presence_filter(prefs) do
-      {:ok, %{"time_format" => tf, "colored_nicklist" => cn, "presence_filter" => pf}}
+         {:ok, pf} <- fetch_presence_filter(prefs),
+         {:ok, sbb} <- fetch_optional_display_bool(prefs, :show_bottom_bar, true) do
+      {:ok,
+       %{
+         "time_format" => tf,
+         "colored_nicklist" => cn,
+         "presence_filter" => pf,
+         "show_bottom_bar" => sbb
+       }}
     else
       {:error, message} -> {:error, display_prefs_changeset_error(message, subject)}
     end
@@ -2048,6 +2174,37 @@ defmodule Grappa.UserSettings do
       v when is_boolean(v) -> {:ok, v}
       _ -> {:error, "#{key} must be a boolean"}
     end
+  end
+
+  # #1766 — the same boolean check, except that an ABSENT key takes `default`
+  # instead of 422ing. Every key added before this one is mandatory, and that
+  # was free while the shape never grew: the ONLY writer is cic's
+  # `buildWireMap()`, which always sends every key it knows. The moment the
+  # shape grows a key, "every key it knows" stops meaning "every key" for any
+  # bundle already loaded in a tab — and the server and the bundle deploy
+  # separately (`deploy-m42.sh` vs `--cic`). A mandatory fourth key would then
+  # 422 that tab's every display write, so the time-format and nicklist toggles
+  # would quietly stop persisting until it reloaded. The wire contract already
+  # rules this direction: an unknown-or-missing field is never fatal.
+  #
+  # ACCEPTED CONSEQUENCE, not an oversight: the PUT is a full-map replace, so
+  # such a tab's write also resets this key to `default`. It is a clobber, and
+  # the alternative — reading the stored value for the missing key — turns the
+  # documented full-replace path into a per-key read-modify-write that the
+  # NEXT added key would have to remember too. The window is one bundle
+  # reload wide and it self-heals; the drift would not.
+  defp fetch_optional_display_bool(prefs, key, default) when is_atom(key) do
+    if display_has_key?(prefs, key) do
+      fetch_display_bool(prefs, key)
+    else
+      {:ok, default}
+    end
+  end
+
+  # Absence has to be told apart from a present `nil`, which `display_fetch/2`
+  # flattens into one. Dual atom/string read, mirroring it.
+  defp display_has_key?(prefs, key) when is_atom(key) do
+    Map.has_key?(prefs, key) or Map.has_key?(prefs, Atom.to_string(key))
   end
 
   defp fetch_presence_filter(prefs) do

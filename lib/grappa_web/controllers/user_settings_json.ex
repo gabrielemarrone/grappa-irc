@@ -21,6 +21,12 @@ defmodule GrappaWeb.UserSettingsJSON do
           upload_ttl_seconds: pos_integer() | nil
         }
 
+  @typedoc "Wire shape for the show_peer_profiles envelope (M2)."
+  @type show_peer_profiles_response :: %{show_peer_profiles: boolean()}
+
+  @typedoc "Wire shape for the upload_confirm_enabled envelope (#1883)."
+  @type upload_confirm_enabled_response :: %{upload_confirm_enabled: boolean()}
+
   @typedoc """
   Wire shape for the auto_away_debounce_seconds envelope (#348).
 
@@ -86,6 +92,18 @@ defmodule GrappaWeb.UserSettingsJSON do
           upload_ttl_seconds_response()
   def upload_ttl_seconds(%{seconds: seconds}) do
     %{upload_ttl_seconds: seconds}
+  end
+
+  @doc "Renders the `:show_peer_profiles` action — GET/PUT 200 shape (M2)."
+  @spec show_peer_profiles(%{enabled: boolean()}) :: show_peer_profiles_response()
+  def show_peer_profiles(%{enabled: enabled}) do
+    %{show_peer_profiles: enabled}
+  end
+
+  @doc "Renders the `:upload_confirm_enabled` action — GET/PUT 200 shape (#1883)."
+  @spec upload_confirm_enabled(%{enabled: boolean()}) :: upload_confirm_enabled_response()
+  def upload_confirm_enabled(%{enabled: enabled}) do
+    %{upload_confirm_enabled: enabled}
   end
 
   @doc """

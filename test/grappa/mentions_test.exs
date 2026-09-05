@@ -429,6 +429,186 @@ defmodule Grappa.MentionsTest do
     end
   end
 
+  # #1786 — a term whose own edge is punctuation could never match, because
+  # `build_matchers/1` wrapped every term in `\b…\b` unconditionally.
+  #
+  # `\b` is a TRANSITION between a word char and a non-word one, so the
+  # trailing anchor on `QUACK!` demanded a word character immediately AFTER
+  # the `!` — end-of-line and a space both fail it. Found in prod: a whole
+  # watchlist of `["QUACK!", "flap!", "quack!"]`, listed as active by the
+  # settings pane and silently matching nothing, forever.
+  #
+  # THE TRUTH TABLE BELOW IS SHARED with
+  # `cicchetto/src/__tests__/mentionMatch.test.ts` — a case added here without
+  # its client twin is exactly how the two ports drift, which is the failure
+  # this module's own moduledoc contract exists to prevent.
+  describe "mentioned?/3 — a punctuated edge still anchors (#1786)" do
+    test "matches a term ending in punctuation, mid-line and at end of body" do
+      assert Mentions.mentioned?("say QUACK! now", "", ["QUACK!"])
+      assert Mentions.mentioned?("QUACK!", "", ["QUACK!"])
+    end
+
+    test "matches a term starting in punctuation — a command-prefix highlight" do
+      assert Mentions.mentioned?("!list please", "", ["!list"])
+      assert Mentions.mentioned?("!list", "", ["!list"])
+    end
+
+    test "matches a term punctuated at BOTH edges" do
+      assert Mentions.mentioned?("run (deploy) now", "", ["(deploy)"])
+    end
+
+    # ── the two discriminating cases ──────────────────────────────────────
+    # Everything above passes just as well if the anchor is DROPPED on a
+    # punctuated edge instead of replaced by a lookaround. These two do not:
+    # they are the only cases that can tell "not glued to a word" from "no
+    # rule at all". Measured on the client twin — mutating the cure to drop
+    # the anchor leaves 18 of 20 cases green and kills exactly these two.
+    test "does not match a punctuation-led term glued to the end of a word" do
+      refute Mentions.mentioned?("foo!list", "", ["!list"])
+    end
+
+    test "does not match a punctuation-tailed term glued to the start of a word" do
+      refute Mentions.mentioned?("QUACK!x", "", ["QUACK!"])
+    end
+
+    # ── the rule that must NOT move ───────────────────────────────────────
+    test "still refuses a substring match on a word-edged term" do
+      refute Mentions.mentioned?("vjt123 is here", "vjt", [])
+      refute Mentions.mentioned?("QUACKING!", "", ["QUACK!"])
+    end
+
+    test "a word-edged term keeps both \\b anchors — the metas case is unmoved" do
+      # `5+1` is word-edged at BOTH ends, so the conditional must leave it
+      # exactly as it was. Duplicated from the patterns block deliberately:
+      # there it guards the escape, here it guards that #1786 did not disturb
+      # the terms that already worked.
+      assert Mentions.mentioned?("got 5+1 alerts", "vjt", ["5+1"])
+      refute Mentions.mentioned?("got 555 alerts", "vjt", ["5+1"])
+    end
+  end
+
+  # issue 1908 — a colour code glued to the term deletes the boundary the term
+  # needs, so a watchlist keyword never matches a bot that colours its output.
+  #
+  # The defect is NOT "control bytes in the body". `\x02` and friends carry no
+  # arguments and are not word characters, so `\b` still has its transition on
+  # both sides of the term — measured in the field on `rex`, a bold-only bot
+  # whose 139 bold lines match fine. It is specifically the COLOUR byte
+  # dragging its numeric arguments into the text: `\x03` `1` `5` before `QUACK`
+  # reads to the regex as `...15QUACK`, and the digits ARE word characters.
+  #
+  # So the cure is a projection, not an anchor change: match against the body
+  # with the formatting removed. The anchor rule of #1786 is untouched.
+  #
+  # THE TRUTH TABLE BELOW IS SHARED with
+  # `cicchetto/src/__tests__/mentionMatch.test.ts` — a case added here without
+  # its client twin is exactly how the two ports drift, and here that drift
+  # would put the OS push and the visual highlight back into disagreement,
+  # which is the divergence #370 closed.
+  #
+  # Bytes are spelled `<<0x03>>` rather than `"\x0315"`: Elixir's `\xHH` takes
+  # up to two hex digits, so the escaped spelling reads ambiguously in exactly
+  # the place where digits-glued-to-the-byte IS the defect. Same spelling as
+  # `Grappa.IRC.CTCP`'s `<<0x01, ...>>`.
+  @color <<0x03>>
+  @bold <<0x02>>
+  @reset <<0x0F>>
+
+  describe "mentioned?/3 — mIRC formatting is stripped before matching (1908)" do
+    test "a colour code glued to the term still matches — the field case" do
+      # The duck bot's real body: `\x03` `1` `5` immediately before the Q.
+      assert Mentions.mentioned?(@color <> "15QUACK!", "", ["QUACK"])
+    end
+
+    test "every colour-code spelling from the report is stripped" do
+      for args <- ["04", "4", "04,01", "99", "00"] do
+        assert Mentions.mentioned?(@color <> args <> "QUACK!", "", ["QUACK"]),
+               "colour args #{inspect(args)} still eat the word boundary"
+      end
+    end
+
+    test "a bare colour byte with no arguments was already harmless and stays so" do
+      assert Mentions.mentioned?(@color <> "QUACK!", "", ["QUACK"])
+    end
+
+    test "the plain line from the same bot keeps matching — no regression" do
+      assert Mentions.mentioned?("\\o< *quack* The duck waddles away safely.", "", ["QUACK"])
+    end
+
+    test "bold stays harmless: the contrast bot matches on every edge" do
+      body = "Title: " <> @bold <> "Merry Sky Weather Forecast" <> @bold
+
+      for term <- ["Merry", "Weather", "Forecast"] do
+        assert Mentions.mentioned?(body, "", [term]), "bold broke term #{term}"
+      end
+    end
+
+    test "the argument-free attribute bytes are removed too" do
+      assert Mentions.mentioned?(@reset <> "QUACK!", "", ["QUACK"])
+    end
+
+    # ── the discriminating case ───────────────────────────────────────────
+    # Everything above also passes if the "cure" were to loosen the anchor
+    # instead of stripping. This one does not: after a genuine strip the body
+    # is `QUACK!`, so a term that includes the colour ARGUMENTS must now MISS.
+    # A loosened anchor would keep matching it against the raw bytes.
+    test "stripping is a projection, not a loosened anchor" do
+      refute Mentions.mentioned?(@color <> "15QUACK!", "", ["15QUACK"])
+    end
+
+    # ── the rules that must NOT move ──────────────────────────────────────
+    test "the #1786 discriminating pair survives the strip, formatted or not" do
+      refute Mentions.mentioned?("foo!list", "", ["!list"])
+      refute Mentions.mentioned?(@color <> "15foo!list", "", ["!list"])
+    end
+
+    test "substring matching is still refused on a formatted body" do
+      refute Mentions.mentioned?(@color <> "15QUACKING!", "", ["QUACK!"])
+    end
+
+    test "digits that are real text are NOT removed" do
+      # The projection consumes digits only as colour ARGUMENTS. A body that
+      # merely starts with digits keeps them, so a digit-bearing term matches.
+      assert Mentions.mentioned?("15 ducks seen", "", ["15"])
+    end
+  end
+
+  # The push door and the badge door reach the predicate by different verbs
+  # (`mentioned?/3` vs the pre-compiled `matchers/2` + `matches?/2`), and the
+  # away bundle by a third (`aggregate_mentions/6`). All three must strip, or
+  # the OS push, the sidebar badge and the mentions window disagree about the
+  # same row — so each door is pinned on its own rather than trusted to share
+  # a private helper.
+  describe "every mention door strips the formatting (1908)" do
+    test "matches?/2 with pre-compiled matchers — the badge door" do
+      matchers = Mentions.matchers("", ["QUACK"])
+      assert Mentions.matches?(@color <> "15QUACK!", matchers)
+    end
+
+    test "aggregate_mentions/6 — the mentions-while-away door", %{user: user, network: network} do
+      insert!(msg(user, network, body: @color <> "15QUACK!"))
+      insert!(msg(user, network, body: "nothing to see here"))
+
+      bodies =
+        user.id
+        |> Mentions.aggregate_mentions(network.id, @away_start, @away_end, ["QUACK"], "")
+        |> Enum.map(& &1.body)
+
+      assert bodies == [@color <> "15QUACK!"]
+    end
+
+    test "aggregate_mentions/6 returns the row VERBATIM, formatting intact",
+         %{user: user, network: network} do
+      # The projection is a MATCH-time view. What comes back is the stored
+      # body, control bytes and all — cic renders the colours from it.
+      insert!(msg(user, network, body: @color <> "15QUACK!"))
+
+      [row] = Mentions.aggregate_mentions(user.id, network.id, @away_start, @away_end, ["QUACK"], "")
+
+      assert row.body == @color <> "15QUACK!"
+    end
+  end
+
   describe "mentioned?/3 — guards + degenerate inputs" do
     test "nil body never matches" do
       refute Mentions.mentioned?(nil, "vjt", ["oncall"])

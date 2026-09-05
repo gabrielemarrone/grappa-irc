@@ -96,6 +96,7 @@ defmodule Grappa.Session.EventRouter do
   """
 
   alias Grappa.IRC.{CTCP, Identifier, JoinFailure, Message}
+  alias Grappa.RateLimit.TokenBucket
   alias Grappa.{Scrollback, Session}
 
   alias Grappa.Session.{
@@ -233,6 +234,42 @@ defmodule Grappa.Session.EventRouter do
   # producers, and `send_outbound/3` reports this on the drop warning: an
   # operator reading it must learn which machine failed, not which arm ran.
   @type origin :: :event_router_reply | :ghost_recovery | :recover_identity
+
+  @typedoc """
+  M2 — what THIS session has learned about a peer's CTCP USERINFO
+  profile, currently just `:gender` (M1's closed-set `Credential.gender/0`
+  values, or `nil` when no reply parsed yet). One key per peer today; a
+  future field (e.g. an avatar URL, M3b) extends this map, not a sibling
+  cache — same nick-keyed peer-info shape `userhost_cache` already is.
+
+  Gender's `:male | :female | :nonbinary` is deliberately NOT
+  `Grappa.Networks.Credential.gender()` — same Boundary rule
+  `Session.Server`'s own `profile()` type documents: `Session` must not
+  statically depend on `Networks` (the reverse edge already exists), so
+  the 3-atom closed set is duplicated here, not shared.
+  """
+  @type peer_profile_entry :: %{
+          gender: :male | :female | :nonbinary | nil,
+          # M3b — `nil` = never queried/no reply yet, `:pending` = a fetch
+          # is in flight (`Grappa.Avatars.fetch_and_cache/3`, dispatched
+          # off `Grappa.TaskSupervisor`), a binary = the cached slug once
+          # the fetch lands. Each field's OWN presence (not the entry's
+          # presence as a whole, once there are two independently-queried
+          # fields sharing one entry) is what a query-dedup check tests —
+          # see `maybe_query_userinfo/2` / `maybe_query_avatar/2`.
+          avatar_slug: String.t() | :pending | nil
+        }
+
+  @typedoc """
+  M2 — network-wide, per-session cache of peer profile info, keyed by
+  **lowercased** (folded via `normalize_nick/2`) nick — same key shape as
+  `userhost_cache`. Populated by a CTCP USERINFO reply to a query WE
+  sent (never from an unsolicited reply); evicted on QUIT/PART/KICK/NICK,
+  mirroring `userhost_cache`'s lifecycle exactly. Key PRESENCE (even with
+  `gender: nil`) means "already queried this session" — see
+  `maybe_query_userinfo/2`.
+  """
+  @type peer_profile_cache :: %{(nick :: String.t()) => peer_profile_entry()}
 
   @type effect ::
           {:persist, Grappa.Scrollback.Message.kind(), persist_attrs()}
@@ -541,6 +578,22 @@ defmodule Grappa.Session.EventRouter do
         # dispatching, not implementing.
         ctcp_ping_reply(msg, target, body, state)
 
+      {"USERINFO", _} ->
+        # The KVIrc-era CTCP USERINFO convention (age/gender/location/
+        # languages/a free custom field, `Grappa.Networks.Credential`'s
+        # profile fields formatted as `Age=…; Gender=…; …`). Own function
+        # for the same reason PING is one — keep this dispatch clause a
+        # dispatch clause.
+        ctcp_userinfo_reply(msg, target, state)
+
+      {"AVATAR", _} ->
+        # M3a — the KVIrc-era CTCP AVATAR convention, URL-only (never
+        # DCC — see `docs/DESIGN_NOTES.md`). Own function for the same
+        # reason USERINFO/PING are; also the one CTCP reply arm that
+        # may choose NOT to reply (unset avatar has no useful answer —
+        # see the function doc).
+        ctcp_avatar_reply(msg, target, state)
+
       _ ->
         # Non-VERSION, non-PING CTCP (ACTION handled below; TIME /
         # SOURCE / FINGER not implemented yet) — delegate to the generic
@@ -606,6 +659,19 @@ defmodule Grappa.Session.EventRouter do
         prefix_userhost(msg)
       )
 
+    # M2/M3b — a peer joining a channel we're in is a "first seen this
+    # session" moment worth a lazy CTCP USERINFO + AVATAR query (opt-in +
+    # rate-limited + cache-deduped inside the helpers). Self-JOIN never
+    # queries itself — `maybe_query_peer_profile/2` also no-ops on that,
+    # but skipping the call for our own nick avoids the pointless
+    # cache/rate limiter touch.
+    {state2, query_effects} =
+      if nick_eq?(sender, state.nick) do
+        {state, []}
+      else
+        maybe_query_peer_profile(state, sender)
+      end
+
     # CP15 B1: self-JOIN echo promotes the per-channel window to :joined.
     # Other-user JOINs land as scrollback rows only — no window-state
     # transition (the operator may already be in this channel observing).
@@ -613,10 +679,10 @@ defmodule Grappa.Session.EventRouter do
       if nick_eq?(sender, state.nick) do
         [eff, {:joined, channel}]
       else
-        [eff]
+        [eff | query_effects]
       end
 
-    {:cont, state, effects}
+    {:cont, state2, effects}
   end
 
   defp do_route(%Message{command: :part, params: [channel | rest]} = msg, state)
@@ -643,7 +709,7 @@ defmodule Grappa.Session.EventRouter do
     # nick that appears in no remaining channel. For other-user PART: the
     # parting nick is removed from this channel; evict if they appear in no
     # other channel in the (post-PART) members map.
-    {members, topics, channel_modes, userhost_cache} =
+    {members, topics, channel_modes, userhost_cache, peer_profile_cache} =
       cond do
         nick_eq?(sender, state.nick) ->
           # Collect who was in the parted channel before we drop it
@@ -652,25 +718,32 @@ defmodule Grappa.Session.EventRouter do
 
           # Evict nicks from the parted channel that no longer appear in any
           # remaining channel. We include self (state.nick) so our own entry
-          # is evicted when appropriate.
+          # is evicted when appropriate. M2: same eviction rule for
+          # peer_profile_cache — `evict_if_no_overlap/4` is value-agnostic.
           cache = Map.get(state, :userhost_cache, %{})
           new_cache = evict_if_no_overlap(parted_members, new_members, cache, casemapping(state))
 
+          profile_cache = Map.get(state, :peer_profile_cache, %{})
+          new_profile_cache = evict_if_no_overlap(parted_members, new_members, profile_cache, casemapping(state))
+
           {new_members, Map.delete(Map.get(state, :topics, %{}), normalize_channel(channel, casemapping(state))),
-           Map.delete(Map.get(state, :channel_modes, %{}), normalize_channel(channel, casemapping(state))), new_cache}
+           Map.delete(Map.get(state, :channel_modes, %{}), normalize_channel(channel, casemapping(state))), new_cache,
+           new_profile_cache}
 
         Map.has_key?(state.members, channel) ->
           new_members = Map.update!(state.members, channel, &Map.delete(&1, sender))
           cache = Map.get(state, :userhost_cache, %{})
+          profile_cache = Map.get(state, :peer_profile_cache, %{})
+          sender_key = normalize_nick(sender, casemapping(state))
 
-          new_cache =
+          {new_cache, new_profile_cache} =
             if channels_with_member(new_members, sender) == [] do
-              Map.delete(cache, normalize_nick(sender, casemapping(state)))
+              {Map.delete(cache, sender_key), Map.delete(profile_cache, sender_key)}
             else
-              cache
+              {cache, profile_cache}
             end
 
-          {new_members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}), new_cache}
+          {new_members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}), new_cache, new_profile_cache}
 
         true ->
           # Defensive: persist the audit row even for an unknown channel
@@ -678,7 +751,7 @@ defmodule Grappa.Session.EventRouter do
           # event if upstream re-orders relative to a JOIN we haven't
           # seen yet.
           {state.members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}),
-           Map.get(state, :userhost_cache, %{})}
+           Map.get(state, :userhost_cache, %{}), Map.get(state, :peer_profile_cache, %{})}
       end
 
     # Channel-creation cache lifecycle mirrors topics: drop on self-PART
@@ -700,7 +773,8 @@ defmodule Grappa.Session.EventRouter do
             topics: topics,
             channel_modes: channel_modes,
             channels_created: channels_created,
-            userhost_cache: userhost_cache
+            userhost_cache: userhost_cache,
+            peer_profile_cache: peer_profile_cache
         },
         :part,
         channel,
@@ -736,16 +810,25 @@ defmodule Grappa.Session.EventRouter do
     # S2.4: QUIT means the nick is gone from the network — always evict from
     # userhost_cache, even when sender has no channel overlap in members
     # (e.g. WHOIS populated the cache before a JOIN was seen, or the members
-    # map race). Eviction is unconditional: gone = gone.
-    userhost_cache = Map.delete(Map.get(state, :userhost_cache, %{}), normalize_nick(sender, casemapping(state)))
+    # map race). Eviction is unconditional: gone = gone. M2: same for
+    # peer_profile_cache — a quit nick's cached gender is stale forever.
+    sender_key = normalize_nick(sender, casemapping(state))
+    userhost_cache = Map.delete(Map.get(state, :userhost_cache, %{}), sender_key)
+    peer_profile_cache = Map.delete(Map.get(state, :peer_profile_cache, %{}), sender_key)
 
     case channels_with_member(state.members, sender) do
       [] ->
-        {:cont, %{state | userhost_cache: userhost_cache}, []}
+        {:cont, %{state | userhost_cache: userhost_cache, peer_profile_cache: peer_profile_cache}, []}
 
       channels ->
         members = remove_member_everywhere(state.members, channels, sender)
-        new_state = %{state | members: members, userhost_cache: userhost_cache}
+
+        new_state = %{
+          state
+          | members: members,
+            userhost_cache: userhost_cache,
+            peer_profile_cache: peer_profile_cache
+        }
 
         effects =
           for ch <- channels do
@@ -930,7 +1013,7 @@ defmodule Grappa.Session.EventRouter do
         _ -> nil
       end
 
-    {members, topics, channel_modes, userhost_cache} =
+    {members, topics, channel_modes, userhost_cache, peer_profile_cache} =
       kick_state_update(state, channel, target)
 
     # Channel-creation cache lifecycle mirrors topics: drop on self-KICK
@@ -951,7 +1034,8 @@ defmodule Grappa.Session.EventRouter do
             topics: topics,
             channel_modes: channel_modes,
             channels_created: channels_created,
-            userhost_cache: userhost_cache
+            userhost_cache: userhost_cache,
+            peer_profile_cache: peer_profile_cache
         },
         :kick,
         channel,
@@ -1000,19 +1084,35 @@ defmodule Grappa.Session.EventRouter do
        when is_binary(channel) and is_binary(names_blob) do
     tokens = String.split(names_blob, " ", trim: true)
 
-    members =
+    {members, newly_seen_nicks} =
       case Map.fetch(state.members, channel) do
         {:ok, existing} ->
           new_entries = Map.new(tokens, &split_mode_prefix/1)
-          Map.put(state.members, channel, Map.merge(existing, new_entries))
+          # M2 — nicks this 353 line introduces that we did NOT already
+          # know about in this channel's roster. Only meaningful in this
+          # branch (an ephemeral /names on an unjoined channel below
+          # never touches state.members, so it never queries either —
+          # same gate the merge itself already applies).
+          newly_seen = new_entries |> Map.keys() |> Enum.reject(&Map.has_key?(existing, &1))
+          {Map.put(state.members, channel, Map.merge(existing, new_entries)), newly_seen}
 
         :error ->
-          state.members
+          {state.members, []}
       end
 
     state_with_members = %{state | members: members}
 
-    {:cont, names_fold(state_with_members, channel, tokens), []}
+    {state_after_queries, query_effects} =
+      Enum.reduce(newly_seen_nicks, {state_with_members, []}, fn nick, {acc_state, acc_effects} ->
+        if nick_eq?(nick, acc_state.nick) do
+          {acc_state, acc_effects}
+        else
+          {next_state, effects} = maybe_query_peer_profile(acc_state, nick)
+          {next_state, acc_effects ++ effects}
+        end
+      end)
+
+    {:cont, names_fold(state_after_queries, channel, tokens), query_effects}
   end
 
   # 332 RPL_TOPIC: JOIN-time backfill — stores topic text in the topics cache.
@@ -2276,9 +2376,11 @@ defmodule Grappa.Session.EventRouter do
   #
   #   * connect-time / unprimed (motd_pending == nil) — the server auto-sends
   #     the MOTD on registration (or a stray 402 arrives with no /motd in
-  #     flight). Keep the legacy BUG2 behaviour: persist each line as a
-  #     `:notice` row on the synthetic "$server" window so the server-messages
-  #     window has content. NumericRouter marks these :delegated so no
+  #     flight). Keep the BUG2 routing: persist each line on the synthetic
+  #     "$server" window so the server-messages window has content — as a
+  #     `:server_event` row since issue 1832, so the burst counts in the low
+  #     `events` tier instead of badging the tab with unread messages (see
+  #     `persist_server_event/2`). NumericRouter marks these :delegated so no
   #     numeric_routed persist fires — this clause is the canonical surface.
   #
   #   * explicit /motd (motd_pending == %{lines: _}) — the operator asked.
@@ -2290,7 +2392,7 @@ defmodule Grappa.Session.EventRouter do
   #     they fold their own body before draining — an explicit /motd never
   #     dangles and a 402 never gets swallowed into a wrong-server MOTD.
   #
-  # BUG2 fix-up (still applies to the $server path in persist_server_notice/2):
+  # BUG2 fix-up (still applies to the $server path in persist_server_event/2):
   # sender must be Message.sender_nick/1, never "".
   defp do_route(
          %Message{command: {:numeric, motd_numeric}} = msg,
@@ -2299,7 +2401,7 @@ defmodule Grappa.Session.EventRouter do
        when motd_numeric in [375, 372, 376, 422] do
     case Map.get(state, :motd_pending) do
       nil ->
-        persist_server_notice(state, msg)
+        persist_server_event(state, msg)
 
       accum ->
         cond do
@@ -2321,7 +2423,7 @@ defmodule Grappa.Session.EventRouter do
   # #992 — ADMIN (256 RPL_ADMINME, 257 RPL_ADMINLOC1, 258 RPL_ADMINLOC2,
   # 259 RPL_ADMINEMAIL) + 423 ERR_NOADMININFO + 447 ERR_RESTRICTED. Fourth
   # member of the #127 family, gated on `state.admin_pending` (primed by
-  # `:send_admin`); unprimed it falls back to the same `$server` :notice
+  # `:send_admin`); unprimed it falls back to the same `$server` `:server_event`
   # persist, so an unsolicited burst is visible, never silent.
   #
   # WHY the terminator set is four wide and not one. Read out of
@@ -2356,7 +2458,7 @@ defmodule Grappa.Session.EventRouter do
        when admin_numeric in [256, 257, 258, 259, 423, 447] do
     case Map.get(state, :admin_pending) do
       nil ->
-        persist_server_notice(state, msg)
+        persist_server_event(state, msg)
 
       accum ->
         folded = server_reply_fold(accum, msg)
@@ -2392,7 +2494,7 @@ defmodule Grappa.Session.EventRouter do
   defp do_route(%Message{command: {:numeric, 402}} = msg, state) do
     case Enum.filter(@server_reply_402_owners, fn {key, _} -> Map.get(state, key) end) do
       [] ->
-        persist_server_notice(state, msg)
+        persist_server_event(state, msg)
 
       [{key, source} | _] = armed ->
         accum = Map.get(state, key)
@@ -2410,11 +2512,11 @@ defmodule Grappa.Session.EventRouter do
   # #127 — INFO (371 RPL_INFO burst, 374 RPL_ENDOFINFO terminator). Gated on
   # state.info_pending (primed by :send_info). Primed: fold 371 lines, drain
   # `{:server_reply, :info, lines}` on 374. Unprimed (no connect-time INFO —
-  # on-demand only): fall back to the same `$server` :notice persist, so an
+  # on-demand only): fall back to the same `$server` `:server_event` persist, so an
   # unsolicited reply is still visible, never silent.
   defp do_route(%Message{command: {:numeric, 371}} = msg, state) do
     case Map.get(state, :info_pending) do
-      nil -> persist_server_notice(state, msg)
+      nil -> persist_server_event(state, msg)
       accum -> {:cont, %{state | info_pending: server_reply_fold(accum, msg)}, []}
     end
   end
@@ -2422,7 +2524,7 @@ defmodule Grappa.Session.EventRouter do
   defp do_route(%Message{command: {:numeric, 374}} = msg, state) do
     case Map.get(state, :info_pending) do
       nil ->
-        persist_server_notice(state, msg)
+        persist_server_event(state, msg)
 
       accum ->
         {:cont, %{state | info_pending: nil},
@@ -2437,7 +2539,7 @@ defmodule Grappa.Session.EventRouter do
   defp do_route(%Message{command: {:numeric, 351}, params: [_ | rest]} = msg, state) do
     case Map.get(state, :version_pending) do
       nil ->
-        persist_server_notice(state, msg)
+        persist_server_event(state, msg)
 
       accum ->
         line = rest |> Enum.filter(&is_binary/1) |> Enum.join(" ")
@@ -2499,9 +2601,18 @@ defmodule Grappa.Session.EventRouter do
     # correlate a PING reply's token back to the /ping it sent (RTT synthesized
     # client-side). A non-CTCP notice (NickServ, MOTD, plain peer notice) is
     # `:none` → empty meta, so this is strictly additive.
-    {state, eff} =
+    #
+    # M2 — a CTCP USERINFO reply is ALSO a genuine, visible answer to a
+    # query the operator (indirectly) asked for, exactly like the #591
+    # PING/VERSION replies above: it stays a normal persisted row via
+    # `ctcp_meta/1` (no separate silent-bookkeeping path). The ONLY thing
+    # M2 adds is a side-effect extraction of `Gender=` into
+    # `peer_profile_cache`, alongside the unchanged persist.
+    state2 = maybe_capture_peer_profile(state, sender, body)
+
+    {state3, eff} =
       build_persist(
-        state,
+        state2,
         :notice,
         channel,
         sender,
@@ -2509,7 +2620,7 @@ defmodule Grappa.Session.EventRouter do
         Map.merge(ctcp_meta(body), sender_meta(msg))
       )
 
-    {:cont, state, [eff]}
+    {:cont, state3, [eff]}
   end
 
   # #221 — GENERIC unknown-WHOIS-numeric pass-through. NumericRouter marks
@@ -2728,7 +2839,7 @@ defmodule Grappa.Session.EventRouter do
   # predicate column.
   @spec kick_state_update(state(), String.t(), String.t()) ::
           {%{String.t() => %{String.t() => [String.t()]}}, %{String.t() => topic_entry()},
-           %{String.t() => channel_mode_entry()}, userhost_cache()}
+           %{String.t() => channel_mode_entry()}, userhost_cache(), peer_profile_cache()}
   defp kick_state_update(state, channel, target) do
     apply_kick_effect(kick_classification(state, channel, target), state, channel, target)
   end
@@ -2744,28 +2855,33 @@ defmodule Grappa.Session.EventRouter do
 
   @spec apply_kick_effect(:self | :other | :absent, state(), String.t(), String.t()) ::
           {%{String.t() => %{String.t() => [String.t()]}}, %{String.t() => topic_entry()},
-           %{String.t() => channel_mode_entry()}, userhost_cache()}
+           %{String.t() => channel_mode_entry()}, userhost_cache(), peer_profile_cache()}
   defp apply_kick_effect(:self, state, channel, target) do
     chan_key = normalize_channel(channel, casemapping(state))
     cache = Map.get(state, :userhost_cache, %{})
+    profile_cache = Map.get(state, :peer_profile_cache, %{})
     new_members = Map.delete(state.members, channel)
     new_cache = evict_cache_if_no_overlap(cache, new_members, target, casemapping(state))
+    new_profile_cache = evict_cache_if_no_overlap(profile_cache, new_members, target, casemapping(state))
 
     {new_members, Map.delete(Map.get(state, :topics, %{}), chan_key),
-     Map.delete(Map.get(state, :channel_modes, %{}), chan_key), new_cache}
+     Map.delete(Map.get(state, :channel_modes, %{}), chan_key), new_cache, new_profile_cache}
   end
 
   defp apply_kick_effect(:other, state, channel, target) do
     cache = Map.get(state, :userhost_cache, %{})
+    profile_cache = Map.get(state, :peer_profile_cache, %{})
     new_members = Map.update!(state.members, channel, &Map.delete(&1, target))
     new_cache = evict_cache_if_no_overlap(cache, new_members, target, casemapping(state))
+    new_profile_cache = evict_cache_if_no_overlap(profile_cache, new_members, target, casemapping(state))
 
-    {new_members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}), new_cache}
+    {new_members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}), new_cache, new_profile_cache}
   end
 
   defp apply_kick_effect(:absent, state, _, _) do
     cache = Map.get(state, :userhost_cache, %{})
-    {state.members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}), cache}
+    profile_cache = Map.get(state, :peer_profile_cache, %{})
+    {state.members, Map.get(state, :topics, %{}), Map.get(state, :channel_modes, %{}), cache, profile_cache}
   end
 
   # The ceiling on `userhost_cache`. Chosen well above any membership a
@@ -2837,12 +2953,14 @@ defmodule Grappa.Session.EventRouter do
         do: normalize_nick(nick, casemapping)
   end
 
+  # M2: value-agnostic like `evict_if_no_overlap/4` (used by PART) — shared
+  # by both `userhost_cache` and `peer_profile_cache` call sites above.
   @spec evict_cache_if_no_overlap(
-          userhost_cache(),
+          %{String.t() => term()},
           %{String.t() => %{String.t() => [String.t()]}},
           String.t(),
           Identifier.casemapping()
-        ) :: userhost_cache()
+        ) :: %{String.t() => term()}
   defp evict_cache_if_no_overlap(cache, members_after, nick, casemapping) do
     if channels_with_member(members_after, nick) == [] do
       Map.delete(cache, normalize_nick(nick, casemapping))
@@ -3034,6 +3152,108 @@ defmodule Grappa.Session.EventRouter do
     {:cont, state2, [{:auto_reply, reply, persist_eff}]}
   end
 
+  # KVIrc-era CTCP USERINFO: reply with the composed profile text
+  # regardless of whether anything is actually configured — an
+  # unconfigured profile still answers (an empty string), never
+  # silence. Silently ignoring the query would read exactly like the
+  # dead-connection problem VERSION/PING answer for: "log honesty"
+  # (state what you observed) applies here too — we observed "no
+  # profile fields set," and the honest reply says that by composing
+  # to nothing, not by pretending the query never arrived.
+  #
+  # Routing mirrors the VERSION/PING arms exactly — see VERSION for why
+  # a DM-shaped query persists on the own-nick topic.
+  @spec ctcp_userinfo_reply(Message.t(), String.t(), state()) ::
+          {:cont, state(), [effect()]}
+  defp ctcp_userinfo_reply(msg, target, state) do
+    sender = Message.sender_nick(msg)
+    info = userinfo_text(state.profile)
+    reply = "NOTICE #{sender} :\x01USERINFO #{info}\x01"
+
+    dm_channel =
+      if nick_eq?(target, state.nick),
+        do: state.nick,
+        else: Identifier.canonical_target(target, casemapping(state))
+
+    {state2, persist_eff} =
+      build_persist(
+        state,
+        :notice,
+        dm_channel,
+        sender,
+        "CTCP USERINFO query → #{info}",
+        sender_meta(msg)
+      )
+
+    {:cont, state2, [{:reply, reply}, persist_eff]}
+  end
+
+  # M3a — KVIrc-era CTCP AVATAR: unlike USERINFO, an UNSET avatar gets
+  # NO reply at all — there's no useful answer ("no avatar" isn't
+  # information the querying client can act on the way an empty
+  # USERINFO string is still a legitimate "nothing configured" answer),
+  # matching KVIrc's own
+  # `KviOption_boolIgnoreChannelAvatarRequestsWhenNoAvatarSet` gate,
+  # simplified to always-on (no separate toggle for this MVP). URL-only
+  # by construction: `state.avatar_url` is always an absolute
+  # `Grappa.Uploads.public_url/2` HTTP(S) URL or `nil` — never a bare
+  # filename, so there is no DCC branch to accidentally trigger here or
+  # on the receiving KVIrc/mIRC client (see `docs/DESIGN_NOTES.md`).
+  @spec ctcp_avatar_reply(Message.t(), String.t(), state()) ::
+          {:cont, state(), [effect()]}
+  defp ctcp_avatar_reply(_, _, %{avatar_url: nil} = state) do
+    {:cont, state, []}
+  end
+
+  defp ctcp_avatar_reply(msg, target, state) do
+    sender = Message.sender_nick(msg)
+    reply = "NOTICE #{sender} :\x01AVATAR #{state.avatar_url}\x01"
+
+    dm_channel =
+      if nick_eq?(target, state.nick),
+        do: state.nick,
+        else: Identifier.canonical_target(target, casemapping(state))
+
+    {state2, persist_eff} =
+      build_persist(
+        state,
+        :notice,
+        dm_channel,
+        sender,
+        "CTCP AVATAR query → #{state.avatar_url}",
+        sender_meta(msg)
+      )
+
+    {:cont, state2, [{:reply, reply}, persist_eff]}
+  end
+
+  # Composes the KVIrc-shaped `Age=…; Gender=…; Location=…; Languages=…;
+  # <custom>` reply text, joining only the parts that are actually set.
+  @spec userinfo_text(map()) :: String.t()
+  defp userinfo_text(profile) do
+    [
+      userinfo_part("Age", Map.get(profile, :age)),
+      userinfo_part("Gender", userinfo_gender(Map.get(profile, :gender))),
+      userinfo_part("Location", Map.get(profile, :location)),
+      userinfo_part("Languages", Map.get(profile, :languages)),
+      Map.get(profile, :custom)
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("; ")
+  end
+
+  defp userinfo_part(_, nil), do: nil
+  defp userinfo_part(_, ""), do: nil
+  defp userinfo_part(label, value), do: "#{label}=#{value}"
+
+  # M/F/X — the three-way gender symbol convention this feature settled
+  # on (KVIrc's original CTCP USERINFO only ever had M/F; X extends it
+  # to non-binary, matching `Credential.genders/0`'s closed set).
+  defp userinfo_gender(:male), do: "M"
+  defp userinfo_gender(:female), do: "F"
+  defp userinfo_gender(:nonbinary), do: "X"
+  defp userinfo_gender(nil), do: nil
+
   # #591 — the typed CTCP meta for a persisted row whose body is a CTCP frame,
   # or `%{}` for a plain (non-CTCP) body. FLAT keys (`ctcp_verb`/`ctcp_args`)
   # per the `Grappa.Scrollback.Meta` allowlist convention — that type atomizes
@@ -3053,6 +3273,290 @@ defmodule Grappa.Session.EventRouter do
       {"ACTION", _} -> %{}
       {verb, args} -> %{ctcp_verb: verb, ctcp_args: args}
       :none -> %{}
+    end
+  end
+
+  # The CAPTURE half of the peer-profile feature, and the mirror of
+  # `maybe_query_peer_profile/2` (the ASK half): one door so a caller
+  # doesn't have to know both fields exist, and — the reason this
+  # wrapper exists rather than two piped calls — ONE place where the
+  # `show_peer_profiles` opt-in is honoured.
+  #
+  # The opt-in gate belongs on BOTH halves, not just the ask. A reply is
+  # not proof we asked: a peer can send a CTCP reply nobody solicited,
+  # and until the gate was here, one arriving for a subject who had
+  # switched the feature OFF still populated `peer_profile_cache` — and,
+  # on the AVATAR arm, still spent an outbound HTTP fetch of a URL the
+  # peer chose. Gating only the ask left the opt-out half-honoured, which
+  # is the "two patterns" CLAUDE.md rejects: a reader of
+  # `maybe_query_avatar/2` would reasonably conclude the whole feature
+  # was off.
+  #
+  # Scope, deliberately: this governs what the session LEARNS, never what
+  # it SHOWS. The `:persist` row for the notice is built by the caller
+  # after this returns and is untouched — a CTCP reply stays visible in
+  # `$server` whatever the opt-in says, exactly as before.
+  @spec maybe_capture_peer_profile(state(), String.t(), binary()) :: state()
+  defp maybe_capture_peer_profile(state, sender, body) do
+    if Map.get(state, :show_peer_profiles, false) do
+      state
+      |> maybe_capture_peer_userinfo(sender, body)
+      |> maybe_capture_peer_avatar(sender, body)
+    else
+      state
+    end
+  end
+
+  # M2 — side-effect extraction for an inbound CTCP USERINFO reply: if
+  # `body` carries a parseable `Gender=` field, fold it into
+  # `peer_profile_cache[fold(sender)]`. A no-op (returns `state`
+  # unchanged) for any other CTCP verb, a plain non-CTCP notice, or a
+  # USERINFO reply with no recognisable Gender= — the cache is
+  # best-effort, never a parse failure surfaced to the user.
+  #
+  # Reached only through `maybe_capture_peer_profile/3`, which owns the
+  # `show_peer_profiles` gate — do not call this directly.
+  @spec maybe_capture_peer_userinfo(state(), String.t(), binary()) :: state()
+  defp maybe_capture_peer_userinfo(state, sender, body) do
+    case CTCP.verb_args(body) do
+      {"USERINFO", args} ->
+        case extract_userinfo_gender(args) do
+          nil ->
+            state
+
+          gender ->
+            put_peer_profile_field(state, sender, :gender, gender)
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  # Shared read-modify-write for one field of one nick's
+  # `peer_profile_cache` entry. `Map.put/3` (not the `%{map | k: v}`
+  # struct-update syntax the pre-M3b USERINFO code used) DELIBERATELY —
+  # M3b added a second, independently-queried field (`avatar_slug`) to
+  # the same per-nick entry, so an entry may exist with only ONE of the
+  # two keys set (e.g. an avatar query landed before any USERINFO query
+  # did); `%{map | k: v}` raises `KeyError` on a missing key, `Map.put/3`
+  # does not.
+  @spec put_peer_profile_field(state(), String.t(), :gender | :avatar_slug, term()) :: state()
+  defp put_peer_profile_field(state, nick, field, value) do
+    nick_key = normalize_nick(nick, casemapping(state))
+    cache = Map.get(state, :peer_profile_cache, %{})
+    existing = Map.get(cache, nick_key, %{})
+    %{state | peer_profile_cache: Map.put(cache, nick_key, Map.put(existing, field, value))}
+  end
+
+  # KVIrc's own USERINFO-reply parser does exactly this: a case-
+  # insensitive substring search for "Gender=" and a single-char read
+  # right after it (KVIrc never parses Age=/Location=/Languages=/custom
+  # back into structured data either — see CLAUDE.md profile feature
+  # notes). `nil` for "no Gender= field" AND for "Gender= followed by
+  # something we don't recognise" — both are "nothing learned", not an
+  # error.
+  #
+  # Single-clause: the only caller (`maybe_capture_peer_userinfo/3`)
+  # always passes the binary `args` half of `CTCP.verb_args/1`'s
+  # `{verb, args}` tuple, so Dialyzer proves a catch-all fallback clause
+  # unreachable — removed per CLAUDE.md "Dialyzer warnings are design
+  # signals" (same posture as the retired `{:numeric, n}` clause
+  # documented elsewhere in this file).
+  @spec extract_userinfo_gender(String.t()) :: :male | :female | :nonbinary | nil
+  defp extract_userinfo_gender(args) when is_binary(args) do
+    case Regex.run(~r/Gender=([A-Za-z])/i, args) do
+      [_, "M"] -> :male
+      [_, "m"] -> :male
+      [_, "F"] -> :female
+      [_, "f"] -> :female
+      [_, "X"] -> :nonbinary
+      [_, "x"] -> :nonbinary
+      _ -> nil
+    end
+  end
+
+  # M2 — the outbound lazy-query rate limit. Unlike #340's send-flood
+  # bucket (paste-burst tolerant, ~2/sec sustained — protecting the USER
+  # from an upstream k-line), this protects a STRANGER from a channel
+  # full of new-to-us nicks all getting CTCP-queried in one 353 burst:
+  # a small burst, then a slow trickle. Keyed by `{subject, network_id}`
+  # (mirror of `Backoff.wait_ms/2`'s key shape) — its own namespace, a
+  # sibling bucket to #340's, never shared with it.
+  @userinfo_query_bucket :peer_profile_userinfo_query
+  @userinfo_query_capacity 10
+  @userinfo_query_refill_per_sec 0.5
+
+  # M2 — the lazy, opt-in, rate-limited, cache-deduped outbound CTCP
+  # USERINFO query. Returns `state` unchanged + `[]` for every "don't
+  # query" reason (opted out, already cached, bucket empty) so callers
+  # (JOIN, 353) can unconditionally merge the result without a second
+  # branch. On a successful take, the nick is marked as queried in
+  # `peer_profile_cache` BEFORE the reply (if any) arrives — see the
+  # `peer_profile_cache` typedoc for why eager marking is required.
+  # M3b — combines the two independent lazy peer-profile queries (USERINFO
+  # gender, AVATAR image) behind ONE call so the JOIN/353 call sites don't
+  # each have to know both exist. Each half is independently opted-in/
+  # rate-limited/cache-deduped; a caller just wants "ask what we can, cheaply."
+  @spec maybe_query_peer_profile(state(), String.t()) :: {state(), [effect()]}
+  defp maybe_query_peer_profile(state, nick) do
+    {state2, userinfo_effects} = maybe_query_userinfo(state, nick)
+    {state3, avatar_effects} = maybe_query_avatar(state2, nick)
+    {state3, userinfo_effects ++ avatar_effects}
+  end
+
+  @spec maybe_query_userinfo(state(), String.t()) :: {state(), [effect()]}
+  defp maybe_query_userinfo(state, nick) do
+    if Map.get(state, :show_peer_profiles, false) do
+      nick_key = normalize_nick(nick, casemapping(state))
+      cache = Map.get(state, :peer_profile_cache, %{})
+
+      # M3b: dedup on the GENDER field specifically, not entry presence —
+      # an entry may already exist because `maybe_query_avatar/2` queried
+      # this same nick first.
+      if Map.has_key?(Map.get(cache, nick_key, %{}), :gender) do
+        {state, []}
+      else
+        take_userinfo_query_token(state, nick, nick_key, cache)
+      end
+    else
+      {state, []}
+    end
+  end
+
+  @spec take_userinfo_query_token(state(), String.t(), String.t(), peer_profile_cache()) ::
+          {state(), [effect()]}
+  defp take_userinfo_query_token(state, nick, nick_key, cache) do
+    case TokenBucket.take(
+           @userinfo_query_bucket,
+           {state.subject, state.network_id},
+           @userinfo_query_capacity,
+           @userinfo_query_refill_per_sec
+         ) do
+      :ok ->
+        existing = Map.get(cache, nick_key, %{})
+        new_cache = Map.put(cache, nick_key, Map.put(existing, :gender, nil))
+        {%{state | peer_profile_cache: new_cache}, [{:reply, "PRIVMSG #{nick} :\x01USERINFO\x01"}]}
+
+      {:error, :rate_limited} ->
+        {state, []}
+    end
+  end
+
+  # M3b — sibling of `@userinfo_query_bucket`, its OWN namespace and MUCH
+  # more conservative numbers: an avatar reply triggers a real outbound
+  # HTTP fetch (`Grappa.Avatars.fetch_and_cache/3`), not just a one-line
+  # CTCP text reply — a burst of these is a real bandwidth/disk cost, not
+  # just a wire-chat cost.
+  @avatar_query_bucket :peer_profile_avatar_query
+  @avatar_query_capacity 5
+  @avatar_query_refill_per_sec 0.1
+
+  @doc false
+  @spec maybe_query_avatar(state(), String.t()) :: {state(), [effect()]}
+  defp maybe_query_avatar(state, nick) do
+    if Map.get(state, :show_peer_profiles, false) do
+      nick_key = normalize_nick(nick, casemapping(state))
+      cache = Map.get(state, :peer_profile_cache, %{})
+
+      if Map.has_key?(Map.get(cache, nick_key, %{}), :avatar_slug) do
+        {state, []}
+      else
+        take_avatar_query_token(state, nick, nick_key, cache)
+      end
+    else
+      {state, []}
+    end
+  end
+
+  @spec take_avatar_query_token(state(), String.t(), String.t(), peer_profile_cache()) ::
+          {state(), [effect()]}
+  defp take_avatar_query_token(state, nick, nick_key, cache) do
+    case TokenBucket.take(
+           @avatar_query_bucket,
+           {state.subject, state.network_id},
+           @avatar_query_capacity,
+           @avatar_query_refill_per_sec
+         ) do
+      :ok ->
+        existing = Map.get(cache, nick_key, %{})
+        new_cache = Map.put(cache, nick_key, Map.put(existing, :avatar_slug, nil))
+        {%{state | peer_profile_cache: new_cache}, [{:reply, "PRIVMSG #{nick} :\x01AVATAR\x01"}]}
+
+      {:error, :rate_limited} ->
+        {state, []}
+    end
+  end
+
+  # M3b — side-effect extraction for an inbound CTCP AVATAR reply: an
+  # `http(s)://` URL dispatches a detached, SSRF-hardened fetch
+  # (`Grappa.Avatars.fetch_and_cache/3`, off `Grappa.TaskSupervisor` —
+  # never inline, it's a blocking HTTP round-trip); anything else (no
+  # URL, a bare filename — the legacy DCC offer this codebase never
+  # implements) is silently dropped. Marks `avatar_slug: :pending`
+  # BEFORE the fetch completes so a second reply (channel + private, or
+  # a repeat) doesn't dispatch a second fetch for the same nick.
+  #
+  # Reached only through `maybe_capture_peer_profile/3`, which owns the
+  # `show_peer_profiles` gate — do not call this directly. That gate is
+  # load-bearing HERE and not merely tidy: this arm is the only one in
+  # the capture half that spends an outbound network request.
+  @spec maybe_capture_peer_avatar(state(), String.t(), binary()) :: state()
+  defp maybe_capture_peer_avatar(state, sender, body) do
+    case CTCP.verb_args(body) do
+      {"AVATAR", args} ->
+        case extract_avatar_url(args) do
+          nil ->
+            state
+
+          url ->
+            dispatch_avatar_fetch(state, sender, url)
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp dispatch_avatar_fetch(state, sender, url) do
+    nick_key = normalize_nick(sender, casemapping(state))
+    cache = Map.get(state, :peer_profile_cache, %{})
+    entry = Map.get(cache, nick_key, %{})
+
+    if is_nil(Map.get(entry, :avatar_slug)) do
+      network_id = state.network_id
+
+      _ =
+        Task.Supervisor.start_child(Grappa.TaskSupervisor, fn ->
+          Grappa.Avatars.fetch_and_cache(network_id, nick_key, url)
+        end)
+
+      put_peer_profile_field(state, sender, :avatar_slug, :pending)
+    else
+      state
+    end
+  end
+
+  # An `http://`/`https://` absolute URL only — the CTCP AVATAR
+  # convention's OTHER reply shape (a bare local filename, meant to be
+  # fetched via DCC) is refused outright: grappa never implements DCC
+  # (see `docs/DESIGN_NOTES.md` #1280 — an always-on multi-user bouncer
+  # has no business accepting inbound P2P connections from arbitrary IRC
+  # nicks). `args` is the CTCP reply's whole remainder — KVIrc's own
+  # `AVATAR <file> [<size>]` shape means a trailing size may follow the
+  # URL; only the first token is the URL.
+  @spec extract_avatar_url(String.t()) :: String.t() | nil
+  defp extract_avatar_url(args) when is_binary(args) do
+    case args |> String.trim() |> String.split(" ", parts: 2) do
+      [url | _] when url != "" ->
+        if String.starts_with?(url, "http://") or String.starts_with?(url, "https://") do
+          url
+        else
+          nil
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -3326,10 +3830,15 @@ defmodule Grappa.Session.EventRouter do
   # shape is the ONLY thing telling another client whether a NOTICE came
   # from a user or a server, and clients route the two differently.
   #
-  # The `$server` window is where the two become indistinguishable —
-  # `persist_server_notice/2` files MOTD and INFO numerics there as
-  # `:notice` with a SERVER sender, while a private notice to the user's
-  # own nick lands on the same window, same kind, with a USER sender.
+  # The `$server` window is where the two become indistinguishable — the
+  # generic numeric scan (`Session.Server`'s routed-numeric clause) files
+  # server replies there as `:notice` with a SERVER sender, while a private
+  # notice to the user's own nick lands on the same window, same kind, with a
+  # USER sender. `persist_server_event/2` used to be the headline example of
+  # that collision and no longer is (issue 1832 moved it to `:server_event`),
+  # but it still writes a server sender to `$server`, and the scan path — a
+  # much larger set of numerics — still writes `:notice` there. The key earns
+  # its keep on both.
   #
   # Additive, same contract as `sender_prefix` above: a consumer that does
   # not know the key behaves exactly as before, and rows persisted earlier
@@ -3408,26 +3917,51 @@ defmodule Grappa.Session.EventRouter do
     )
   end
 
-  # #127 — legacy `$server` :notice persist for an unprimed / connect-time
-  # server-info numeric (connect MOTD, unsolicited INFO/VERSION). Extracted
-  # from the pre-#127 MOTD BUG2 clause; sender via Message.sender_nick/1 (a
-  # server-prefixed numeric returns the server hostname, a prefix-less line
-  # the "*" sentinel — both pass Identifier.valid_sender?).
-  defp persist_server_notice(state, %Message{params: [_ | rest]} = msg) do
+  # #127 — the `$server` persist for an unprimed / connect-time server-info
+  # numeric (connect MOTD, unsolicited ADMIN/INFO/VERSION, an uncorrelated
+  # 402). Extracted from the pre-#127 MOTD BUG2 clause; sender via
+  # Message.sender_nick/1 (a server-prefixed numeric returns the server
+  # hostname, a prefix-less line the "*" sentinel — both pass
+  # Identifier.valid_sender?).
+  #
+  # issue 1832 — the kind is `:server_event`, and it used to be `:notice`.
+  # `:notice` is a CONTENT kind (`Scrollback.Message.content_kinds/0`), so
+  # `WindowCounts` bucketed every connect-MOTD line as an unread MESSAGE and
+  # pushed the `$server` severity to `:message`: a bare reconnect badged the
+  # tab as if somebody had talked to you. vjt's ruling (IRC, 2026-08-27,
+  # relayed): these lines are signalling and belong in the low `events` tier,
+  # the one join/part use — which is exactly what `:server_event` is.
+  #
+  # The change lives HERE, at the fallback, and not in a kind swap on the
+  # `$server` window: a REAL server NOTICE (services, opers) is somebody
+  # talking to you and keeps `:notice`. Every caller of this function is an
+  # unprimed-burst clause, so the whole family moves together and no arm is
+  # left half-migrated (CLAUDE.md "Total consistency or nothing").
+  #
+  # Body survives the move: `:server_event` is outside `@body_required_kinds`
+  # (body OPTIONAL, not barred), and cic renders a `:server_event` row with no
+  # `meta.raw_verb` through its body arm, so the MOTD text stays legible in
+  # the window — which is the only reason to keep these rows at all.
+  #
+  # HISTORY IS NOT REWRITTEN. Rows persisted before this keep `:notice` and
+  # keep counting as messages; the badge settles on the next connection. A
+  # backfill would be a data migration, hence a COLD deploy, hence every live
+  # IRC session dropped — not a price this cosmetic fix gets to charge.
+  defp persist_server_event(state, %Message{params: [_ | rest]} = msg) do
     body = List.last(rest)
 
     if is_binary(body) do
       sender = Message.sender_nick(msg)
       # sender_meta/1, not %{}: this is the exact call that makes a server
       # hostname and a user nick indistinguishable downstream (#1070).
-      {state, eff} = build_persist(state, :notice, "$server", sender, body, sender_meta(msg))
+      {state, eff} = build_persist(state, :server_event, "$server", sender, body, sender_meta(msg))
       {:cont, state, [eff]}
     else
       {:cont, state, []}
     end
   end
 
-  defp persist_server_notice(state, _), do: {:cont, state, []}
+  defp persist_server_event(state, _), do: {:cont, state, []}
 
   defp build_persist(state, kind, channel, sender, body, meta) do
     meta = put_sender_prefix(meta, state, kind, channel, sender)
@@ -3844,8 +4378,18 @@ defmodule Grappa.Session.EventRouter do
     # S2.4: NICK rename migrates the userhost entry from old_nick to new_nick.
     # user+host don't change with a nick change — only the key moves.
     userhost_cache =
-      rename_userhost_entry(
+      rename_cache_entry(
         Map.get(state, :userhost_cache, %{}),
+        old_nick,
+        new_nick,
+        casemapping(state)
+      )
+
+    # M2: same migration for the peer profile cache — a known gender
+    # follows the nick, it doesn't change with the rename.
+    peer_profile_cache =
+      rename_cache_entry(
+        Map.get(state, :peer_profile_cache, %{}),
         old_nick,
         new_nick,
         casemapping(state)
@@ -3853,9 +4397,15 @@ defmodule Grappa.Session.EventRouter do
 
     new_state =
       if nick_eq?(old_nick, state.nick) do
-        %{state | nick: new_nick, members: members, userhost_cache: userhost_cache}
+        %{
+          state
+          | nick: new_nick,
+            members: members,
+            userhost_cache: userhost_cache,
+            peer_profile_cache: peer_profile_cache
+        }
       else
-        %{state | members: members, userhost_cache: userhost_cache}
+        %{state | members: members, userhost_cache: userhost_cache, peer_profile_cache: peer_profile_cache}
       end
 
     persist_effects =
@@ -4496,31 +5046,42 @@ defmodule Grappa.Session.EventRouter do
     end
   end
 
-  # Evict userhost_cache entries for nicks that appear in no channel of
-  # `members_map` after the PART. Called for self-PART where every nick
-  # in the departed channel must be checked against the updated members.
-  @spec evict_if_no_overlap([String.t()], members(), userhost_cache(), Identifier.casemapping()) ::
-          userhost_cache()
+  # Evict entries for nicks that appear in no channel of `members_map`
+  # after the PART. Called for self-PART where every nick in the
+  # departed channel must be checked against the updated members.
+  #
+  # M2 — genuinely value-agnostic (pure key eviction by channel-overlap),
+  # so `cache` is typed as any nick-keyed map rather than pinned to
+  # `userhost_cache()`: `peer_profile_cache` reuses this SAME helper
+  # rather than a copy-pasted twin (CLAUDE.md "implement once, reuse
+  # everywhere") — both caches share the identical eviction rule.
+  @spec evict_if_no_overlap([String.t()], members(), %{String.t() => term()}, Identifier.casemapping()) ::
+          %{String.t() => term()}
   defp evict_if_no_overlap(nicks, members_map, cache, casemapping) do
     Enum.reduce(nicks, cache, fn nick, acc ->
       maybe_evict(acc, nick, channels_with_member(members_map, nick), casemapping)
     end)
   end
 
-  @spec maybe_evict(userhost_cache(), String.t(), [String.t()], Identifier.casemapping()) ::
-          userhost_cache()
+  @spec maybe_evict(%{String.t() => term()}, String.t(), [String.t()], Identifier.casemapping()) ::
+          %{String.t() => term()}
   defp maybe_evict(cache, nick, [], casemapping),
     do: Map.delete(cache, normalize_nick(nick, casemapping))
 
   defp maybe_evict(cache, _, _, _), do: cache
 
-  # Migrate a userhost_cache entry from old_nick to new_nick on a NICK rename.
-  # If old_nick is not in the cache (never seen via JOIN/WHOIS/WHO), no-op.
-  # The user+host fields are preserved — they don't change with a nick change.
-  # #537 — `casemapping` folds the cache keys network-aware.
-  @spec rename_userhost_entry(userhost_cache(), String.t(), String.t(), Identifier.casemapping()) ::
-          userhost_cache()
-  defp rename_userhost_entry(cache, old_nick, new_nick, casemapping) do
+  # Migrate a cache entry from old_nick to new_nick on a NICK rename. If
+  # old_nick is not in the cache, no-op. The entry's VALUE is preserved
+  # verbatim — user+host (userhost_cache) or gender (peer_profile_cache)
+  # don't change with a nick change, only the key does. #537 —
+  # `casemapping` folds the cache keys network-aware.
+  #
+  # M2 — shared with `peer_profile_cache` for the same reason
+  # `evict_if_no_overlap/4` is: the rename rule is identical regardless
+  # of what the cache's values mean.
+  @spec rename_cache_entry(%{String.t() => term()}, String.t(), String.t(), Identifier.casemapping()) ::
+          %{String.t() => term()}
+  defp rename_cache_entry(cache, old_nick, new_nick, casemapping) do
     old_key = normalize_nick(old_nick, casemapping)
     new_key = normalize_nick(new_nick, casemapping)
 

@@ -30,13 +30,14 @@
 // Unit tests pin the rewrite; device dogfood is the final word.
 
 import { composeSend, loginAs, scrollbackLine, selectChannel } from "../fixtures/cicchettoPage";
+import { adminDeleteUploadBySlug, publicUploadStatus } from "../fixtures/grappaApi";
 import {
   closeMediaViewer,
   mediaViewer,
   openMediaViewer,
   uploadImageAndGetLink,
 } from "../fixtures/mediaViewer";
-import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
+import { AUTOJOIN_CHANNELS, getSeededAdmin, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 import { mediaScrollbackRow, uploadViaPicker } from "../fixtures/uploadJourney";
 
@@ -102,12 +103,50 @@ test("🎵 upload link click opens the docked mini-player, NOT the modal (GH #11
   const { row, link } = await mediaScrollbackRow(page, "🎵", slug);
   await expect(link).toHaveClass(/scrollback-media-link/);
 
+  // #1701 — the bar now docks BELOW the compose box, and what makes that safe
+  // for the float stack (scroll-to-bottom + next-active, anchored `bottom:
+  // 0.75rem` INSIDE `.scrollback-pane`) is that mounting it no longer comes
+  // between the pane and the compose box: the pane's bottom edge, which is the
+  // floats' frame of reference, keeps the same relationship to the send button's
+  // row whether or not audio is playing.
+  //
+  // `issue278-next-active-send-overlap` pins the float-vs-send geometry, but it
+  // runs with NO audio — so a player that started displacing that geometry again
+  // would sail past it unseen. This is the witness for the case #278 cannot see,
+  // and it asserts the IDENTITY rather than the numbers: repeating #278's
+  // overlap arithmetic with the bar up would buy no coverage and cost a second
+  // place to maintain the same constants.
+  //
+  // Form-factor independent on purpose — both Shell branches mount the same
+  // `.drop-upload-zone` column, so this holds wherever the spec's project runs.
+  const paneToComposeGap = async (): Promise<number> => {
+    const pane = await page.locator(".scrollback-pane").boundingBox();
+    const compose = await page.locator(".compose-box").boundingBox();
+    if (pane === null || compose === null) {
+      throw new Error("pane and compose box must both be laid out to compare the gap");
+    }
+    return compose.y - (pane.y + pane.height);
+  };
+  const gapWithoutBar = await paneToComposeGap();
+
   const cicUrl = page.url();
   await link.click();
 
   // The docked bar appears; the media viewer modal stays closed.
   const player = page.getByTestId("audio-mini-player");
   await expect(player).toBeVisible({ timeout: 5_000 });
+
+  // …and it did NOT insert itself between the pane and the compose box. Polled,
+  // because the bar changes height a second time when `onLoadedMetadata`
+  // resolves and swaps the seek slider for the live badge — measuring once on
+  // first paint would read a layout that is still settling.
+  await expect
+    .poll(async () => Math.abs((await paneToComposeGap()) - gapWithoutBar), {
+      message:
+        "#1701: mounting the docked bar must not change the pane→compose gap — a bar that lands between them moves the float stack's frame relative to the send button, which #278 cannot see because it runs with no audio",
+      timeout: 5_000,
+    })
+    .toBeLessThan(1);
   await expect(mediaViewer(page)).toBeHidden();
   expect(page.url()).toBe(cicUrl);
 
@@ -172,6 +211,59 @@ test("viewer load states: failure text on unfetchable media, spinner until bytes
   await expect(spinner).toBeHidden({ timeout: 10_000 });
   const img = viewer.locator("img.media-viewer-media");
   await expect(img).toHaveJSProperty("complete", true, { timeout: 10_000 });
+});
+
+test("a DELETED upload reads as gone, not as a broken load (issue 1889)", async ({ page }) => {
+  // The incident, end to end and with nothing faked: a real upload, removed
+  // the way an operator removes one, clicked from the row it left behind.
+  //
+  // No `page.route` anywhere. The 404 is the server's own — the admin verb
+  // unlinks the file and soft-deletes the row — because the thing under test
+  // is precisely that cic now believes the SERVER instead of guessing from a
+  // silent element error. A fulfilled fake would exercise the branch and prove
+  // nothing about the route it is about.
+  //
+  // The delete happens BEFORE the first open, deliberately: a successfully
+  // fetched image is served from memory cache on a later click (the same
+  // hazard the load-states spec above orders its phases around), and a cached
+  // hit would neither fail nor be probed.
+  const vjt = specUser();
+  await loginAs(page, vjt);
+  await selectChannel(page, NETWORK_SLUG, CHANNEL, { ownNick: specNick() });
+
+  const { slug, url, link } = await uploadImageAndGetLink(page, "gone-upload.png");
+  await adminDeleteUploadBySlug(getSeededAdmin().token, slug);
+
+  // Preconditions, asserted rather than assumed, and read from the RUNNER
+  // against the public route so they are the server's own answer and not the
+  // browser's (which may have cached, and whose failure is the thing under
+  // test). Without them a delete that silently did nothing would surface as
+  // "the client did not react", which is a different bug in a different file.
+  expect(await publicUploadStatus(url, "GET")).toBe(404);
+
+  // The SECOND one is the load-bearing measurement, and it is asserted here
+  // rather than inferred from this spec's outcome. The viewer's probe asks
+  // with HEAD; a 404 is the only thing that earns "gone"; and `Plug.Head`
+  // rewriting HEAD to GET above the router is the reason the two are supposed
+  // to agree. If they ever stop agreeing the cure goes INERT — the probe would
+  // never see a 404 — and no unit test could tell, because there the 404 is
+  // fabricated. So the wire is asked directly, with the verb the client uses.
+  expect(await publicUploadStatus(url, "HEAD")).toBe(404);
+
+  const viewer = await openMediaViewer(page, link);
+
+  // The visible outcome, which is the whole point — not "the probe was
+  // called". The generic line is REPLACED: it is the sentence that sent two
+  // operators looking for a client bug.
+  await expect(viewer.getByText(/gone/i)).toBeVisible({ timeout: 10_000 });
+  await expect(viewer.getByText(/failed to load/i)).toBeHidden();
+  await expect(viewer.getByRole("status")).toBeHidden();
+
+  // …and the escape hatch that would have shown them `{"error":"not_found"}`
+  // as raw JSON is not there to click.
+  await expect(viewer.getByRole("link", { name: /open in browser/i })).toBeHidden();
+
+  await closeMediaViewer(viewer);
 });
 
 test("plain web link is NOT intercepted — keeps the default anchor", async ({ page }) => {

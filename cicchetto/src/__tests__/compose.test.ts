@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { channelKey } from "../lib/channelKey";
 import type { SlashCommand } from "../lib/slashCommands";
 import { LIST_WINDOW_NAME, SERVER_WINDOW_NAME } from "../lib/windowKinds";
@@ -260,19 +260,37 @@ vi.mock("../lib/banlistModal", () => ({
 // #1251 — compose decides "list QUERY vs mode change" from the network's 005
 // (`listModesQueryable`, published by the server). Default here is a
 // bahamut-shaped network: `b` and `z` are lists, everything else is a flag.
+//
+// issue 1831 — `chanmodesA` is the SECOND fact that decision needs, and the
+// two sets are not the same. `chanmodes.a` is what the NETWORK advertises as
+// a list; `listModesQueryable` is the subset grappa knows reply numerics for
+// (server-side `ListModes.queryable/1`). A letter in the first and not in the
+// second is a list nobody can read, and it used to be sent to the wire anyway.
 const isupportMock = vi.hoisted(() => ({
   listModesQueryable: ["b", "z"],
+  chanmodesA: ["b", "z"],
   chantypes: ["#", "&", "+", "!"] as readonly string[],
+  // #1861 — the network's advertised CASEMAPPING, which tab-completion now
+  // folds by. Default `"ascii"`: bahamut/Azzurra, all of production.
+  casemapping: "ascii" as "ascii" | "rfc1459" | "rfc1459_strict",
 }));
 vi.mock("../lib/isupport", () => ({
   isupportForNetwork: () => ({
     listModesQueryable: isupportMock.listModesQueryable,
+    chanmodes: {
+      a: isupportMock.chanmodesA,
+      b: ["k"],
+      c: ["l"],
+      d: ["i", "m", "n", "p", "s", "t"],
+    },
     chantypes: isupportMock.chantypes,
   }),
   // #1255 — compose asks the store which sigils open a channel on THIS
   // network. Mocked alongside the mode set so a test can narrow the class
   // (see the CHANTYPES describe below) instead of assuming the RFC one.
   chantypesForNetwork: () => isupportMock.chantypes,
+  // #1861 — and which fold it applies to identifiers, for tab-completion.
+  casemappingForNetwork: () => isupportMock.casemapping,
 }));
 
 vi.mock("../lib/modeModal", () => ({
@@ -319,6 +337,11 @@ beforeEach(() => {
   // wipe localStorage gets or one test's draft seeds the next one's boot.
   sessionStorage.clear();
   vi.clearAllMocks();
+  // #1861 — the hoisted isupport mock is a module-lifetime object, so a test
+  // that switches the network's fold would leak it into every test after it.
+  // Reset to the production posture (bahamut/Azzurra) here; the rfc1459 tests
+  // opt in explicitly.
+  isupportMock.casemapping = "ascii";
 });
 
 describe("compose draft state", () => {
@@ -1388,6 +1411,195 @@ describe("compose submit — slash command dispatch", () => {
       target: "bob",
     });
     expect(result).toEqual({ ok: true });
+  });
+
+  // #1698 — `/np`. Driven through the REAL `nowPlaying` store rather than a
+  // mock of it, because the thing worth testing is precisely which store state
+  // reaches the wire and which does not; a mocked store would test the mock.
+  // `fetch` is stubbed per case to place the store in the state under test.
+  describe("/np (#1698)", () => {
+    afterEach(() => {
+      // Local to this block: the file's own beforeEach must not unstub, or it
+      // would strip the localStorage / WebSocket stand-ins setupTests installs
+      // just before it. setupTests re-installs those on the next test, which is
+      // exactly the contract its header describes.
+      vi.unstubAllGlobals();
+    });
+
+    /** Tune `RADIO_STATIONS[0]` with `fetch` answering `body`, and hand back
+        the station so a case can name it in its expectation. */
+    const tuneWith = async (body: unknown): Promise<{ title: string }> => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response),
+      );
+      const { RADIO_STATIONS } = await import("../lib/radioStations");
+      const station = RADIO_STATIONS[0];
+      if (station === undefined) throw new Error("the curated table must carry a station");
+      const { tuneStation } = await import("../lib/radio");
+      const { nowPlaying } = await import("../lib/nowPlaying");
+      tuneStation(station);
+      await vi.waitFor(() => expect(nowPlaying().status).not.toBe("unanswered"));
+      return station;
+    };
+
+    it("sends an ACTION naming artist, track and station into the current window", async () => {
+      // ACTION, not PRIVMSG: `* nick is now playing: …` is the verb's whole
+      // shape, and the framing is the shared `ctcpFrame` seam — the same one
+      // /me and /ctcp ACTION go through, never a second hand-rolled \x01.
+      localStorage.setItem("grappa-token", "tok");
+      const sb = await import("../lib/scrollback");
+      vi.mocked(sb.sendMessage).mockResolvedValue();
+      const station = await tuneWith({ songs: [{ title: "A Land Unknown", artist: "Trestal" }] });
+
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/np");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(sb.sendMessage).toHaveBeenCalledWith(
+        "freenode",
+        "#a",
+        `\x01ACTION is now playing: Trestal — A Land Unknown [${station.title}]\x01`,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it("refuses, locally, when nothing is playing", async () => {
+      // The verb WRITES INTO A CHANNEL, so "nothing to say" must cost the
+      // channel nothing at all — not a blank action, not a station-only line
+      // the operator did not ask for.
+      localStorage.setItem("grappa-token", "tok");
+      const sb = await import("../lib/scrollback");
+      vi.mocked(sb.sendMessage).mockResolvedValue();
+
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/np");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(sb.sendMessage).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        error: "/np: nothing is playing — tune a station from the radio picker first",
+      });
+    });
+
+    it("refuses when the feed has not answered, and names the station", async () => {
+      localStorage.setItem("grappa-token", "tok");
+      const sb = await import("../lib/scrollback");
+      vi.mocked(sb.sendMessage).mockResolvedValue();
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+      const { RADIO_STATIONS } = await import("../lib/radioStations");
+      const station = RADIO_STATIONS[0];
+      if (station === undefined) throw new Error("the curated table must carry a station");
+      const { tuneStation } = await import("../lib/radio");
+      tuneStation(station);
+
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/np");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(sb.sendMessage).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        error: `/np: no track from ${station.title} yet — its feed has not answered`,
+      });
+    });
+
+    it("refuses a feed answer carrying no usable track", async () => {
+      // A 200 with an empty `songs` is not a track, and the arm that would
+      // otherwise build `* nick is now playing:  [Groove Salad]` is the one
+      // this whole chain exists to make unreachable.
+      localStorage.setItem("grappa-token", "tok");
+      const sb = await import("../lib/scrollback");
+      vi.mocked(sb.sendMessage).mockResolvedValue();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ songs: [] }),
+        } as Response),
+      );
+      const { RADIO_STATIONS } = await import("../lib/radioStations");
+      const station = RADIO_STATIONS[0];
+      if (station === undefined) throw new Error("the curated table must carry a station");
+      const { tuneStation } = await import("../lib/radio");
+      tuneStation(station);
+
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/np");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(sb.sendMessage).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ error: expect.stringContaining("has not answered") });
+    });
+
+    it("refuses a track that has gone stale, rather than publishing a lie", async () => {
+      // The arm vjt asked to have decided in advance. A ten-minute-old track
+      // announced as "now" is wrong in a way only OTHER PEOPLE can see, which
+      // is precisely why a local error beats it — and the refusal quotes the
+      // threshold from the store's constant, so a cadence change moves the
+      // sentence with it instead of leaving the operator a stale number.
+      localStorage.setItem("grappa-token", "tok");
+      const sb = await import("../lib/scrollback");
+      vi.mocked(sb.sendMessage).mockResolvedValue();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: async () => ({ songs: [{ title: "Juno", artist: "Setsuna" }] }),
+          } as Response)
+          .mockRejectedValue(new Error("offline")),
+      );
+      const { RADIO_STATIONS } = await import("../lib/radioStations");
+      const station = RADIO_STATIONS[0];
+      if (station === undefined) throw new Error("the curated table must carry a station");
+      const { tuneStation } = await import("../lib/radio");
+      const { NOW_PLAYING_POLL_MS, NOW_PLAYING_STALE_MS, nowPlaying } = await import(
+        "../lib/nowPlaying"
+      );
+
+      vi.useFakeTimers();
+      tuneStation(station);
+      await vi.advanceTimersByTimeAsync(NOW_PLAYING_STALE_MS + NOW_PLAYING_POLL_MS);
+      expect(nowPlaying().status).toBe("stale");
+      vi.useRealTimers();
+
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/np");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(sb.sendMessage).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        error: `/np: the last track from ${station.title} is over 3 minutes old — not sending it`,
+      });
+    });
+
+    it("sends into a QUERY window when that is where it was typed", async () => {
+      // Targets `ctx.submittedFrom`, exactly as /me does — an ACTION to a peer
+      // is ordinary conversation, so there is no channel-only guard to add.
+      localStorage.setItem("grappa-token", "tok");
+      const sb = await import("../lib/scrollback");
+      vi.mocked(sb.sendMessage).mockResolvedValue();
+      await tuneWith({ songs: [{ title: "Juno", artist: "Setsuna" }] });
+
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "bob");
+      compose.setDraft(k, "/np");
+      await compose.submit(k, "freenode", "bob");
+
+      expect(sb.sendMessage).toHaveBeenCalledWith(
+        "freenode",
+        "bob",
+        expect.stringContaining("\x01ACTION is now playing: Setsuna — Juno ["),
+      );
+    });
   });
 
   // #1192 — a deliberate behaviour change, pinned so it cannot regress by
@@ -2765,16 +2977,51 @@ describe("compose tabComplete (members-only, irssi-exact)", () => {
     expect(compose.tabComplete(k, "al", 2, true)).toBeNull();
   });
 
-  it("folds case (not the bracket range) on the prefix match (#525)", async () => {
+  it("folds case (not the bracket range) on the prefix match, on :ascii (#525)", async () => {
     // #525 CASEMAPPING=ascii: `[` is NOT folded, so a member `Foo[1]` and
     // the typed `foo[` are the SAME nick (case-only) and completion
     // matches on the common `nick[away]` shape. A brace `foo{` is a
     // DIFFERENT nick — but since #1003 it still REACHES `Foo[1]` on the
     // decoration level, behind the literals; see the cousin test below.
+    isupportMock.casemapping = "ascii";
     await setMembers(["Foo[1]"]);
     const compose = await import("../lib/compose");
     const r = compose.tabComplete(k, "foo[", 4, true);
     expect(r?.newInput).toBe("Foo[1]: ");
+  });
+
+  // #1861 — the SAME question, keyed per casemapping rather than globally.
+  // On `:ascii` the literal level must NOT match `foo{` against `Foo[1]`
+  // (the #525 posture, and the reason the loose decoration level exists at
+  // all); on `:rfc1459` the two spellings are one nick, so the LITERAL level
+  // matches and the completion no longer depends on #1003's fallback.
+  it("does NOT literal-match a brace prefix against a bracket member on :ascii (#525)", async () => {
+    isupportMock.casemapping = "ascii";
+    // Two members: the bracket twin, plus a decoration-free nick that the
+    // loose level would ALSO reach. A literal match would return `Foo[1]`
+    // first; the loose level orders alphabetically, so seeing `Foo[1]` here
+    // does not by itself prove which level matched — assert the fold table
+    // through `normalizeNick`, which is the thing under test.
+    const { normalizeNick } = await import("../lib/nickEquals");
+    expect(normalizeNick("Foo[1]", "ascii")).toBe("foo[1]");
+    expect(normalizeNick("foo{1}", "ascii")).toBe("foo{1}");
+    await setMembers(["Foo[1]"]);
+    const compose = await import("../lib/compose");
+    // Reaches it anyway, via the #1003 decoration level — behind literals.
+    expect(compose.tabComplete(k, "foo{", 4, true)?.newInput).toBe("Foo[1]: ");
+  });
+
+  it("literal-matches a brace prefix against a bracket member on :rfc1459 (#1861)", async () => {
+    isupportMock.casemapping = "rfc1459";
+    const { normalizeNick } = await import("../lib/nickEquals");
+    expect(normalizeNick("Foo[1]", "rfc1459")).toBe("foo{1}");
+    expect(normalizeNick("foo{1}", "rfc1459")).toBe("foo{1}");
+    // `_zzz_` strips to `zzz` and so is NOT reachable from the `foo{` prefix
+    // on either level; it is here only to keep the candidate list from being
+    // a single element, so "the one member came back" cannot pass vacuously.
+    await setMembers(["Foo[1]", "_zzz_"]);
+    const compose = await import("../lib/compose");
+    expect(compose.tabComplete(k, "foo{", 4, true)?.newInput).toBe("Foo[1]: ");
   });
 
   it("appends ': ' at line start", async () => {
@@ -3090,6 +3337,12 @@ describe("compose submit — T32 verbs", () => {
       connection_state: "parked",
       connection_state_reason: "user-quit",
       connection_state_changed_at: null,
+      age: null,
+      gender: null,
+      location: null,
+      languages: null,
+      custom: null,
+      avatar_url: null,
       inserted_at: "",
       updated_at: "",
     });
@@ -3129,6 +3382,12 @@ describe("compose submit — T32 verbs", () => {
       connection_state: "parked",
       connection_state_reason: null,
       connection_state_changed_at: null,
+      age: null,
+      gender: null,
+      location: null,
+      languages: null,
+      custom: null,
+      avatar_url: null,
       inserted_at: "",
       updated_at: "",
     });
@@ -3163,6 +3422,12 @@ describe("compose submit — T32 verbs", () => {
         connection_state: "parked",
         connection_state_reason: null,
         connection_state_changed_at: null,
+        age: null,
+        gender: null,
+        location: null,
+        languages: null,
+        custom: null,
+        avatar_url: null,
         inserted_at: "",
         updated_at: "",
       });
@@ -3229,6 +3494,12 @@ describe("compose submit — T32 verbs", () => {
       connection_state: "parked",
       connection_state_reason: null,
       connection_state_changed_at: null,
+      age: null,
+      gender: null,
+      location: null,
+      languages: null,
+      custom: null,
+      avatar_url: null,
       inserted_at: "",
       updated_at: "",
     });
@@ -3260,6 +3531,12 @@ describe("compose submit — T32 verbs", () => {
       connection_state: "parked",
       connection_state_reason: null,
       connection_state_changed_at: null,
+      age: null,
+      gender: null,
+      location: null,
+      languages: null,
+      custom: null,
+      avatar_url: null,
       inserted_at: "",
       updated_at: "",
     });
@@ -3290,6 +3567,12 @@ describe("compose submit — T32 verbs", () => {
       connection_state: "parked",
       connection_state_reason: "going offline",
       connection_state_changed_at: null,
+      age: null,
+      gender: null,
+      location: null,
+      languages: null,
+      custom: null,
+      avatar_url: null,
       inserted_at: "",
       updated_at: "",
     });
@@ -3321,6 +3604,12 @@ describe("compose submit — T32 verbs", () => {
       connection_state: "connected",
       connection_state_reason: null,
       connection_state_changed_at: null,
+      age: null,
+      gender: null,
+      location: null,
+      languages: null,
+      custom: null,
+      avatar_url: null,
       inserted_at: "",
       updated_at: "",
     });
@@ -3371,6 +3660,239 @@ describe("compose submit — T32 verbs", () => {
     });
     // Raw wire token MUST NOT leak.
     expect(result).not.toMatchObject({ error: "too_many_sessions" });
+  });
+});
+
+// #1796 — /reconnect: the network bounce. Two PATCH legs on ONE slug, park
+// then connect, in that order and sequentially — the ordering is #282's
+// (`lib/reconnect.ts`: "the park must settle before the reconnect") and this
+// verb shares that file's `bounceNetwork` rather than re-deriving it.
+describe("compose submit — /reconnect (#1796)", () => {
+  const parkedCredential = {
+    network: "freenode",
+    nick: "vjt",
+    ident: null,
+    realname: null,
+    sasl_user: null,
+    auth_method: "sasl" as const,
+    auth_command_template: null,
+    autojoin_channels: [],
+    connection_state: "parked" as const,
+    connection_state_reason: null,
+    connection_state_changed_at: null,
+    age: null,
+    gender: null,
+    location: null,
+    languages: null,
+    custom: null,
+    avatar_url: null,
+    inserted_at: "",
+    updated_at: "",
+  };
+
+  // `Once`, twice, rather than a blanket `mockResolvedValue` — and the reason
+  // is not style. `clearAllMocks` in this file's `beforeEach` clears CALLS,
+  // not implementations, so a blanket stub set here outlives the describe and
+  // reaches the #1396 characterization table further down, silently repinning
+  // the `connect` and `disconnect` rows to whatever this block last left
+  // behind. Measured: it did, until this became `Once`. The call count is
+  // known exactly (a bounce is two PATCHes), which is the condition under
+  // which the one-shot form is safe — see the #1255 note above for the case
+  // where it is not.
+  const mockBothLegs = (api: typeof import("../lib/api")): void => {
+    vi.mocked(api.patchNetwork)
+      .mockResolvedValueOnce(parkedCredential)
+      .mockResolvedValueOnce(parkedCredential);
+  };
+
+  it("/reconnect bare parks THEN connects the active window's network", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    mockBothLegs(api);
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/reconnect");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    // Both legs AND their order: a bounce that connects before it parks is
+    // not a bounce, and asserting the two calls as a set would not say so.
+    expect(vi.mocked(api.patchNetwork).mock.calls).toEqual([
+      ["tok", "freenode", { connection_state: "parked" }],
+      ["tok", "freenode", { connection_state: "connected" }],
+    ]);
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("/reconnect <net> bounces the named slug, not the active one", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    mockBothLegs(api);
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/reconnect libera");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(vi.mocked(api.patchNetwork).mock.calls).toEqual([
+      ["tok", "libera", { connection_state: "parked" }],
+      ["tok", "libera", { connection_state: "connected" }],
+    ]);
+    expect(result).toEqual({ ok: true });
+  });
+
+  // The reason is the upstream QUIT message, so it rides the PARK leg — the
+  // leg that closes the socket. Putting it on the connect leg would send the
+  // operator's goodbye to nobody.
+  it("/reconnect <net> <reason> carries the reason into the park leg only", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    mockBothLegs(api);
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/reconnect libera rolling a fresh vhost");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(vi.mocked(api.patchNetwork).mock.calls).toEqual([
+      ["tok", "libera", { connection_state: "parked", reason: "rolling a fresh vhost" }],
+      ["tok", "libera", { connection_state: "connected" }],
+    ]);
+    expect(result).toEqual({ ok: true });
+  });
+
+  // A network that could not be parked must NOT be connected: the sequential
+  // await is what makes the half-bounce unreachable, and a `Promise.all` here
+  // would leave the operator's network in a state neither leg intended.
+  it("/reconnect does not run the connect leg when the park leg fails", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.patchNetwork).mockRejectedValueOnce(new api.ApiError(503, "too_many_sessions"));
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/reconnect libera");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(vi.mocked(api.patchNetwork).mock.calls).toEqual([
+      ["tok", "libera", { connection_state: "parked" }],
+    ]);
+    expect(result).toMatchObject({
+      error: expect.stringMatching(/already at the session limit/i),
+    });
+  });
+
+  // A parked network has nothing to bounce, and the SHARED copy for
+  // `not_connected` ("isn't in a state to connect or disconnect right now")
+  // is wrong here in a way the operator cannot act on — it IS in a state to
+  // connect. Name the cure instead.
+  it("/reconnect on a network that is not connected names /connect as the cure", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.patchNetwork).mockRejectedValueOnce(new api.ApiError(400, "not_connected"));
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/reconnect libera");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(vi.mocked(api.patchNetwork).mock.calls).toEqual([
+      ["tok", "libera", { connection_state: "parked" }],
+    ]);
+    expect(result).toEqual({
+      error: "/reconnect: libera is not connected — use /connect libera",
+    });
+  });
+});
+
+// #1796 — /cycle: the CHANNEL bounce (part then join), irssi's CYCLE. Nothing
+// network-scoped happens here; that is `/reconnect`'s job.
+describe("compose submit — /cycle (#1796)", () => {
+  it("/cycle bare parts THEN rejoins the submitting window", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.postPart).mockResolvedValueOnce();
+    vi.mocked(api.postJoin).mockResolvedValueOnce();
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/cycle");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(api.postPart).toHaveBeenCalledWith("tok", "freenode", "#a", null);
+    expect(api.postJoin).toHaveBeenCalledWith("tok", "freenode", "#a", null);
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("/cycle #chan <message> parts the named channel with the message, then rejoins it", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.postPart).mockResolvedValueOnce();
+    vi.mocked(api.postJoin).mockResolvedValueOnce();
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/cycle #other brb");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(api.postPart).toHaveBeenCalledWith("tok", "freenode", "#other", "brb");
+    expect(api.postJoin).toHaveBeenCalledWith("tok", "freenode", "#other", null);
+    expect(result).toEqual({ ok: true });
+  });
+
+  // The #1208 trap, end to end: the parser keeps `brb` as the message, and the
+  // JOIN leg is where a regression would SHOW — a phantom `brb` channel would
+  // be created here, not merely parsed. Asserting the part alone would pass
+  // with the join regressed.
+  it("/cycle with a sigil-less message cycles the current channel, not a phantom one", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.postPart).mockResolvedValueOnce();
+    vi.mocked(api.postJoin).mockResolvedValueOnce();
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/cycle brb");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(api.postPart).toHaveBeenCalledWith("tok", "freenode", "#a", "brb");
+    expect(api.postJoin).toHaveBeenCalledWith("tok", "freenode", "#a", null);
+    expect(result).toEqual({ ok: true });
+  });
+
+  // A part that failed leaves the operator IN the channel, so rejoining would
+  // be a second JOIN to a channel they never left — and on a +i channel it is
+  // the one that earns a 473. Sequential await, same rule as /reconnect.
+  it("/cycle does not join when the part fails", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.postPart).mockRejectedValueOnce(new api.ApiError(404, "not_found"));
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/cycle");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(api.postJoin).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ error: expect.any(String) });
+  });
+
+  // `/part` tolerates a non-channel submitting window (its DELETE just fails
+  // server-side), but `/cycle` cannot: its second leg would JOIN whatever the
+  // window is named, manufacturing a channel out of `$server` or a peer nick.
+  // Refuse before either leg.
+  it("/cycle refuses a non-channel window instead of joining its name", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "bob");
+    compose.setDraft(k, "/cycle");
+    const result = await compose.submit(k, "freenode", "bob");
+
+    expect(api.postPart).not.toHaveBeenCalled();
+    expect(api.postJoin).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ error: expect.stringContaining("/cycle") });
   });
 });
 
@@ -4126,14 +4648,65 @@ describe("compose submit — /topic branches", () => {
     expect(compose.getDraft(k)).toBe("/topic -delete");
   });
 
-  it("/topic bare returns inline error (C3 wires the inline render)", async () => {
+  // #1914 — this used to assert the `TODO(C3)` stub's own error string
+  // ("inline render wired in C3"), i.e. it PINNED the defect: the one verb an
+  // operator uses to READ the topic answered in red with a ticket name. The
+  // replacement asserts the behaviour instead — the topic lands in the window.
+  it("/topic bare appends the cached topic to the submitting window", async () => {
     localStorage.setItem("grappa-token", "tok");
+    const { seedTopic } = await import("../lib/channelTopic");
+    const { topicShowByWindow } = await import("../lib/topicShow");
     const compose = await import("../lib/compose");
     const k = channelKey("freenode", "#a");
+    seedTopic(channelKey("freenode", "#a"), {
+      text: "beta — https://grappa.chat",
+      set_by: "vjt",
+      set_at: "2026-09-05T09:11:40.000Z",
+    });
     compose.setDraft(k, "/topic");
     const result = await compose.submit(k, "freenode", "#a");
 
-    expect(result).toMatchObject({ error: expect.stringContaining("C3") });
+    expect(result).toEqual({ ok: true });
+    const entries = topicShowByWindow()[k] ?? [];
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      channel: "#a",
+      topic: { text: "beta — https://grappa.chat", set_by: "vjt" },
+    });
+  });
+
+  // The answer lands where the operator TYPED it, not in the target window —
+  // irssi's rule. Pinned because keying it on the target channel is the
+  // plausible-looking alternative that silently answers off-screen.
+  it("/topic #other answers in the submitting window, not the target", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const { seedTopic } = await import("../lib/channelTopic");
+    const { topicShowByWindow } = await import("../lib/topicShow");
+    const compose = await import("../lib/compose");
+    const here = channelKey("freenode", "#a");
+    const other = channelKey("freenode", "#other");
+    seedTopic(other, { text: "elsewhere", set_by: null, set_at: null });
+    compose.setDraft(here, "/topic #other");
+    const result = await compose.submit(here, "freenode", "#a");
+
+    expect(result).toEqual({ ok: true });
+    expect(topicShowByWindow()[here] ?? []).toHaveLength(1);
+    expect(topicShowByWindow()[other] ?? []).toHaveLength(0);
+  });
+
+  // No fabricated empty topic for a channel we hold no cache for (#975 drops
+  // the entry on own-PART): absence means "not in that channel", and saying
+  // "no topic set" there would be a confident lie.
+  it("/topic on an uncached channel errors instead of printing an empty topic", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const { topicShowByWindow } = await import("../lib/topicShow");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/topic #never-joined");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(result).toMatchObject({ error: expect.stringContaining("#never-joined") });
+    expect(topicShowByWindow()[k] ?? []).toHaveLength(0);
   });
 });
 
@@ -4984,6 +5557,7 @@ const DISPATCH_CASE_LABELS = [
   "banlist",
   "connect",
   "ctcp",
+  "cycle",
   "deop",
   "devoice",
   "disconnect",
@@ -5007,6 +5581,7 @@ const DISPATCH_CASE_LABELS = [
   "nick",
   "notice",
   "notify",
+  "np",
   "op",
   "open-settings",
   "oper",
@@ -5016,6 +5591,7 @@ const DISPATCH_CASE_LABELS = [
   "query",
   "quit",
   "quote",
+  "reconnect",
   "recover",
   "rehash",
   "service-modal",
@@ -5059,6 +5635,14 @@ const DISPATCH_DRAFTS: ReadonlyArray<{ kind: SlashCommand["kind"]; draft: string
   { kind: "amsg", draft: "/amsg hi" },
   { kind: "ctcp", draft: "/ctcp bob VERSION" },
   { kind: "ping", draft: "/ping bob" },
+  // #1698 — this row lands in the UNPROTECTED list below, and that is the
+  // truth rather than a gap to paper over: nothing is tuned in this harness,
+  // so `/np` refuses locally and touches no mocked seam. Its sending arm needs
+  // a tuned station and a stubbed feed, which is what the `/np (#1698)`
+  // describe block above sets up. The row still earns its place — it keeps the
+  // arm reachable from the coverage reconciliation, which is what fails when
+  // the switch and this table drift apart.
+  { kind: "np", draft: "/np" },
   { kind: "join", draft: "/join #b" },
   { kind: "part", draft: "/part #other" },
   { kind: "invite", draft: "/invite bob #other" },
@@ -5106,6 +5690,14 @@ const DISPATCH_DRAFTS: ReadonlyArray<{ kind: SlashCommand["kind"]; draft: string
   { kind: "quote", draft: "/quote PING :x" },
   { kind: "connect", draft: "/connect libera" },
   { kind: "disconnect", draft: "/disconnect libera" },
+  // #1796 — the reason is NOT decoration here. Without it this row's effect
+  // signature is byte-identical to `disconnect`'s (the harness's rejecting
+  // `patchNetwork` stops the bounce after its park leg), and the net reported
+  // the two as an indistinguishable pair — a row that buys nothing. The reason
+  // rides the park body, so it is what tells them apart. Measured, not
+  // reasoned: the pair was in the snapshot until this word was added.
+  { kind: "reconnect", draft: "/reconnect libera bouncing" },
+  { kind: "cycle", draft: "/cycle #other brb" },
   { kind: "quit", draft: "/quit bye" },
   { kind: "recover", draft: "/recover libera" },
   { kind: "alias-define", draft: "/alias hi /msg bob $*" },
@@ -5206,12 +5798,12 @@ describe("#1396 — dispatch characterization over every arm", () => {
       misparsed,
     }).toMatchInlineSnapshot(`
       {
-        "arms": 59,
+        "arms": 62,
         "armsWithNoDraft": [],
         "draftsNamingNoArm": [],
         "duplicated": [],
         "misparsed": [],
-        "rows": 59,
+        "rows": 62,
       }
     `);
   });
@@ -5315,7 +5907,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
             "socket.pushChannelBan(1, "#a", "bob")",
           ],
@@ -5327,7 +5918,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
           "effects": [
             "aliasList.aliases()",
             "banlistModal.openBanlistModal("freenode", "#a", "b")",
-            "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
@@ -5358,10 +5948,22 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "ok": true,
           },
         },
+        "cycle": {
+          "effects": [
+            "aliasList.aliases()",
+            "api.postJoin("tok", "freenode", "#other", null)",
+            "api.postPart("tok", "freenode", "#other", "brb")",
+            "networks.networkIdBySlug("freenode")",
+            "networks.networkIdBySlug("freenode")",
+            "selection.setSelectedChannel({"networkSlug":"freenode","channelName":"#other","kind":"channel"})",
+          ],
+          "result": {
+            "ok": true,
+          },
+        },
         "deop": {
           "effects": [
             "aliasList.aliases()",
-            "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
@@ -5374,7 +5976,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
         "devoice": {
           "effects": [
             "aliasList.aliases()",
-            "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
@@ -5441,7 +6042,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
             "socket.pushChannelKick(1, "#a", "bob", "")",
             "socket.resolveUserhost(1, "bob")",
@@ -5453,7 +6053,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
         "kick": {
           "effects": [
             "aliasList.aliases()",
-            "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
@@ -5532,7 +6131,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
             "socket.pushChannelMode(1, "#a", "+s", [])",
           ],
@@ -5580,7 +6178,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
             "socket.pushNames(1, "#a")",
           ],
@@ -5619,10 +6216,18 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "ok": "notify: watching bob",
           },
         },
-        "op": {
+        "np": {
           "effects": [
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
+          ],
+          "result": {
+            "error": "/np: nothing is playing — tune a station from the radio picker first",
+          },
+        },
+        "op": {
+          "effects": [
+            "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
@@ -5720,6 +6325,16 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "ok": true,
           },
         },
+        "reconnect": {
+          "effects": [
+            "aliasList.aliases()",
+            "api.patchNetwork("tok", "libera", {"connection_state":"parked","reason":"bouncing"})",
+            "networks.networkIdBySlug("freenode")",
+          ],
+          "result": {
+            "error": "You're already at the session limit for this network from this device. Disconnect first or open from a different device.",
+          },
+        },
         "recover": {
           "effects": [
             "aliasList.aliases()",
@@ -5769,7 +6384,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
             "socket.pushChannelTopicClear(1, "#a")",
           ],
@@ -5782,7 +6396,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "api.postTopic("tok", "freenode", "#a", "new topic")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
           ],
           "result": {
@@ -5793,11 +6406,10 @@ describe("#1396 — dispatch characterization over every arm", () => {
           "effects": [
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
           ],
           "result": {
-            "error": "/topic #a (bare) — inline render wired in C3 (TopicBar)",
+            "error": "/topic #a — no topic known; join #a first",
           },
         },
         "umode": {
@@ -5816,6 +6428,7 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "api.ownNickForNetwork({"kind":"user","id":1,"slug":"freenode","inserted_at":"","updated_at":""}, {"kind":"user","name":"vjt"})",
             "networks.networkBySlug("freenode")",
+            "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "networks.user()",
           ],
@@ -5848,7 +6461,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "aliasList.aliases()",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
-            "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
             "socket.pushChannelUnban(1, "#a", "bob")",
           ],
@@ -5870,7 +6482,6 @@ describe("#1396 — dispatch characterization over every arm", () => {
         "voice": {
           "effects": [
             "aliasList.aliases()",
-            "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "networks.networkIdBySlug("freenode")",
             "selection.selectedChannel()",
@@ -5984,7 +6595,7 @@ describe("#1396 — dispatch characterization over every arm", () => {
           "aliasList.aliases()",
           "networks.networkIdBySlug("freenode")",
         ],
-        "arms": 59,
+        "arms": 62,
         "indistinguishablePairs": [
           [
             "ame",
@@ -5992,9 +6603,225 @@ describe("#1396 — dispatch characterization over every arm", () => {
           ],
         ],
         "unprotected": [
+          "np",
           "error",
         ],
       }
     `);
+  });
+});
+
+// issue 1831 — the window KIND is the answer to "am I in a channel?", and the
+// selection store already carries it. `getActiveChannel` used to re-derive
+// that answer by matching the window NAME against the network's advertised
+// CHANTYPES, so a window the store had already accepted as `kind: "channel"`
+// — and whose key it FOLDED, which `foldChannelKey` does for that kind and no
+// other — could still be invisible to every channel-scoped verb. TopicBar's
+// modes button mounts off `kind` (`Shell.tsx` `<Show when={selKind() ===
+// "channel"}>`) and keeps working straight through the divergence, which is
+// the button-works/command-fails split reported in the PWA. WHICH state
+// produces the divergence there is not established by these tests, and they
+// do not claim it.
+describe("compose submit — the active-channel resolver reads the window KIND (issue 1831)", () => {
+  // A channel window whose sigil the network does not advertise: the store
+  // says `kind: "channel"`, the CHANTYPES sniff says nick. Every
+  // channel-scoped verb has to follow the store.
+  const divergeKindFromSigil = async (): Promise<() => void> => {
+    const sel = await import("../lib/selection");
+    // Not `…Once`: dispatch consults the selection more than once per submit.
+    vi.mocked(sel.selectedChannel).mockReturnValue({
+      networkSlug: "freenode",
+      channelName: "&local",
+      kind: "channel",
+    });
+    isupportMock.chantypes = ["#"];
+    return () => {
+      isupportMock.chantypes = ["#", "&", "+", "!"];
+      vi.mocked(sel.selectedChannel).mockReturnValue({
+        networkSlug: "freenode",
+        channelName: "#a",
+        kind: "channel",
+      });
+    };
+  };
+
+  it("bare /mode opens the modal for the window the store calls a channel", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const restore = await divergeKindFromSigil();
+    try {
+      const modeModal = await import("../lib/modeModal");
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "&local");
+      compose.setDraft(k, "/mode");
+      const result = await compose.submit(k, "freenode", "&local");
+
+      expect(modeModal.openModeModal).toHaveBeenCalledWith("freenode", "&local");
+      expect(result).toEqual({ ok: true });
+    } finally {
+      restore();
+    }
+  });
+
+  // The cure is the resolver, so the whole class moves with it — 13 verbs
+  // share `requireChannel` and 4 more call `getActiveChannel` directly. /op
+  // stands for the class: while it re-derived the sigil it reported "requires
+  // an active channel window" for a window that plainly is one.
+  it("the requireChannel class follows — /op resolves the same window", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const restore = await divergeKindFromSigil();
+    try {
+      const socket = await import("../lib/socket");
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "&local");
+      compose.setDraft(k, "/op bob");
+      const result = await compose.submit(k, "freenode", "&local");
+
+      expect(socket.pushChannelOp).toHaveBeenCalledWith(1, "&local", ["bob"]);
+      expect(result).toEqual({ ok: true });
+    } finally {
+      restore();
+    }
+  });
+
+  // The guard that has to survive the swap: a QUERY window is still not a
+  // channel, and the operator must still read the actionable error.
+  it("a query window is still refused, by kind rather than by sigil", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const sel = await import("../lib/selection");
+    vi.mocked(sel.selectedChannel).mockReturnValue({
+      networkSlug: "freenode",
+      channelName: "alice",
+      kind: "query",
+    });
+    try {
+      const socket = await import("../lib/socket");
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "alice");
+      compose.setDraft(k, "/op bob");
+      const result = await compose.submit(k, "freenode", "alice");
+
+      expect(socket.pushChannelOp).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ error: expect.stringContaining("channel window") });
+    } finally {
+      vi.mocked(sel.selectedChannel).mockReturnValue({
+        networkSlug: "freenode",
+        channelName: "#a",
+        kind: "channel",
+      });
+    }
+  });
+});
+
+// issue 1831 — the silent `{ok: true}`. A paramless single letter the NETWORK
+// advertises as type A is a LIST QUERY; when grappa knows no reply numerics
+// for it, the pre-fix code fell through to a raw `MODE #chan <letter>` and
+// returned ok. The ircd streams the list, nothing here collects it, and the
+// operator gets no modal, no error and no rows — indistinguishable from the
+// command never having run. CLAUDE.md forbids exactly that shape at a
+// boundary.
+describe("compose submit — an unreadable list query is reported, not fired (issue 1831)", () => {
+  // `a` is type A on this network AND absent from the queryable set — the one
+  // combination that used to be silent.
+  const advertiseUnreadableList = (): (() => void) => {
+    isupportMock.chanmodesA = ["b", "z", "a"];
+    return () => {
+      isupportMock.chanmodesA = ["b", "z"];
+    };
+  };
+
+  it("/mode #chan <unreadable type-A letter> is reported, not fired at nobody", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const restore = advertiseUnreadableList();
+    try {
+      const socket = await import("../lib/socket");
+      const banlistModal = await import("../lib/banlistModal");
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/mode #a a");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(socket.pushChannelMode).not.toHaveBeenCalled();
+      expect(banlistModal.openBanlistModal).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        error: "/mode: grappa can't read this network's +a list (it offers +b +z)",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // #1251 ruled the two spellings must behave alike; the WORDING is part of
+  // alike, so this pins the same string rather than merely "some error".
+  it("/mode +<unreadable letter> — the current-channel spelling behaves alike", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const restore = advertiseUnreadableList();
+    try {
+      const socket = await import("../lib/socket");
+      const banlistModal = await import("../lib/banlistModal");
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/mode +a");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(socket.pushChannelMode).not.toHaveBeenCalled();
+      expect(banlistModal.openBanlistModal).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        error: "/mode: grappa can't read this network's +a list (it offers +b +z)",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // The third spelling of one question, and the reason the message is built in
+  // one place: /banlist names the same cause, with its own verb.
+  it("/banlist <unreadable letter> names the same cause with its own verb", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const restore = advertiseUnreadableList();
+    try {
+      const banlistModal = await import("../lib/banlistModal");
+      const compose = await import("../lib/compose");
+      const k = channelKey("freenode", "#a");
+      compose.setDraft(k, "/banlist a");
+      const result = await compose.submit(k, "freenode", "#a");
+
+      expect(banlistModal.openBanlistModal).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        error: "/banlist: grappa can't read this network's +a list (it offers +b +z)",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // The distinction the wording exists for: a letter the network never
+  // advertised as a list HAS no list here, and blaming grappa would send the
+  // operator after a cause that is not there.
+  it("a letter the network never advertised keeps the network-side wording", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const banlistModal = await import("../lib/banlistModal");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/banlist e");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(banlistModal.openBanlistModal).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      error: "/banlist: this network has no +e list (it offers +b +z)",
+    });
+  });
+
+  // The mutation guard: a single letter that is NOT type A here is a mode
+  // CHANGE with a visible echo, and it must keep reaching the wire.
+  it("a single flag letter is still a mutation, not an unreadable list", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const socket = await import("../lib/socket");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/mode #a m");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(socket.pushChannelMode).toHaveBeenCalledWith(1, "#a", "m", []);
+    expect(result).toEqual({ ok: true });
   });
 });

@@ -37,7 +37,8 @@ defmodule GrappaWeb.Plugs.SecurityHeaders do
 
     * `default-src 'self'` — same-origin baseline.
     * `connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com
-      https://litterbox.catbox.moe https://api.somafm.com` — REST + WS to grappa
+      https://litterbox.catbox.moe https://api.somafm.com https://kohina.brona.dk`
+      — REST + WS to grappa
       (same-origin: `'self'`
       covers `ws://$host` / `wss://$host` per CSP3, so this is deployment-host
       agnostic — no edit when `PHX_HOST` changes); Cloudflare Turnstile +
@@ -64,6 +65,25 @@ defmodule GrappaWeb.Plugs.SecurityHeaders do
       `api.somafm.com`; `issue1695-somafm-connect-src-perimeter.spec.ts` pins
       both that refusal and the non-api subdomain that separates this policy
       from the wildcard.
+      `kohina.brona.dk` (#1835) is the SECOND metadata host, and the fact that
+      it needed its own line is the point rather than an inconvenience. cic's
+      radio table reads a now-playing feed per station; Kohina publishes one as
+      an Icecast `status-json.xsl` (measured 2026-08-27: HTTP 200
+      `application/json`, `Access-Control-Allow-Origin: *`) and before this it
+      was unreadable purely because the CSP admitted no host to read it from.
+      **This directive stays a PER-VENDOR gate, deliberately** — the shape to
+      refuse is `connect-src https:`, which would let any future table row
+      `fetch` anywhere and turn a curated list into an open outbound
+      permission. One host per provider we actually chose is the whole
+      mechanism: adding a station that needs a feed is a visible network-surface
+      change, reviewed as one, and a row pointing somewhere unlisted fails
+      loudly in the console instead of quietly widening the app. The SAME host
+      already carries this station's audio, and that needs no entry — a stream
+      is `media-src https:` and a status document is a `fetch`; the two
+      directives are not interchangeable. cic pins the mirror image of this list
+      in `radioStations.test.ts` (`CSP_FEED_HOSTS`), because neither side can
+      see the other: the plug does not know what the table holds, and the
+      browser bundle cannot read this header.
     * `script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM='
       https://challenges.cloudflare.com https://*.hcaptcha.com` — Vite modules +
       the Turnstile / hCaptcha widget loaders. Each loader injects a small
@@ -78,16 +98,28 @@ defmodule GrappaWeb.Plugs.SecurityHeaders do
       dynamic style tags during interactive renders; rejecting `'unsafe-inline'`
       would break the irssi-shape theme system. hCaptcha loads its own sheet
       from `assets.hcaptcha.com`.
-    * `img-src 'self' data: https:` — `'self'` + `data:` for favicons, manifest
-      icons and SolidJS inline `data:` SVGs; `https:` (#1240) so the media
-      viewer's `<img>` can load a CROSS-HOST image link (an upload minted by
-      another grappa instance, or a litterbox URL) that `mediaLink.ts`
+    * `img-src 'self' data: blob: https:` — `'self'` + `data:` for favicons,
+      manifest icons and SolidJS inline `data:` SVGs; `https:` (#1240) so the
+      media viewer's `<img>` can load a CROSS-HOST image link (an upload minted
+      by another grappa instance, or a litterbox URL) that `mediaLink.ts`
       `externalMediaLink` admits client-side. Without it the classifier change
       is worse than a no-op — the modal opens EMPTY. Scheme-scoped to https,
       never http, so no mixed content; vjt granted `*` explicitly, and `https:`
       is the narrower spelling of the same practical grant (an http image on an
       https page is refused as mixed content either way) that keeps this
       directive shaped like its `media-src` sibling.
+      `blob:` (1883) is that sibling's OTHER token, arriving here for the same
+      reason it arrived there: the upload confirm previews the operator's OWN
+      picked file as a thumbnail, off the wire entirely, via
+      `URL.createObjectURL` (ConfirmModal.tsx) — the exact shape of the
+      video-duration probe `media-src blob:` already carries. Measured, not
+      argued: without it Chromium refuses the thumbnail with
+      `violatedDirective: img-src, blockedURI: blob`, the confirm renders an
+      empty box, and 29 e2e specs red on the `_cspGuard` fixture. It buys an
+      attacker nothing this directive was still holding: a `blob:` URL is
+      minted only by same-origin script, cannot name a foreign host, and so
+      cannot exfiltrate — while `https:`, already admitted above, is the token
+      that would carry an image-beacon anywhere.
     * `font-src 'self'` — system fonts only.
     * `manifest-src 'self'` — PWA install manifest.
     * `media-src 'self' blob: https:` — `blob:` for the video-upload duration
@@ -124,7 +156,7 @@ defmodule GrappaWeb.Plugs.SecurityHeaders do
 
   import Plug.Conn
 
-  @csp "default-src 'self'; connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com https://litterbox.catbox.moe https://api.somafm.com; script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM=' https://challenges.cloudflare.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline' https://*.hcaptcha.com; img-src 'self' data: https:; font-src 'self'; manifest-src 'self'; media-src 'self' blob: https:; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com https://*.hcaptcha.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+  @csp "default-src 'self'; connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com https://litterbox.catbox.moe https://api.somafm.com https://kohina.brona.dk; script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM=' https://challenges.cloudflare.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline' https://*.hcaptcha.com; img-src 'self' data: blob: https:; font-src 'self'; manifest-src 'self'; media-src 'self' blob: https:; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com https://*.hcaptcha.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 
   # HTTP header names are lower-cased (HTTP/2 + Plug convention); the VALUES
   # are byte-identical to the retired nginx snippet.

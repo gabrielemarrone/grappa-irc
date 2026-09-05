@@ -1,9 +1,11 @@
 import { type Component, For, Show } from "solid-js";
-import { closeAudio } from "./lib/audioPlayer";
+import { audioFailureLabel, closeAudio, playbackFailure, showPlayer } from "./lib/audioPlayer";
 import { createDismissOnOutsidePointer } from "./lib/dismissOnOutsidePointer";
+import { nowPlayingLabel } from "./lib/nowPlaying";
 import { createOverlayLock } from "./lib/overlayScrollLock";
 import { closeRadioPicker, radioPickerOpen, tunedStation, tuneStation } from "./lib/radio";
-import { RADIO_STATIONS } from "./lib/radioStations";
+import { RADIO_LOGO_PATHS } from "./lib/radioLogoPaths";
+import { isLossless, RADIO_STATIONS, type RadioStation } from "./lib/radioStations";
 import PaneTopBar from "./PaneTopBar";
 
 // #682 — the rail's internet-radio surface: a station PICKER and, once
@@ -54,6 +56,60 @@ import PaneTopBar from "./PaneTopBar";
 // in place and re-flips — `denoise` there — is not. Auditioning stations is
 // the second kind, so the picker stays up and marks the tuned row.
 
+// #1704/#1739 — the ONE place a station's artwork is drawn, and it no longer
+// decides anything.
+//
+// WHAT USED TO BE HERE, and why it left. #1704 had this component hold two
+// facts at once: `logoUrl === null` (a DECLARED absence — Kohina publishes no
+// artwork) and an `onError` signal (a URL we believed in that broke at
+// runtime), both landing on a generated data-URI tile. #1739 vendored the
+// bytes: `bun run sync:radio-logos` mirrors every station's logo into
+// `public/radio-logos/`, writing that same generated tile as a FILE for a null
+// row, and the render reads the resulting path. Both facts are settled at
+// build time, so both branches are gone.
+//
+// WHY THAT IS THE POINT AND NOT A TIDY-UP. Every one of these `<img>` tags was
+// a request to the station's own host, so opening the drawer handed a third
+// party an IP and a user agent 21 times over. Vendoring is what stops that,
+// and vjt's #1739 ruling took it over a server-side proxy because a proxy
+// reintroduces a runtime dependency on somafm — merely relocated, and
+// per-viewer instead of per-client-cache.
+//
+// NO `onError`, DELIBERATELY. A same-origin asset that `radioLogoFiles.test.ts`
+// proves is present and non-empty cannot fail the way a third-party URL could,
+// and a handler here would be a SECOND stand-in mechanism beside the vendored
+// tile — one implementation is the whole shape of this change.
+//
+// The `undefined` arm of the lookup is unreachable by construction: that same
+// gate fails the build for any station id the map does not carry. Spelling a
+// fallback for it would put the branch back for a case no build can ship.
+/** #1836 — what a lossless row is marked with, per vjt's ruling.
+ *
+ * Exported so the tests assert against the production string rather than a
+ * copy of it, and spelled with its brackets because that IS the badge: this
+ * client is irssi-shaped, a bracketed token reads as a mark in a monospace
+ * column, and it stays legible with the stylesheet off — which the colour it
+ * carries does not. */
+export const HI_FI_BADGE = "[hi-fi]";
+
+/** #1836 — the format a row DECLARES, as the picker prints it.
+ *
+ * `bitrate: null` prints the codec ALONE. Not "0k", not "unknown", not a
+ * plausible number: a provider that states no bitrate is a fact this table
+ * records, and dressing it up as one it does not have is the defect #1696 was
+ * filed about. The codec still shows, because that much IS known. */
+function formatLabel(station: RadioStation): string {
+  return station.bitrate === null ? station.codec : `${station.codec} ${station.bitrate}k`;
+}
+
+const StationLogo: Component<{ readonly station: RadioStation; readonly class: string }> = (
+  props,
+) => (
+  // Decorative in both slots: the title sits beside it in the markup, so alt
+  // text would be read out twice by a screen reader.
+  <img class={props.class} src={RADIO_LOGO_PATHS[props.station.id]} alt="" />
+);
+
 const RailRadio: Component = () => {
   let rootRef: HTMLDivElement | undefined;
 
@@ -68,15 +124,91 @@ const RailRadio: Component = () => {
       <Show when={tunedStation()}>
         {(station) => (
           <div class="rail-radio-now" data-testid="rail-radio-now">
-            {/* Decorative: the title beside it already names the station, so
-                alt text would be read out twice by a screen reader. */}
-            <img class="rail-radio-now-logo" src={station().logoUrl} alt="" />
-            <div class="rail-radio-now-text">
-              <span class="rail-radio-now-title" data-testid="rail-radio-now-title">
-                {station().title}
-              </span>
-              <span class="rail-radio-now-genres">{station().genres.join(" · ")}</span>
-            </div>
+            {/* #1737 — the band's identity half IS the door back to a hidden
+                transport (#1697). The band is the thing that says "this is
+                playing", and tapping what is playing to get the transport
+                back is the platform convention; before this it was inert
+                except for its ⏹.
+
+                WHY THE IDENTITY AND NOT THE WHOLE ROW. The ⏹ beside it is a
+                <button>, and a <button> inside a <button> is invalid HTML —
+                so the row itself cannot become the control. The alternative
+                (a click handler on the row, with ⏹ calling
+                `stopPropagation`) makes "stop must not become restore-then-
+                stop" an event-ordering rule somebody has to keep right; two
+                SIBLING buttons make it true by construction, and give the
+                keyboard two real stops instead of a div nobody can focus.
+                `flex: 1` is what makes it the whole band minus the ⏹ rather
+                than just the text it wraps.
+
+                WHY IT IS NOT GATED ON `playerHidden()`, unlike the
+                `rail-action-show-player` drawer entry that shares its verb:
+                that one is a MENU ROW, and a row that does nothing is
+                clutter you scroll past. This control costs no space — the
+                band is already on screen — so gating it would only make the
+                band change DOM shape, and with it the row's flex layout,
+                every time the operator hides the transport. `showPlayer()`
+                is idempotent, so the ungated tap is a no-op while the bar is
+                up. The drawer entry stays regardless: it is the GENERAL
+                door, because an upload carries `label: null`, is in no
+                station table, and renders no band at all. */}
+            <button
+              type="button"
+              class="rail-radio-now-restore"
+              data-testid="rail-radio-now-restore"
+              onClick={showPlayer}
+              aria-label={`show player — ${station().title}`}
+            >
+              <StationLogo station={station()} class="rail-radio-now-logo" />
+              <div class="rail-radio-now-text">
+                <span class="rail-radio-now-title" data-testid="rail-radio-now-title">
+                  {station().title}
+                </span>
+                {/* #1698 — the TRACK takes the genres' slot rather than adding a
+                  third line. #500 bought this rail's vertical budget by
+                  collapsing the actions behind one launcher, and a permanently
+                  taller chrome would re-charge part of it. Nothing is lost:
+                  every picker row still carries its genres, and browsing by
+                  genre is what the picker is for — this row answers "what is
+                  on", which is the track.
+                  #1744 — and a THIRD tenant of the same line, ahead of both,
+                  because a station that will not play is not "on" at all. Two
+                  reasons it belongs on this surface and not only on the docked
+                  bar: this is the DESKTOP answer to "what is playing", and it
+                  is what is left standing when the operator hides the bar
+                  (#1697) — which takes the transport, and with it the docked
+                  notice, off the screen while the audio keeps running. The
+                  track in particular must yield: the feed polls
+                  `tunedStation()`, derived from the SOURCE, so it keeps
+                  reporting what the station is broadcasting long after this
+                  browser stopped being able to decode it. */}
+                <Show
+                  when={playbackFailure()}
+                  fallback={
+                    <Show
+                      when={nowPlayingLabel()}
+                      fallback={
+                        <span class="rail-radio-now-genres" data-testid="rail-radio-now-genres">
+                          {station().genres.join(" · ")}
+                        </span>
+                      }
+                    >
+                      {(line) => (
+                        <span class="rail-radio-now-track" data-testid="rail-radio-now-track">
+                          {line()}
+                        </span>
+                      )}
+                    </Show>
+                  }
+                >
+                  {(failure) => (
+                    <span class="rail-radio-now-error" data-testid="rail-radio-now-error">
+                      {`⚠ ${audioFailureLabel(failure())}`}
+                    </span>
+                  )}
+                </Show>
+              </div>
+            </button>
             {/* `closeAudio` directly: it already IS the stop verb, and the
                 station is derived from the player, so clearing the player is
                 what un-tunes. No radio-flavoured wrapper around it. */}
@@ -110,6 +242,9 @@ const RailRadio: Component = () => {
               picker its only dismiss control on the form factor where it
               works today. */}
           <PaneTopBar
+            /* #1766 — the picker is INSIDE the rail; a window-list door here
+               would be a second rail opened from within one. */
+            leading={null}
             trailing={
               <button
                 type="button"
@@ -151,10 +286,47 @@ const RailRadio: Component = () => {
                   aria-pressed={tunedStation()?.id === station.id ? "true" : "false"}
                   title={station.description}
                 >
-                  <img class="rail-radio-station-logo" src={station.logoUrl} alt="" />
+                  <StationLogo station={station} class="rail-radio-station-logo" />
                   <span class="rail-radio-station-text">
                     <span class="rail-radio-station-title">{station.title}</span>
-                    <span class="rail-radio-station-genres">{station.genres.join(" · ")}</span>
+                    {/* #1836 — the format SHARES the genres' line rather than
+                        taking a third one, the same trade #1698 made for the
+                        track on the chrome band: #500 bought this rail's
+                        vertical budget by collapsing the actions behind one
+                        launcher, and a row a third taller charges part of it
+                        back on every station in the list. Nothing is lost —
+                        genres keep the ellipsis and the format is two short
+                        tokens pinned to the end.
+
+                        WHY IT IS ON THE PICKER AND NOT THE CHROME BAND. This is
+                        the DECISION surface: the issue is that the listener
+                        cannot tell a 128k MP3 from a 1000+ kbps FLAC BEFORE
+                        pressing play, and after pressing play the cost is
+                        already being paid. The band's one spare line also
+                        already has three tenants (genres, track, failure). */}
+                    <span class="rail-radio-station-sub">
+                      <span class="rail-radio-station-genres">{station.genres.join(" · ")}</span>
+                      <span
+                        class="rail-radio-station-format"
+                        data-testid={`rail-radio-station-format-${station.id}`}
+                      >
+                        {formatLabel(station)}
+                      </span>
+                      {/* Derived from the CODEC, never from a list of station
+                          names: a name list is right for exactly the rows
+                          somebody remembered and silently wrong for the next
+                          one added. `isLossless` is total over the codec union
+                          by construction — see its Record in
+                          `lib/radioStations.ts`. */}
+                      <Show when={isLossless(station.codec)}>
+                        <span
+                          class="rail-radio-station-hifi"
+                          data-testid={`rail-radio-station-hifi-${station.id}`}
+                        >
+                          {HI_FI_BADGE}
+                        </span>
+                      </Show>
+                    </span>
                   </span>
                 </button>
               )}

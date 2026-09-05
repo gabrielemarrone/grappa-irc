@@ -79,11 +79,29 @@ let _socket: Socket | null = null;
 // new event kind or field is free and never moves it") is gone with its
 // server-side twin: the wire version now moves on EVERY shape change.
 //
+// 2 → 9. Two reasons and the first alone is sufficient. (1) The number is the
+// CONTRACT version, and the server has been at 9 since the #1280 profile
+// fields landed; 2 had simply stopped tracking it across the intervening
+// bumps, which is why every boot logged `protocol mismatch: this bundle
+// speaks 2, the server speaks 9` — a true statement about a stale constant,
+// not about a real incompatibility. (2) `MIN_SERVER_PROTOCOL_VERSION` had to
+// rise to 9 to stop lying about the credential shape this bundle requires
+// (see its own note), and `MIN_SERVER <= CLIENT` is pinned in
+// `serverProtocol.test.ts` — a bundle requiring more than it speaks would
+// refuse every server that accepts it. The pair moves together or neither
+// moves.
+//
+// Raising THIS one is safe in the direction that can bite: the handshake
+// refuses a client BELOW `Grappa.Protocol.min_version/0`, which is 1, and
+// never one above. `protocol_test.exs` pins that from the other side
+// (`cic_protocol_version() >= Protocol.min_version()`).
+//
 // This is what cic SPEAKS. What it REQUIRES of the server is a separate
 // constant in `serverProtocol.ts` (`MIN_SERVER_PROTOCOL_VERSION`), and the
 // two are deliberately not the same number — a later bundle may speak v5
-// and still cope with a v2 server.
-export const CLIENT_PROTOCOL_VERSION = 2;
+// and still cope with a v2 server. They coincide today; that is a fact about
+// today, not a merge of the two axes.
+export const CLIENT_PROTOCOL_VERSION = 9;
 
 // #193 — force the correct WS scheme from the page origin, absolutely.
 //
@@ -463,11 +481,29 @@ export function joinUser(userName: string, onJoinOk?: (reply: unknown) => void):
   return ch;
 }
 
+// #1769 — the join params a per-channel topic accepts. One key today.
+//
+// `presence: false` asks the server not to push peer join/part/quit for this
+// channel (the server half of #1680's pause). OMITTING the key is the
+// default and means everything — which is the whole compatibility argument
+// for the shape, so this type must never grow a required member.
+//
+// The server reads it ONCE, in `GrappaWeb.GrappaChannel.join/3`. Changing
+// your mind is a re-join, not a push; `subscribe.ts:rejoinChannelWithPresence`
+// is the one caller that does that.
+export interface ChannelJoinParams {
+  presence?: boolean;
+}
+
 export function joinChannel(
   userName: string,
   networkSlug: string,
   channelName: string,
-  onJoinOk?: (reply: unknown) => void,
+  onJoinOk: ((reply: unknown) => void) | undefined,
+  // REQUIRED, not defaulted: a default would let a new call site acquire the
+  // presence decision without naming it, and every existing site passing an
+  // explicit `{}` is what makes "who asks for suppression?" greppable.
+  params: ChannelJoinParams,
 ): Channel {
   // UX-4 bucket A — canonicalise channel-shape segment so cic joins
   // the same Phoenix topic the server broadcasts on. Server-side
@@ -476,7 +512,12 @@ export function joinChannel(
   // fastlane fan-out would skip this socket entirely. Nicks (DM
   // windows) pass through unchanged.
   const topic = `grappa:user:${userName}/network:${networkSlug}/channel:${canonicalChannel(channelName)}`;
-  const ch = getSocket().channel(topic);
+  // Params are passed as an OBJECT rather than a thunk deliberately. phoenix.js
+  // re-evaluates a thunk on every auto-rejoin, which sounds like the safer
+  // choice and is not: it would let a socket-level reconnect silently change
+  // what this Channel asked for, so the object it joined with would stop
+  // describing it. A pause/resume transition re-joins explicitly instead.
+  const ch = getSocket().channel(topic, params);
   // Surface server-side join failures to the console + Phase 5
   // telemetry hook (the `unknown topic` and `forbidden` shapes the
   // server returns from `GrappaChannel.join/3` would otherwise vanish

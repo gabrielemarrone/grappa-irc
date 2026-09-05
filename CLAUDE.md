@@ -40,6 +40,7 @@ Grappa.Application
 ├── Grappa.RateLimit.TokenBucket       (#340 per-(subject, network) send token bucket)
 ├── Grappa.Net.PtrCache                (#252 vhost reverse-DNS (PTR) name cache)
 ├── Task.Supervisor                    (name: Grappa.TaskSupervisor — detached tasks)
+├── Grappa.WindowCounts.Pusher.Coalescer (#1768 one window_counts snapshot per window per window_ms; after TaskSupervisor — flushes into it)
 ├── DynamicSupervisor                  (name: Grappa.SessionSupervisor)
 │   └── Grappa.Session.Server          (one per (user, network), :transient)
 ├── GrappaWeb.Endpoint                 (Phoenix HTTP + WS)
@@ -47,6 +48,7 @@ Grappa.Application
 ├── Grappa.Net.SourceAliasManager      (#543 alias ref-counts; after Endpoint — boot reconcile; before Bootstrap — sessions acquire)
 ├── Grappa.Visitors.Reaper             (60s sweep of expired visitors; after Endpoint)
 ├── Grappa.Uploads.Reaper              (UX-6-B1 upload GC sweep; after Endpoint)
+├── Grappa.Avatars.Reaper              (M3b peer-avatar cache GC sweep; after Endpoint)
 ├── Grappa.Accounts.Reaper             (#223 idle auth-session GC; after Endpoint)
 └── Grappa.Bootstrap                   (reads DB credentials, spawns sessions; LAST)
 ```
@@ -219,7 +221,20 @@ Key invariants — break only with deliberate cause + DESIGN_NOTES entry:
   client MUST ignore verbs/fields it does not recognise
   (unknown-is-never-fatal, BOTH directions — an unknown client verb
   earns a non-fatal error frame and the socket stays open); existing
-  fields are NEVER repurposed or removed. **🔴 But `protocol_version`
+  fields are NEVER repurposed. **🔴 "…or removed" fell on 2026-08-26
+  (vjt's ruling, #1626): removal is no longer NEVER, it is ONLY ON A
+  RULING.** One field has been taken back — `row_count` on the archive
+  entry (protocol v8) — because emitting it forced
+  `Scrollback.list_archive/3` to visit the whole `(subject, network)`
+  partition, and no amount of query work buys the complexity class back
+  while an exact per-group count is in the shape. The bar that case
+  sets, and it is deliberately high: the field must be the thing
+  standing between the server and a property it cannot otherwise have;
+  the break must be MEASURED on the real client (cic's generated
+  `wireSchema` rejects an object missing a required key, so an old
+  bundle throws every archive response away) rather than argued; and it
+  takes a ruling, not a judgement call inside the slice. Everything
+  short of that is still additive-only. **`protocol_version`
   BUMPS ON EVERY WIRE-SHAPE CHANGE, ADDITIVE INCLUDED (vjt's ruling,
   2026-08-21, #1393d — reversing this file's own former "may appear at
   ANY time WITHOUT a version bump").** Two reasons, and the second is
@@ -696,6 +711,33 @@ not the surrounding code.**
   ⚠️ **A deploy preflight must therefore compare migration VERSIONS against
   `schema_migrations`, never count pending files** — a pending count of zero
   is exactly what the silent regime produces.
+- **🔴 A dirty NIF parked on a SQLite write-lock wait blocks every
+  `persistent_term` write and every module load in the VM, for the whole
+  wait (#1715).** The window is `busy_timeout` (`30_000` in every env
+  today) — the 133 s seen in `lock_watch_test` is that file's own
+  `@waiter_budget_ms`, **never** a production number, and quoting it as
+  one is the mistake this line exists to stop. **What blocks:** *every*
+  `persistent_term:put/2` and `erase/1` — **word-sized ones too**, which
+  trigger no global GC of their own but queue behind somebody else's, and
+  the shipped docs do not lead you to expect that; *every* **module's
+  first log line** (`logger_config:allow/2:67` **is** a put); and *every*
+  **module load** — that is, every module **not yet loaded**, since an
+  already-loaded one short-circuits in `code:ensure_loaded/1` and never
+  reaches the code server. ⚠️ **That is not a small set on a warm node:**
+  measured on a booted node, 2464 of 3063 modules are still cold (80 %),
+  265 of `Grappa.*` alone, because the release runs `:interactive` and its
+  `vm.args` sets no `-mode`. **The rule: a module that may log DURING a
+  write-lock wait buys its Logger cache key at boot**
+  (`LockWatch.prime_logger_module_cache/0`, #1731) — the observer whose
+  job is to report the wait is otherwise its own casualty. **Name the
+  observers; never blanket-prime.** Not for cost — blanket priming
+  measures sub-millisecond, five orders below the bug — but for **scope**:
+  the modules that must log under contention are enumerable (they live
+  around the Repo), and 265 primed cold modules is unfalsifiable
+  maintenance that will drift (design-discipline (1) and (5)). The
+  mechanism is measured in the field and **never reproduced on a bench**;
+  its final causal link is **inferred**, not measured. Measurements, the
+  2×2×2 and the three retractions: DESIGN_NOTES 2026-08-24.
 - **Sandbox per test (`async: true`).** Never share sandbox across
   tests. `use Grappa.DataCase, async: true`.
 - **PubSub topic naming: `grappa:` prefix mandatory.** Topics are
@@ -1001,7 +1043,13 @@ is due. Don't just look at todo.md.
   scripts, deploy, runtime data, monitoring).
 - **`docs/TESTING.md`**: how-to-run-tests runbook (every gate, e2e
   triage, gotchas).
-- **`docs/DESIGN_NOTES.md`**: chronological decision log.
+- **`docs/DESIGN_NOTES.md`**: chronological decision log — the CURRENT
+  month plus the undated preamble. Closed months are archived verbatim
+  in **`docs/design_notes/YYYY-MM.md`** (#1537) and indexed from the
+  top of the live file; new entries still append to the tail of
+  `DESIGN_NOTES.md`, never to an archive. A grep for an old ruling
+  needs both paths:
+  `grep -rn '<pattern>' docs/DESIGN_NOTES.md docs/design_notes/`.
 - **`docs/plans/*.md`, `docs/superpowers/plans/*.md`** — EPHEMERAL
   scratch plans. **Gitignored; never commit them.** A plan is working
   memory for ONE feature: write it, execute it, then DELETE it as part

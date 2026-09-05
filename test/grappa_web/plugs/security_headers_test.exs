@@ -22,9 +22,10 @@ defmodule GrappaWeb.Plugs.SecurityHeadersTest do
 
   # The plug's Content-Security-Policy SSOT (was byte-identical to the
   # deleted nginx snippet; #607 widened media-src to https:, #1240 img-src,
-  # #1695 added ONE connect-src host). If the app must change the policy,
-  # change it in ONE place (the plug) and update this pin deliberately.
-  @golden_csp "default-src 'self'; connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com https://litterbox.catbox.moe https://api.somafm.com; script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM=' https://challenges.cloudflare.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline' https://*.hcaptcha.com; img-src 'self' data: https:; font-src 'self'; manifest-src 'self'; media-src 'self' blob: https:; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com https://*.hcaptcha.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+  # #1695 added ONE connect-src host, 1883 added `blob:` to img-src). If the
+  # app must change the policy, change it in ONE place (the plug) and update
+  # this pin deliberately.
+  @golden_csp "default-src 'self'; connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com https://litterbox.catbox.moe https://api.somafm.com https://kohina.brona.dk; script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM=' https://challenges.cloudflare.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline' https://*.hcaptcha.com; img-src 'self' data: blob: https:; font-src 'self'; manifest-src 'self'; media-src 'self' blob: https:; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com https://*.hcaptcha.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 
   defp sent(status) do
     :get
@@ -89,6 +90,85 @@ defmodule GrappaWeb.Plugs.SecurityHeadersTest do
 
       assert leaked == [],
              "only connect-src needed widening; somafm leaked into " <> inspect(leaked)
+    end
+  end
+
+  describe "#1835 — the second metadata host on connect-src" do
+    # Kohina publishes its now-playing fact as an Icecast `status-json.xsl`
+    # (measured 2026-08-27: HTTP 200 `application/json`,
+    # `Access-Control-Allow-Origin: *`). A `fetch` is governed by connect-src,
+    # so without this token the station plays perfectly and its track line stays
+    # empty forever, with nothing but a browser console saying why.
+    test "connect-src admits the icecast status host" do
+      assert MapSet.member?(directives()["connect-src"], "https://kohina.brona.dk"),
+             "connect-src must admit https://kohina.brona.dk — it is the host cic reads " <>
+               "the Kohina now-playing feed from."
+    end
+
+    # The audio for this station comes off the SAME host and needs no entry of
+    # its own: a stream is `media-src https:`, already scheme-wide. Pinned
+    # because the tempting "tidy" move is to add the host to media-src too,
+    # which would narrow nothing and imply the two directives are one axis.
+    test "no directive other than connect-src gained the icecast host" do
+      leaked =
+        for {name, sources} <- directives(),
+            name != "connect-src",
+            source <- sources,
+            String.contains?(source, "kohina"),
+            do: {name, source}
+
+      assert leaked == [],
+             "only connect-src needed the feed host; kohina leaked into " <> inspect(leaked)
+    end
+
+    # 🔴 THE RULE THE WHOLE DIRECTIVE RESTS ON, and the one a second vendor
+    # makes tempting to break. Two hosts is where somebody proposes
+    # `connect-src https:` "so the table can hold anything" — which would turn a
+    # curated station list into a blanket outbound-fetch permission for every
+    # future row, and take with it the #1695 refusals that pin this policy apart
+    # from a wildcard. Adding a THIRD metadata host is fine and is meant to be
+    # visible; collapsing them into a scheme is not.
+    test "connect-src names hosts, never a bare scheme" do
+      schemes =
+        directives()["connect-src"]
+        |> Enum.filter(&(&1 in ["https:", "http:", "*"]))
+        |> Enum.sort()
+
+      assert schemes == [],
+             "connect-src must stay a per-vendor host allowlist; found " <> inspect(schemes)
+
+      # The positive control beside it: the filter above must be capable of
+      # matching, or an inverted predicate would report this green having
+      # compared nothing. `media-src` genuinely carries `https:` (#607).
+      assert Enum.any?(directives()["media-src"], &(&1 == "https:")),
+             "the scheme filter matched nothing anywhere — it cannot be trusted to " <>
+               "have checked connect-src either."
+    end
+  end
+
+  describe "1883 — the picked-file thumbnail on img-src" do
+    # The upload confirm previews the operator's OWN file before anything is
+    # sent, as an `<img>` on a `URL.createObjectURL` blob (ConfirmModal.tsx).
+    # Measured in the e2e stack before the token existed: Chromium refused it
+    # with `violatedDirective: img-src, blockedURI: blob`, so the dialog whose
+    # whole job is showing WHICH photo showed an empty box — and the browser
+    # says so only in a console nobody reads in prod.
+    test "img-src admits blob:" do
+      assert MapSet.member?(directives()["img-src"], "blob:"),
+             "img-src must admit blob: — the picker confirm's thumbnail is an " <>
+               "object URL over the operator's own file, never a fetch."
+    end
+
+    # `blob:` is an ADDITION, not a replacement. The RULE at the top of the
+    # plug's moduledoc is that naming a directive replaces the `default-src`
+    # fallback wholesale, so a "tidy" rewrite that drops one of the other three
+    # tokens while adding this one would pass the test above and silently take
+    # out favicons (`data:`) or the cross-host viewer (`https:`, #1240).
+    test "the other img-src sources survive the addition" do
+      missing = MapSet.difference(MapSet.new(["'self'", "data:", "https:"]), directives()["img-src"])
+
+      assert MapSet.equal?(missing, MapSet.new()),
+             "img-src lost " <> inspect(MapSet.to_list(missing)) <> " — blob: is an addition."
     end
   end
 

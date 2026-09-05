@@ -32,15 +32,115 @@ export const themeCss = readFileSync("src/themes/default.css", "utf8");
  * over five selectors on purpose.
  */
 export function focusRules(): { selectors: string; body: string }[] {
+  return allRules().filter((rule) => rule.selectors.includes(":focus"));
+}
+
+/**
+ * Every rule in the sheet as `{ selectors, body }`, comments stripped.
+ * INNERMOST blocks only, the same way `focusRules` reads them: the `[^{}]`
+ * classes cannot span a brace, so an `@media` prelude is never returned as a
+ * selector and a rule nested inside one still is.
+ *
+ * Selector lists come back WHOLE (`a,\n b`) rather than split, because a
+ * caller asking "is this rule allowed to declare X?" has to reason about the
+ * list — a rule is only as scoped as its LOOSEST selector. Split with
+ * `selectorList` when the per-entry answer is what matters (#1802).
+ */
+export function allRules(): { selectors: string; body: string }[] {
   const stripped = themeCss.replace(/\/\*[\s\S]*?\*\//g, "");
   const out: { selectors: string; body: string }[] = [];
   for (const match of stripped.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const selectors = match[1] ?? "";
-    const body = match[2] ?? "";
-    if (selectors.includes(":focus")) out.push({ selectors: selectors.trim(), body });
+    out.push({ selectors: (match[1] ?? "").trim(), body: match[2] ?? "" });
   }
   return out;
 }
+
+/** The entries of a comma-separated selector list, whitespace-collapsed. */
+export function selectorList(selectors: string): string[] {
+  return selectors
+    .split(",")
+    .map((one) => one.trim().replace(/\s+/g, " "))
+    .filter((one) => one.length > 0);
+}
+
+/**
+ * Split a CSS value on top-level whitespace. `calc(-1 * var(--rail-inset))` is
+ * ONE value with two spaces inside it, so a naive `split(/\s+/)` would read it
+ * as three and take the wrong one as the horizontal component.
+ */
+function splitTopLevel(value: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of value) {
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    if (depth === 0 && /\s/.test(ch)) {
+      if (current !== "") parts.push(current);
+      current = "";
+    } else current += ch;
+  }
+  if (current !== "") parts.push(current);
+  return parts;
+}
+
+/**
+ * The HORIZONTAL components a single declaration contributes, or `[]` when it
+ * contributes none. Shorthands are expanded by arity the way the cascade does
+ * it (1 → all, 2 → `block inline`, 3 → `top inline bottom`, 4 → clockwise), so
+ * a `padding: 0.25rem 1rem` is caught and a `padding-block: 0.25rem` is not.
+ */
+function horizontalComponents(property: string, value: string): string[] {
+  const parts = splitTopLevel(value);
+  const [p0, p1, p2, p3] = parts;
+  if (property === "margin" || property === "padding") {
+    if (parts.length === 1) return p0 === undefined ? [] : [p0];
+    if (parts.length === 2 || parts.length === 3) return p1 === undefined ? [] : [p1];
+    if (parts.length === 4) {
+      return p1 !== undefined && p3 !== undefined ? [p1, p3] : [];
+    }
+    return [];
+  }
+  if (property === "margin-inline" || property === "padding-inline") {
+    return parts;
+  }
+  if (/^(margin|padding)-(left|right|inline-start|inline-end)$/.test(property)) {
+    return parts.length === 0 ? [] : [parts.join(" ")];
+  }
+  // `-block`, `-top`, `-bottom`, and everything that is not a box inset.
+  void p2;
+  return [];
+}
+
+/**
+ * Every horizontal margin/padding component a rule body declares.
+ *
+ * Lifted out of `railInset.test.ts` when #1828 needed the same reader for the
+ * radio band (CLAUDE.md "implement once, reuse everywhere"): both gates ask
+ * "which boxes in this region inset themselves horizontally, and how?", and a
+ * second copy of the shorthand-arity expansion is a second place to get
+ * `padding: 0.4rem 0` wrong.
+ */
+export function horizontalInsets(body: string): { property: string; component: string }[] {
+  const out: { property: string; component: string }[] = [];
+  for (const raw of body.split(";")) {
+    const colon = raw.indexOf(":");
+    if (colon === -1) continue;
+    const property = raw.slice(0, colon).trim();
+    const value = raw.slice(colon + 1).trim();
+    for (const component of horizontalComponents(property, value)) {
+      out.push({ property, component });
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether an inset component is a RESET rather than a declared gap — killing
+ * the user-agent list indent, resetting a button. Anything else is a box
+ * deciding its own horizontal position.
+ */
+export const isZeroInset = (component: string): boolean => /^0(px|rem|em|%)?$/.test(component);
 
 /**
  * Every body of a rule whose selector is EXACTLY `selector`, at any nesting
@@ -64,19 +164,34 @@ export function nestedRuleBodies(selector: string): string[] {
 }
 
 /**
- * The body of every `@media (hover: hover)` block, brace-MATCHED rather than
- * regex-captured: such a block contains whole rules, and the `[^{}]` classes
- * the helpers above rely on cannot span a nested brace. Comments stripped,
- * same as the rest of this module, so prose naming a selector can neither
- * satisfy nor trip an assertion about it.
+ * The body of every `@media` block whose prelude `opener` matches,
+ * brace-MATCHED rather than regex-captured: such a block contains whole rules,
+ * and the `[^{}]` classes the helpers above rely on cannot span a nested brace.
+ * Comments stripped, same as the rest of this module, so prose naming a
+ * selector can neither satisfy nor trip an assertion about it.
+ *
+ * `opener` must carry the `g` flag — the scan advances `lastIndex` past each
+ * matched block to find the next one. ENFORCED rather than documented: without
+ * `g`, `exec` ignores `lastIndex` and restarts at 0, so `match` is never null
+ * and the loop below never ends. A shared test helper must not answer a
+ * misuse with a hang — a thrown error names the caller, a hang names nothing.
  *
  * Throws when the sheet carries no such gate at all, for the same reason
  * `ruleBody` throws on an absent rule: a test asking "is this rule gated?"
- * must not pass because the GATE vanished.
+ * must not pass because the GATE vanished. `label` is what that error names.
+ *
+ * Generalised out of `hoverGatedBlocks` when #1869 needed the identical scan
+ * for `(pointer: coarse)` (CLAUDE.md "implement once, reuse everywhere") — a
+ * second copy of the depth counter is a second place to get an unbalanced
+ * sheet wrong.
  */
-export function hoverGatedBlocks(): string[] {
+export function mediaGatedBlocks(opener: RegExp, label: string): string[] {
+  if (!opener.global) {
+    throw new Error(
+      `mediaGatedBlocks(${label}): opener must carry the g flag or the scan never terminates`,
+    );
+  }
   const stripped = themeCss.replace(/\/\*[\s\S]*?\*\//g, "");
-  const opener = /@media\s*\(\s*hover\s*:\s*hover\s*\)\s*\{/g;
   const out: string[] = [];
   let match = opener.exec(stripped);
   while (match !== null) {
@@ -89,13 +204,29 @@ export function hoverGatedBlocks(): string[] {
       else if (ch === "}") depth -= 1;
       i += 1;
     }
-    if (depth !== 0) throw new Error("unbalanced @media (hover: hover) block in default.css");
+    if (depth !== 0) throw new Error(`unbalanced ${label} block in default.css`);
     out.push(stripped.slice(start, i - 1));
     opener.lastIndex = i;
     match = opener.exec(stripped);
   }
-  if (out.length === 0) throw new Error("no @media (hover: hover) gate found in default.css");
+  if (out.length === 0) throw new Error(`no ${label} gate found in default.css`);
   return out;
+}
+
+/** The body of every `@media (hover: hover)` block. See `mediaGatedBlocks`. */
+export function hoverGatedBlocks(): string[] {
+  return mediaGatedBlocks(/@media\s*\(\s*hover\s*:\s*hover\s*\)\s*\{/g, "@media (hover: hover)");
+}
+
+/**
+ * The body of every `@media (pointer: coarse)` block — where #1869 put the
+ * touch selection/callout policy. See `mediaGatedBlocks`.
+ */
+export function coarsePointerBlocks(): string[] {
+  return mediaGatedBlocks(
+    /@media\s*\(\s*pointer\s*:\s*coarse\s*\)\s*\{/g,
+    "@media (pointer: coarse)",
+  );
 }
 
 export function ruleBody(selector: string): string {

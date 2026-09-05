@@ -1,5 +1,6 @@
 import { createEffect, untrack } from "solid-js";
 import { dropUpload } from "./dropUpload";
+import { casemappingForNetwork } from "./isupport";
 import { loadLastFocused } from "./lastFocusedChannel";
 import { moduleRoot } from "./moduleRoot";
 import { channelsBySlug, networkBySlug, user } from "./networks";
@@ -161,7 +162,13 @@ async function consumeShare(userId: string): Promise<void> {
     console.warn("[shareTarget] share not delivered:", plan.reason);
     recordShareTargetBlock(plan.reason);
   } else {
-    dropUpload(plan.files, plan.destination.networkSlug, plan.destination.channelName);
+    // #1883 — the share is the ONE upload door with no gesture left on screen,
+    // so a confirm displaced before the operator answers it loses the files
+    // silently. Report it as a block like any other undelivered share; the
+    // banner is the only thing that can tell them to share again.
+    dropUpload(plan.files, plan.destination.networkSlug, plan.destination.channelName, () =>
+      recordShareTargetBlock("confirm-displaced"),
+    );
   }
   // Drop the flag either way: a reload must not re-run a share whose files
   // have already been consumed.
@@ -177,7 +184,9 @@ function liveSources(userId: string): ShareDestinationSources {
     queryExists: (slug, nick) => {
       const net = networkBySlug(slug);
       if (net === undefined) return false;
-      return (queryWindowsByNetwork()[net.id] ?? []).some((q) => nickEquals(q.targetNick, nick));
+      return (queryWindowsByNetwork()[net.id] ?? []).some((q) =>
+        nickEquals(q.targetNick, nick, casemappingForNetwork(net.id)),
+      );
     },
   };
 }

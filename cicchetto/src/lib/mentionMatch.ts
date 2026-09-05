@@ -22,19 +22,68 @@
 // RFC 2812 nick chars include `[`, `]`, `\` etc.; the regex metacharacter
 // escape covers the cases that would otherwise blow up the RegExp constructor.
 
+import { mircPlainText } from "./mircFormat";
 import { isServerSender, isServicesSender } from "./servicesSender";
+
+// #1786 — the anchor is conditional on the term's OWN edge, and that is a fix
+// rather than a loosening.
+//
+// `\b` is a TRANSITION between a word char and a non-word one, so it is only
+// satisfiable on a side where the term's edge character IS a word char. Wrapped
+// unconditionally, a term like `QUACK!` demanded a word character immediately
+// after the `!` — end-of-line and a space both fail it, so the term could never
+// match anything. Found in prod as a whole watchlist of trailing-`!` terms the
+// settings pane listed as active while they silently matched nothing.
+//
+// The lookarounds say what `\b` was always meant to say on those edges: "not
+// glued to a word". They are NOT the same as dropping the anchor — `!list` must
+// still refuse `foo!list` — which is the pair of cases the test file calls
+// discriminating.
+//
+// The probe is a regex over the RAW term rather than a character-class literal
+// so that it consults the SAME `\w` the anchor will: one definition, no second
+// spelling to drift from it. Mirror of `Grappa.Mentions.build_matchers/1`; a
+// change here lands in both ports together, per this module's header.
+const termAnchors = (term: string): { readonly prefix: string; readonly suffix: string } => ({
+  prefix: /^\w/.test(term) ? "\\b" : "(?<!\\w)",
+  suffix: /\w$/.test(term) ? "\\b" : "(?!\\w)",
+});
 
 const matchesTerm = (body: string | null, term: string | null): boolean => {
   if (!body || !term) return false;
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\b${escaped}\\b`, "i").test(body);
+  const { prefix, suffix } = termAnchors(term);
+  return new RegExp(`${prefix}${escaped}${suffix}`, "i").test(body);
 };
 
+// issue 1908 — the predicate reads the RENDERED text, because that is the text
+// the operator read when they typed the keyword into the settings pane.
+//
+// The failure the projection closes is narrower than "control bytes in the
+// body", and the narrow reading is the load-bearing one. `\x02` `\x0f` `\x16`
+// `\x1d` `\x1f` carry no arguments and are not word characters, so `\b` keeps
+// its transition on both sides of a term and a bold-only sender always matched
+// fine (measured on `rex`: 139 bold lines, zero misses). The COLOUR byte is
+// different — it drags up to four numeric arguments into the text, and digits
+// ARE word characters, so `\x0315QUACK!` reads to the regex as `...15QUACK!`
+// and the term's left anchor has no transition left to sit on. A stripper that
+// removed the control bytes alone would leave this bug fully intact.
+//
+// `mircPlainText` is that projection and it consumes the arguments (measured,
+// not assumed): it runs the SAME `parseMircFormat` the renderer uses, so there
+// is no second stripper to drift from the one that decides what is on screen.
+//
+// Stripped ONCE per call rather than inside `matchesTerm`, which runs per term.
+// Mirror of `Grappa.Mentions`' projection at `body_matches?/2`; the two ports
+// change together or the visual highlight and the OS push disagree again.
 export const matchesWatchlist = (
   body: string | null,
   ownNick: string | null,
   patterns: string[],
-): boolean => [ownNick, ...patterns].some((term) => matchesTerm(body, term));
+): boolean => {
+  const text = body === null ? null : mircPlainText(body);
+  return [ownNick, ...patterns].some((term) => matchesTerm(text, term));
+};
 
 // #1674 — the SENDER half of the mention rule. Mirror of
 // `Grappa.Mentions.mentionable_sender?/1`: being told something by a robot

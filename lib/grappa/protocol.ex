@@ -27,8 +27,18 @@ defmodule Grappa.Protocol do
   time — a client MUST ignore verbs and fields it does not recognise
   (unknown-is-never-fatal, in BOTH directions: an unknown client verb earns
   a non-fatal error frame and the socket stays open), and existing fields
-  are NEVER repurposed or removed. That half of #447 is unchanged and is
-  what keeps an OLD client working against a NEW server.
+  are NEVER repurposed. That half of #447 is what keeps an OLD client
+  working against a NEW server.
+
+  **Removal is no longer "never", it is "only on a ruling" (v8, #1626).**
+  One field has been taken back: `row_count` on the archive entry, because
+  emitting it forced the listing to visit the whole partition and no
+  amount of query work could buy the complexity class back while it
+  stayed. The bar that removal has to clear, set by that case: the field
+  must be the thing standing between the server and a property it cannot
+  otherwise have, the break has to be measured on the real client rather
+  than argued, and it takes a ruling — not a judgement call inside the
+  slice. Everything short of that is still additive-only.
 
   What changed on 2026-08-21 is the other half. This moduledoc used to say
   such a change lands *"WITHOUT a version bump"*, and it was true right up
@@ -107,10 +117,146 @@ defmodule Grappa.Protocol do
   # with protocol 3 at rc=0 beforehand, because the digested set is a glob
   # over `lib/grappa/**` plus a hand-kept list of web-layer envelopes.
   #
-  # @min_protocol_version is NOT the same axis and stays at 1: it rises only
-  # when old clients can no longer be SERVED, and every client that spoke v1
-  # is still served — v1 clients tolerate what v5 clients require.
-  @protocol_version 5
+  # v6 (#1766) adds `show_bottom_bar` to the `display_prefs` object on
+  # `GET/PUT /me/settings/display-prefs` — the mobile window bar's per-user
+  # off switch. Additive, and it bumps for the #1393d reason: a client that
+  # comes to REQUIRE the key cannot be served by a server predating it, and
+  # nothing server-side would express that break without this number moving.
+  #
+  # ⚠️ `mix grappa.wire_pin --check` did NOT force this one and could not, so
+  # do not read a green pin as "no bump needed". The digest spans the codegen
+  # artefacts, whose sources are `lib/grappa/**/*wire.ex` plus a hand-kept
+  # `@extra_modules` list of web-layer envelopes, and
+  # `GrappaWeb.UserSettingsJSON` is not on it. That is the SAME silence #1679
+  # hit with `BootJSON` — recorded there as a gap in the detector, not as a
+  # boundary of the rule, and still open for every hand-written `*_json.ex`.
+  # Widening the digest is a COVERAGE change, which the pin deliberately
+  # cannot tell from a shape change (its moduledoc: delete and re-create, no
+  # `--force`), so it is not smuggled in alongside a product change.
+  #
+  # v7 (#1769) adds an INBOUND shape rather than an outbound one: the
+  # per-channel topic now reads a join param, `%{"presence" => false}`, and a
+  # socket that sends it stops being pushed peer join/part/quit. Additive in
+  # both directions — only the literal `false` suppresses, so a client that
+  # joins the way it joins today receives what it receives today — and it
+  # bumps for the #1393d reason all the same: the break it expresses runs
+  # new-client → old-server. A cic that has come to rely on the pause will
+  # ask an old server for it, be silently served the full flood, and have no
+  # way to know except this number.
+  #
+  # ⚠️ `mix grappa.wire_pin --check` was SILENT here too — measured, with the
+  # channel change already applied it answered `wire shape and protocol 6
+  # agree.` It could not have done otherwise: the digest spans the codegen
+  # artefacts, and a join param read in `GrappaWeb.GrappaChannel.join/3` is
+  # in no `*wire.ex` and on no `@extra_modules` list. Third recorded instance
+  # of the same detector gap (#1679 `BootJSON`, #1766 `UserSettingsJSON`,
+  # this one a channel callback), and the first where the un-covered surface
+  # is INBOUND — which no widening of the outbound codegen digest would ever
+  # reach. Filed as #1787. The bump here is the RULE, not the gate.
+  #
+  # v8 (#1626) is the FIRST version that takes a field BACK:
+  # `row_count` is gone from `Grappa.Scrollback.Wire.archive_wire_entry`.
+  # Every bump before this one was additive, and the moduledoc's promise
+  # that "existing fields are NEVER repurposed or removed" is what makes
+  # this one different in kind rather than in degree. It is taken on a
+  # ruling (vjt, 2026-08-26) with the price named up front: an exact
+  # per-group count has to VISIT the group's rows, so while the field was
+  # emitted the archive listing stayed bound to the size of the account
+  # rather than to its number of targets. Keeping it meant keeping a
+  # complexity class; the field is what was paid.
+  #
+  # @min_protocol_version STILL stays at 1, and here that is an argument
+  # rather than the usual "additive strands nobody". Three measurements,
+  # in the order that decides it:
+  #
+  #   1. The break is REAL and runs old-client → new-server, which is
+  #      exactly this floor's axis: cic's generated schema declares
+  #      `row_count` REQUIRED (`wireSchema.ts`), and `wireValidate`'s
+  #      `walkObject` REJECTs an object missing a required key. An old
+  #      bundle therefore throws away every archive response a v8 server
+  #      sends. Measured, not inferred — `api.test.ts` carries a case
+  #      named "listArchive rejects an entry missing `row_count`".
+  #   2. Its blast radius is ONE listing, and it is contained: cic's
+  #      `loadArchive` catches and leaves the previously rendered entries
+  #      in place, and the renderer reads an absent slug key as "not
+  #      loaded yet". Nothing else in the client degrades, the socket is
+  #      untouched, no other endpoint changes shape.
+  #   3. This floor is not endpoint-scoped. Raising it to 8 refuses the
+  #      WHOLE SOCKET with 426 to every client declaring 1..7, including
+  #      the ones that never call `/archive` at all — converting a quiet
+  #      one-modal failure into a total refusal for clients the change
+  #      does not touch. Matching a session-wide gate to an
+  #      endpoint-scoped break is a category error, and it is the reason
+  #      this stays put.
+  #
+  # So: "can no longer be SERVED" is read as the client, not as one of its
+  # calls. A v1..v7 client is still served; one of its listings is not.
+  # The honest signal for that is `version/0` moving, which a client can
+  # see in `GET /api/config` and in the user-topic join reply, and which
+  # cic already compares against its own floor.
+  #
+  # The mirror obligation on the cic side does NOT fire either, and that
+  # was measured too: cic's `MIN_SERVER_PROTOCOL_VERSION` rises when the
+  # bundle starts REQUIRING a newer field, and this change makes it
+  # require one FEWER. A v8 bundle still talks to a v7 server, because
+  # `walkObject` drops undeclared keys rather than rejecting them
+  # (additive-only, #447) — so the `row_count` an old server still sends
+  # is simply ignored. It stays at 2.
+  # v9 (#1865) is additive again, and on three surfaces at once: the
+  # per-network profile (`age`, `gender`, `location`, `languages`,
+  # `custom`) plus `avatar_url` join `Grappa.Networks.Wire`'s credential
+  # and network-with-nick payloads, `avatar_url` joins the WHOIS bundle,
+  # and `whois_avatar_ready` is a NEW event arm on the user topic —
+  # emitted once the peer's avatar has been fetched server-side, which is
+  # inherently later than the bundle that named it.
+  #
+  # The bump is the rule, not the gate (see the #1782 paragraph above):
+  # additivity describes what the server EMITS, and a floor that moves
+  # only when something breaks is a floor that lies about what a client
+  # is talking to. `mix grappa.wire_pin --check` is what makes it
+  # non-optional.
+  #
+  # @min_protocol_version stays at 1 and this one is the ordinary case,
+  # not the argued one: every field here is new, none is repurposed or
+  # taken back, and cic's `walkObject` DROPS undeclared keys rather than
+  # rejecting them — so a v1..v8 bundle pointed at a v9 server ignores
+  # the profile fields and the new event arm and is otherwise untouched.
+  # The mirror obligation on the cic side does not fire either:
+  # `MIN_SERVER_PROTOCOL_VERSION` rises when the bundle starts REQUIRING
+  # a newer field, and cic renders the profile only when present. It
+  # stays at 2.
+  # v10 (#1044) — the server `PASS` gets its own credential slot, and with
+  # it a write door: `GET`/`PUT /networks/:network_id/server_pass`, carrying
+  # `server_pass_set` and never the secret.
+  #
+  # ⚠️ `mix grappa.wire_pin` did NOT demand this bump, and that is exactly
+  # why it is written down. The digest spans the GENERATED artefacts, which
+  # come from `Grappa.*.Wire` typespecs; a REST endpoint whose shape lives in
+  # a controller is invisible to it. So the gate stays green either way and
+  # the number moves on the RULE, not on the tooling: reason (1) applies
+  # literally here — a cic bundle that grows a gate-secret editor REQUIRES
+  # this route and gets a 404 from any server predating it, which is the
+  # new-client-to-old-server direction the number exists to express.
+  #
+  # @min_protocol_version stays at 1: the route is purely additive and no
+  # existing client asks for it, so every v1..v9 bundle is served unchanged.
+  # v11 (#1883) — the pre-upload confirm becomes a per-user setting, and with
+  # it a read/write door: `GET`/`PUT /me/settings/upload-confirm-enabled`,
+  # carrying `upload_confirm_enabled`.
+  #
+  # ⚠️ Same shape as v10 above, and the gate is green either way for the same
+  # reason: the digest spans the GENERATED artefacts, and a settings endpoint
+  # whose shape lives in a controller is invisible to it (`mix
+  # grappa.wire_pin --check` said "wire shape and protocol 10 agree" with this
+  # route already in the router). The number moves on the RULE: reason (1)
+  # applies literally — a cic bundle that renders the opt-in CALLS this route
+  # at boot and gets a 404 from any server predating it, which is the
+  # new-client-to-old-server direction the number exists to express.
+  #
+  # @min_protocol_version stays at 1: purely additive, and the client treats a
+  # failed read as the server's own default (`false`), so every v1..v10 bundle
+  # is served unchanged.
+  @protocol_version 11
   @min_protocol_version 1
 
   @doc "The protocol version the server currently speaks."
@@ -121,7 +267,7 @@ defmodule Grappa.Protocol do
   # alongside `@protocol_version`; the spec doubles as the bump tripwire,
   # and now that the bump is routine the tripwire is what keeps it from
   # being done half-way.
-  @spec version() :: 5
+  @spec version() :: 11
   def version, do: @protocol_version
 
   @doc """

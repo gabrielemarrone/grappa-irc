@@ -151,6 +151,82 @@ composition that creates the network + server when needed and REFUSES to
 write access to a network with no enabled server, because a credential
 alone is not a connectable account.
 
+#### What `add-network` says, and why it says two different things (#1685)
+
+The verb runs in a transient `eval` node, so a session it started would
+die with the command. Against a RUNNING deployment it therefore crosses
+to the live node over Erlang distribution and asks it to start the
+session (`Grappa.Release.LiveNode`); against a box that is not running
+yet — the first-run case this door exists for — there is nothing to
+cross to. Both outcomes are printed, because they are not the same
+thing:
+
+```
+vjt can now use azzurra (server irc.azzurra.chat:6697)
+  started a session on the live node — nothing else to do
+```
+
+```
+vjt can now use azzurra (server irc.azzurra.chat:6697)
+  the binding is PARKED: nothing is listening on epmd, so no bouncer is running here.
+  A restart will NOT dial it — vjt connects it with Connect after logging in.
+```
+
+🔴 **The restart caveat is literal.** The row is written `:parked` (like
+the other two bind doors — #642, #1163 — and never the schema default
+`:connected`, which claimed a session no `eval` node could have
+started). `:parked` means explicit user intent and is deliberately NOT in
+the boot adoption query (`connection_state in [:connected, :failing]`),
+so `systemctl start grappa` will not dial it: the user presses Connect at
+first login. Widening that query was considered and rejected — it would
+resurrect every network a user had deliberately `/disconnect`ed.
+
+**Exit status is 0 in both cases**, and in the third one too (the live
+node answered and refused the spawn — capacity, no enabled server). The
+binding is the operator's input and is kept either way, so
+`create-user && add-network && systemctl start grappa` does not break on
+the case that has no live node by definition. Read the second line, not
+the exit code.
+
+Requirements for the live hop, all already satisfied by every substrate's
+own setup: `RELEASE_COOKIE` and `RELEASE_NODE` in the verb's environment
+(the Docker image's entrypoint re-exports them from `/data/grappa.env`
+for `docker exec` — #1683; the jail, systemd and `.deb` doors source
+their env file) and `RELEASE_DISTRIBUTION` not set to `none`. A cookie
+mismatch is indistinguishable from a stopped node at the CLI end and
+prints as "did not answer".
+
+**How the hop is gated (#1714).** Three arms at the tail of
+`release.yml`'s `deb` job, on the installed `.deb`: no epmd at all (the
+first-run box), epmd up with no node answering, and the live hop against
+a started service. Each asserts the operator-facing line AND the row —
+never the exit status, which is 0 by design (above). The two remaining
+transport outcomes, `:no_release_node` and `:distribution_disabled`, are
+refusals taken before any I/O on one environment variable and stay in
+`test/grappa/release/live_node_test.exs`: the substrate cannot make them
+any truer.
+
+**Running them without cutting a tag.** `release.yml` fires on a `v*`
+tag, so left alone these arms would first execute during a release — and
+they sit AHEAD of the uploads, so a broken one blocks that release. The
+`deb_validation` dispatch is the door out of that: a zero-publication dry
+run of the deb job itself, from a branch.
+
+```
+gh workflow run release.yml --ref <branch> -f deb_validation=true
+```
+
+No tag is involved (`RELEASE_TAG` resolves to the dispatched ref and the
+two tag-comparing steps opt out) and `arch` / `rpm` / `docker` / `smoke` /
+`publish` all skip. The `publish` exclusion is the load-bearing one: `deb`
+DOES run and DOES upload its artifact there, so without it a branch-built
+package would be attached to a real release. Sibling of the older
+`docker_validation`, same posture.
+
+**One limit stands.** GitHub offers no FreeBSD runner — every `runs-on:`
+in this repo is `ubuntu-latest` — so the bastille jail stays covered by
+the manual probe alone.
+
 ### Per-server outbound source address (`--source`)
 
 `bind-network` and `add-server` accept `--source <ip>` to pin the
@@ -346,6 +422,10 @@ ever recurs: offline-init from the main checkout's already-cloned objects
 — `git -c protocol.file.allow=always -c
 submodule."cicchetto/e2e/infra".url=<main-checkout>/.git/modules/cicchetto/e2e/infra
 submodule update --init cicchetto/e2e/infra`.
+This is ONE item of the fresh-worktree bootstrap; the ordered list —
+submodules, the two per-worktree `node_modules` trees, the `bun.sh`
+self-heal, and the `cp -Rc` clone with the lock check that makes it safe
+— is `docs/TESTING.md` → "Bootstrapping a fresh worktree" (#1820).
 
 **…and the removal side of it: `git worktree remove` needs `--force`
 once a submodule has EVER been initialised in that worktree.** The
@@ -1808,6 +1888,20 @@ D** — see **Running the published image** below.
 - **Version.** The image reports the BARE `X.Y.Z` (no `.git` in the build
   context → the `#391` no-git path, like the AUR tarball). `docker inspect`
   shows the image tag; the RUNNING app is the version source of truth.
+- **Credits (#1834) — the one fact that does NOT follow the no-git path.**
+  The credits easter egg wants three git facts (`#1773`), and the build
+  context cannot have them for the same reason the version goes bare. But
+  unlike the version, they cannot be recovered from a file in the tree, and
+  unlike the AUR tarball, the machine driving THIS build does have the
+  history. So `release.yml` runs `infra/packaging/credits.sh` on the runner
+  and passes the payload as `--build-arg GRAPPA_CREDITS`; the `cic` stage
+  declares the matching `ARG` and prefers it over its own in-context call.
+  **The in-context call stays the default**, so a plain `docker build` still
+  bakes the honest `{"sha":null,"date":null,"contributors":[]}` rather than
+  failing — see the Local build line below, and § "Deriving the credit roll"
+  under Packaging. The published image is asserted non-degraded by the smoke
+  job; the derive step also refuses to publish if the payload comes back
+  degraded on a full checkout.
 - **VALIDATE BEFORE A REAL TAG — the zero-publication dry-run.** A tag push is
   the only thing that publishes, so a broken `docker` job is discovered with the
   tag already cut and `:latest` possibly moved. Validate the job (the SAME one
@@ -1838,8 +1932,9 @@ D** — see **Running the published image** below.
   `smoke`, `needs: [docker]` and brings a real box up from the image through the
   same `infra/docker/get.sh` → `deploy.sh` path an operator runs, then asks it
   questions over HTTP: `GET /` serves a shell whose chunk actually loads as
-  JavaScript, `GET /api/config` reports this version, and a restart does not
-  rotate the generated `/data/grappa.env`. On a tag it pulls the PUBLISHED
+  JavaScript, `GET /api/config` reports this version, a restart does not
+  rotate the generated `/data/grappa.env`, and (#1834) the bundle it ships
+  carries a POPULATED credit roll rather than the degraded nulls. On a tag it pulls the PUBLISHED
   `:v<version>` — the ref operators resolve; on a dry-run it probes the amd64
   image re-exported from the build cache. amd64 only (the arm64 leg is proven by
   the build). **An unobtainable image fails the job; it never skips.** The driver
@@ -1847,10 +1942,18 @@ D** — see **Running the published image** below.
   evidence and the explicit non-coverage list are in
   `docs/TESTING.md` § "The release-image smoke".
 - **Local build** (validate the Dockerfile without CI):
-  `docker buildx build -f Dockerfile.release --load -t grappa-release:test .`
+
+  ```sh
+  docker buildx build -f Dockerfile.release --load -t grappa-release:test \
+      --build-arg GRAPPA_CREDITS="$(infra/packaging/credits.sh)" .
+  ```
+
   builds the native arch; add `--platform linux/amd64,linux/arm64` for the
   multi-arch manifest (needs `docker run --privileged --rm tonistiigi/binfmt
-  --install all` first for a recent QEMU).
+  --install all` first for a recent QEMU). **The `--build-arg` is what makes
+  this the image CI builds** (#1834) — drop it and the build still succeeds,
+  with the degraded credit roll, which is correct for a source build and is
+  what the smoke script's probe 5 will (rightly) fail on.
 
 ### Running the published image (`docker run` / `curl | bash`) — #503 unit D
 
@@ -4316,6 +4419,53 @@ Consequences to know when touching the Arch recipes:
 the ordering above is the reason to think twice before doing it: pacman
 has no `epoch`-free way back if the mapping ever changes.
 
+### Deriving the credit roll — `credits.sh` (#1773, #1834)
+
+`infra/packaging/credits.sh` is `version.sh`'s sibling and is shaped like
+it on purpose: the cic build runs in containers that mount only
+`./cicchetto`, so the repo root — and therefore git — is out of reach in
+there. It echoes ONE line of JSON with the three facts the credits easter
+egg needs and a browser cannot have:
+
+    {"sha":"a1d57bd3","date":"2026-08-27T12:22:32+02:00",
+     "contributors":[{"name":"…","commits":5193},…]}
+
+Every cic-build entrypoint that exports `GRAPPA_VERSION` exports
+`GRAPPA_CREDITS` beside it, from this script, and `cicchetto/vite.config.ts`
+parses it (the parse IS the validation) and bakes it as the
+`__GRAPPA_CREDITS_JSON__` define. POSIX `/bin/sh`, always EXECUTED, for the
+same FreeBSD-jail reason `version.sh` is.
+
+**It NEVER fails.** Two launchers that must call it have no `.git` BY
+CONSTRUCTION — `aur/PKGBUILD` builds from the tag's source tarball, and
+`Dockerfile.release` `.dockerignore`s `.git` — and both are RELEASE builds,
+so a hard error would break precisely the two paths that ship. It reports
+the absence instead: `sha:null`, `date:null`, `contributors:[]`, the same
+posture `Grappa.Version.verify_build_sha/2` takes with `{:skip, :no_git}`.
+The loud half stays in vite, which refuses an **unset** `GRAPPA_CREDITS` —
+that means a wrapper forgot to plumb it, which is a different failure from
+a build that legitimately has no history, and the two must not collapse.
+
+**The release image is the one substrate that takes the payload from
+OUTSIDE (#1834).** Its context cannot have the history, but the runner
+driving the build does, so `release.yml` derives the payload there and
+passes it as `--build-arg GRAPPA_CREDITS`; the `cic` stage declares the
+`ARG` and spells its own call as the fallback,
+`${GRAPPA_CREDITS:-$(sh infra/packaging/credits.sh)}`, so a plain
+`docker build` from a source checkout is unchanged — measured, as a
+byte-identical dist tree. The AUR tarball case is NOT changed and cannot
+be: there is no build host with history there, and nulls stay the honest
+answer. Pinned by `test/infra/release_image_credits_test.bats` (the recipe,
+every PR) and by probe 5 of `scripts/smoke-release-image.sh` (the shipped
+artifact, in the `smoke` job).
+
+⚠️ `test/infra/cic_version_export_test.bats` guards the derive+export pair
+for `GRAPPA_VERSION` only. Its roster is the same set of launchers and all
+eleven plumb `GRAPPA_CREDITS` today (measured by grep — nine `export` it
+directly, `infra/linux/cic_build.sh` exports it inside the `su` it runs and
+`Dockerfile.release` inside its `RUN`), but nothing fails if one stops: the
+drift guard was never generalised to the second variable.
+
 ### `build.sh` — one throwaway build tree, one format at a time
 
 **It deliberately does NOT drive the dev compose stack (`scripts/*.sh`).**
@@ -4724,9 +4874,18 @@ the same reason the `.deb` does.
 - **No `--warnings-as-errors` in `build()`.** The recipe compiles on the
   user's own Arch toolchain, which can be newer than the dev pin; a distro
   rebuild must not hard-fail on a newer compiler's warnings.
-- **The committed `pkgver=@GRAPPA_VERSION@` sentinel is deliberate.**
-  `makepkg`'s pkgver lint REFUSES `@`, so an UNDERIVED build fails LOUDLY
-  instead of silently shipping `grappa-@GRAPPA_VERSION@`. `regen.sh` is
+- **The committed `pkgver=@GRAPPA_VERSION@` sentinel is deliberate — and
+  NOTHING IS KNOWN TO CATCH IT (#1592).** This entry used to say `makepkg`'s
+  pkgver lint bars `@`, so an underived build failed loudly instead of
+  silently shipping `grappa-@GRAPPA_VERSION@`. It does not: `check_pkgver`
+  rejects only `*[[:space:]/:-]*` and `*[![:ascii:]]*` (the first is
+  transcribed from makepkg's source, with its measurement, in
+  `aur/pkgver.sh`'s header), and `@` is ASCII and in neither — rc=0 through
+  both `makepkg -sf` and `--printsrcinfo`, against rc=12 for `1.3.0-rc1`.
+  Which stage WOULD stop an underived build is unmeasured; the
+  `v@GRAPPA_VERSION@.tar.gz` fetch is a candidate, not a finding. So running
+  `regen.sh` is mandatory PROCEDURE, not something a tool reminds you of.
+  `regen.sh` is
   the ONE path that fills it (from `version.sh`), refreshes the checksums
   with `updpkgsums` and regenerates `.SRCINFO`. Run it from a checkout ON
   the release tag — `updpkgsums` fetches the `vX.Y.Z` tarball, so the tag
@@ -5093,8 +5252,8 @@ The handler folds **three** signal families:
   against the baseline.
 - **the D1 write-path spans** into `send_privmsg` / `persist` / `contention`
   rows.
-- **`[:grappa, :repo, :lock_stall, :detected | :resolved]`** (#1420) into the
-  bounded `lock stalls` ring — the WRITE-LOCK HOLDER.
+- **`[:grappa, :repo, :lock_stall, :detected | :resolved | :unattributed]`**
+  (#1420, #1687) into the bounded `lock stalls` ring — the WRITE-LOCK HOLDER.
 
 ### Reading a write-lock stall (#1420)
 
@@ -5105,11 +5264,17 @@ its victims — the 30.1 s `busy_timeout` rows of everybody queued behind it.
 `Grappa.Repo.LockWatch` reads at the `BEGIN IMMEDIATE` seam instead, which
 separates the **holder** from the **waiters**.
 
-A stall is reported only when a holder has held past
+A **named** stall is reported only when a holder has held past
 `:lock_watch, :stall_threshold_ms` **with at least one waiter queued behind
-it** — a slow uncontended write is not a stall. Each episode appears twice: a
-`detected` row carrying the holder's sampled **stacktrace** plus the queue, and
-a `resolved` row carrying the total hold.
+it** — a slow uncontended write is not a stall. It appears twice: a `detected`
+row carrying the holder's sampled **stacktrace** plus the queue, and a
+`resolved` row carrying the total hold.
+
+An **`unattributed`** row (#1687) is a queue past the threshold that named
+nobody — every autocommit single-statement write takes the same file lock and
+registers no holder here. It carries the WAITERS' stacks and explicit nils
+where a holder would be, and gets no `resolved` bracket: there is no hold to
+total.
 
 Two doors, and for an incident they answer different questions:
 
@@ -5119,16 +5284,117 @@ Two doors, and for an incident they answer different questions:
 - **`bin/grappa db-latency` / `GET /admin/db_latency`** — the last 20 episodes,
   newest first, for a node you can still reach.
 
+**🔴 Read the `announced` column first (#1888).** A `resolved` row with
+`announced=NO` means the watchdog never got to report that episode WHILE it
+held — so this row is the ONLY record of it anywhere, and there is no
+`detected` line above it to scroll back to. That is not hypothetical: the
+2026-09-01 prod episode froze the node for 31 s with the observer armed and
+emitted nothing of its own on either door between 12:06:57 and 12:07:28, and
+before #1888 an unannounced episode closed in total silence too.
+
+Such a row carries a **`write path`** block instead of a holder block. The two
+are deliberately different words for different facts:
+
+| block | when it is sampled | what it names |
+|-------|--------------------|---------------|
+| `holder at …` | while the holder is still parked | the frame it PAUSED in |
+| `write path …` | as the transaction is released | the caller that OPENED it |
+
+So a `write path` block answers *who was writing*, never *where it stuck* —
+do not read a release-time frame as a pause site. Every row also carries
+`at=<ISO8601>`, which is what lets a ring row be lined up against
+`erlang.log`; the ring survives a log that went quiet, and without the instant
+there is no way to match the two.
+
 **What the stack tells you.** The holder's frames are the answer to "why is it
 not proceeding": a `Logger` frame means the transaction is blocked on logging;
 a `DBConnection` checkout frame means a pool-topology deadlock; anything else
 is a third answer nobody has predicted yet. That distinction is the whole
 reason the instrument exists — before it, both looked identical from the logs.
 
+### The `nif_census` row (#1901) — the only one taken without the seam
+
+Both phases above read the watch table, and that table has ONE producer
+(`Repo.immediate_transaction/1`). Measured on the live node, `messages insert`
+— an autocommit single statement — is 324 679 writes while every source the
+seam covers is in the thousands, so the instrument was watching the rare tail
+of the write load. That is why all four episodes of #1888 produced zero lines:
+`grep -h "db lock stall" runtime/log/erlang.log.*` returned 0 while six
+victims timed out at ~31 s.
+
+The `nif_census` phase does not read the table. Every tick it walks
+`Process.list/0` and keeps whoever is inside `Exqlite.Sqlite3NIF`, timed from
+the first tick that saw them there. Its log line is
+`db lock stall NIF CENSUS:` and it is counted as `lockstall_nif` by
+`scripts/log-gap-scan.awk` — the ONLY lock counter that can be non-zero while
+`lockstall`, `lockstall_resolved` and `lockstall_unattributed` are all zero,
+which is the shape every #1888 episode had.
+
+🔴 **It names the cohort, never the holder, and the difference is the whole
+reading.** exqlite's busy handler sleeps INSIDE the same dirty-IO NIF the
+writer holding the lock is executing in, so the holder and its victims all
+read `Exqlite.Sqlite3NIF.step/2` with `status=:running` and nothing
+BEAM-visible separates them. So the row carries:
+
+| field | what it says |
+|-------|--------------|
+| `parked=N` | N processes were inside the SQLite NIF past the threshold |
+| `registered=Hh/Ww` | how many of those N the seam could already name |
+| the roster | every pid, its elapsed and its frame |
+| `holder=unattributed` | the instrument declines to pick one, deliberately |
+
+`registered=0h/0w` is the #1901 finding in one field: the writer holding the
+lock never touched the seam. `waiters=not counted` sits next to `parked=N` on
+purpose — a census counted no queue, and reading the roster length as a queue
+would assert N blocked writers where nobody measured one.
+
+**How to get the holder out of it anyway.** Cross the roster against the
+`fault=busy_locked` terminals in the same window: those name the VICTIMS, and
+whatever is in the roster and not among them is the short list. The frame
+helps too — `Exqlite.Sqlite3NIF.execute/2` under `handle_begin/2` is a writer
+blocked ACQUIRING a transaction, while `step/2` is one already executing a
+statement.
+
+**Two limits, so a later reader does not mistake them for bugs.** A
+transaction parked BETWEEN statements is not inside a NIF and this phase
+cannot see it (that case is the `detected` phase's, and only if the writer
+went through the seam); and `elapsed` is measured from the first TICK that
+saw the process, so it is a LOWER bound understated by up to one `tick_ms`.
+Readers park in the same NIF, so a slow `SELECT` appears in the roster too —
+deliberately: a long read transaction is a real participant in the
+contention.
+
+**Cost, measured** (dev image, warm, 20 passes per point): 0.7-2 us per
+process per pass, i.e. 1.55 ms at 2 000 processes — 0.16 % of one scheduler
+at `tick_ms: 1_000`. It is the one part of `LockWatch` paid when nothing is
+wrong, and it does NOT scale with write volume, which is the argument against
+instrumenting the 324 679 inserts instead.
+
 **Off-switch:** `config :grappa, :lock_watch, enabled: false`. Disabled, the
 write path pays one `:persistent_term` read per write transaction and does no
 ETS work. It is **off in `:test`** (under the Sandbox's `pool_size: 1` every
 write transaction is a holder).
+
+**Reading the latency columns (#1901).** Every duration family carries
+`n / total_ms / queue_ms / mean_ms / max_ms / p50_ms / p95_ms / p99_ms`.
+
+- `n`, `total_ms`, `mean_ms` and **`max_ms` are exact.**
+- 🔴 **The three quantiles are UPPER BOUNDS, not interpolations.** `p95_ms` is
+  the smallest histogram bucket bound covering at least 95 % of the samples,
+  so the true value is inside that bucket, at or below the number printed.
+  Read `p99_ms = 30000.00` as *"at most 1 % of writes were slower than 30 s"*.
+  A quantile that lands past the largest bound (30 s, i.e. `busy_timeout`)
+  reads the exact `max_ms` instead, because the overflow bucket has no
+  ceiling. Bounds and rationale: `Grappa.DbLatency.Distribution`.
+- **Read `max_ms` first during an incident.** The mean cannot show you a
+  stall: at the live node's 324 679 `messages insert` samples, a 31-second
+  write moves `mean_ms` by 0.1 ms — under the rounding this table prints.
+  That is why every #1888 episode was invisible here, and it is what the
+  `max_ms` / quantile columns were added for.
+- **`queue_ms` is still a cumulative sum only** — a known gap, not a
+  judgement. #1687 measured a victim's 62 s as ~31 s of DBConnection checkout
+  PLUS ~31 s of `busy_timeout`, so a queue-time outlier hides in a sum
+  exactly as an execution-time one hid in a mean.
 
 **Taking a 25s under-load sample:** `bin/grappa db-latency-reset` → wait 25s
 **under genuine daytime load** → `bin/grappa db-latency`. Counters are
@@ -5152,7 +5418,10 @@ baseline table, never a summary number**:
   `persist` `mean_ms`. A large gap = the sender's own `handle_call` queued
   behind a busy channel's synchronous inbound inserts.
 - **mechanism 2 (single-writer contention):** the `contention` row —
-  `queue_timeout` / `busy_locked` counts + `dropped`.
+  `queue_timeout` / `busy_locked` / `interrupted` counts + `dropped`. (The
+  `interrupted` column shipped with #1657 and the CLI header never learned
+  about it until #1901; a pre-#1901 `bin/grappa db-latency` printed four
+  values under four names while the row carried five.)
 - **mechanism 3 (pure insert / index write-amplification):** the `persist`
   row `mean_ms`, watched as the table grows.
 

@@ -111,6 +111,14 @@ config :grappa, :start_source_alias_manager, false
 # timeout bump: it REMOVES a nondeterministic writer from the suite.
 config :grappa, :reaper_interval_ms, :timer.hours(24)
 
+# #1770 — the incognito fast close is armed by an explicit `client_closing`
+# cast and never by a tick, so unlike the cadence above a short window here
+# adds NO ambient writer: nothing arms it unless a test does. Production's 30s
+# would only make the two tests that drive the door sleep for half a minute
+# each. Same posture as the interval — the test value is about determinism and
+# runtime, not about what production should do.
+config :grappa, :incognito_close_grace_ms, 50
+
 # UX-6-B1 (2026-05-20): embedded image uploader storage dir for
 # `mix test`. The Reaper child in the application supervisor mkdir_p's
 # this at boot; per-test isolation comes from `start_supervised`-ing
@@ -121,6 +129,14 @@ config :grappa,
        :uploads_storage_root,
        Path.expand(
          "../runtime/uploads_test#{System.get_env("MIX_TEST_PARTITION")}",
+         __DIR__
+       )
+
+# M3b — mirrors the uploads storage config above.
+config :grappa,
+       :peer_avatars_storage_root,
+       Path.expand(
+         "../runtime/peer_avatars_test#{System.get_env("MIX_TEST_PARTITION")}",
          __DIR__
        )
 
@@ -189,8 +205,8 @@ config :grappa, :vhost_ptr_resolver, &Grappa.PtrTestResolver.resolve/1
 # Req-impl tests can reach a Bypass server) while delegating every other host
 # to the real `Grappa.Net.Ssrf` guard, keeping the block path honest.
 config :grappa, :themes,
-  image_fetcher: Grappa.Themes.ImageFetcherMock,
-  image_ssrf_resolver: Grappa.Themes.ImageFetcher.TestResolver
+  image_fetcher: Grappa.Net.ImageFetcherMock,
+  image_ssrf_resolver: Grappa.Net.ImageFetcher.TestResolver
 
 # #543 INC-5 — source-alias command seam → a Mox so the FreeBSD/Linux adapter
 # tests assert argv + exit-mapping without a real `sudo ifconfig` / `sysctl` /

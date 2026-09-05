@@ -76,6 +76,8 @@ services:
       # prod when it is unset or still the sentinel. Threat model: .env.example.
       RELEASE_COOKIE: ${RELEASE_COOKIE:-grappa-dev-cookie-do-not-use-in-prod}
       UPLOADS_STORAGE_ROOT: ${UPLOADS_STORAGE_ROOT:-/app/runtime/uploads}
+      # M3b — sibling of UPLOADS_STORAGE_ROOT, see .env.example.
+      PEER_AVATARS_STORAGE_ROOT: ${PEER_AVATARS_STORAGE_ROOT:-/app/runtime/peer_avatars}
       # The built SPA dist the BEAM self-serves (Plug.Static + history
       # fallback). Same dir the cicchetto-build service writes (#399).
       #
@@ -149,6 +151,13 @@ services:
       # mounts only ./cicchetto, so the deploy wrappers export it from the
       # repo-root VERSION file (#538/#652). Empty makes vite fail loud.
       GRAPPA_VERSION: ${GRAPPA_VERSION:-}
+      # #1773 — the credit roll's git facts (sha, date, per-author commit
+      # counts), derived by the wrappers via infra/packaging/credits.sh for
+      # the SAME reason: there is no repo in here to read them from. Empty
+      # makes vite fail loud too — an empty value means a wrapper forgot to
+      # plumb it, which is a different thing from a build that HAS no git
+      # (that one arrives as a well-formed payload saying so).
+      GRAPPA_CREDITS: ${GRAPPA_CREDITS:-}
     command: ["sh", "-c", "bun install --frozen-lockfile && bun run build"]
 
   # The `shottino --ircd` bridge (#1027): a real IRC server on a port, so

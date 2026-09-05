@@ -54,6 +54,7 @@ import type {
   LiveIntrospectionAdminWireT,
   NetworksAdminWireT,
   NetworksCredentialConnectionState,
+  NetworksCredentialGender,
   NetworksCredentialsAdminWireSessionAction,
   NetworksCredentialsAdminWireSpawnError,
   NetworksCredentialsAdminWireT,
@@ -86,6 +87,7 @@ import type {
   SessionWireNamesReplyPayload,
   SessionWireServerReplyPayload,
   SessionWireServerReplySource,
+  SessionWireWhoisAvatarReadyPayload,
   SessionWireWhoisBundlePayload,
   SessionWireWhoisExtraLine,
   SessionWireWhoReplyPayload,
@@ -535,6 +537,16 @@ export type RawNetwork = {
   // mid-rollout servers that predate it; `tagNetwork` defaults a missing
   // value to null (→ the server-info rail shows no connection card).
   connection?: ConnectionInfo | null;
+  // M2/M3 — the per-network profile (CTCP USERINFO) plus the operator's own
+  // avatar. Optional on the raw type for the same reason as every field
+  // above: a server predating them sends none, and `tagNetwork` defaults
+  // each to null rather than dropping an otherwise valid row.
+  age?: string | null;
+  gender?: NetworksCredentialGender | null;
+  location?: string | null;
+  languages?: string | null;
+  custom?: string | null;
+  avatar_url?: string | null;
   inserted_at: string;
   updated_at: string;
 };
@@ -581,6 +593,12 @@ export function tagNetwork(raw: RawNetwork): Network | null {
     connection_state_changed_at: raw.connection_state_changed_at ?? null,
     connection: raw.connection ?? null,
     services_flavor: raw.services_flavor ?? null,
+    age: raw.age ?? null,
+    gender: raw.gender ?? null,
+    location: raw.location ?? null,
+    languages: raw.languages ?? null,
+    custom: raw.custom ?? null,
+    avatar_url: raw.avatar_url ?? null,
     inserted_at: raw.inserted_at,
     updated_at: raw.updated_at,
   };
@@ -1170,6 +1188,11 @@ export type WireUserEvent =
       network: HomeNetworkRow;
     }
   | ({ kind: "whois_bundle" } & WhoisBundle)
+  // M3b — the peer-avatar fetch is a detached task, so it can finish after
+  // the `whois_bundle` it belongs to has already been pushed. This arm is
+  // the incremental patch for that case: same `(network, nick)` key, one
+  // field. Carries the generated shape verbatim — cic widens nothing here.
+  | SessionWireWhoisAvatarReadyPayload
   | ({ kind: "names_reply" } & NamesReply)
   | ({ kind: "who_reply" } & WhoReply)
   | ({ kind: "server_reply" } & ServerReply)
@@ -1983,7 +2006,7 @@ export async function adminListSessionLogSessions(
 // `circuit_state` from `Grappa.Admission.NetworkCircuit.AdminWire.t()`
 // (controller composition in `lib/grappa_web/controllers/admin/networks_controller.ex`).
 //
-// Three-valued cap contract per `Networks.update_network_caps/2`:
+// Three-valued cap contract per `Networks.update_network_settings/2`:
 //   * `null` — explicit "unlimited" (operator-cleared)
 //   * `0`    — degenerate lock-down ("allow none")
 //   * `N>0`  — the cap itself
@@ -2023,16 +2046,22 @@ export type AdminNetwork = NetworksAdminWireT & {
 
 export type AdminNetworksResponse = { networks: AdminNetwork[] };
 
-// PATCH body is keys-optional per `Networks.update_network_caps/2`'s
-// `%{optional(:max_concurrent_visitor_sessions) => ...,
-// optional(:max_concurrent_user_sessions) => ...,
-// optional(:max_per_ip) => ...}` contract: unsupplied keys keep
-// their current value. Cic MUST only include keys whose value
-// actually changed vs the server-echoed row — sending all keys on
-// every edit creates a lost-update race (operator A's Save would
-// silently roll back operator B's concurrently-saved change to the
-// OTHER cap). CRIT-1 of M-10 review.
-export type AdminNetworkCapsPatch = {
+// PATCH body is keys-optional per `Networks.update_network_settings/2`'s
+// contract: unsupplied keys keep their current value. Cic MUST only
+// include keys whose value actually changed vs the server-echoed row —
+// sending all keys on every edit creates a lost-update race (operator A's
+// Save would silently roll back operator B's concurrently-saved change to
+// another key). CRIT-1 of M-10 review.
+//
+// The six keys mirror `NetworksController.settings_attrs/1`'s whitelist
+// exactly. It was named `AdminNetworkCapsPatch` while cic could only
+// reach the three caps; #1760 added the other three, and "caps" stopped
+// being true of the shape — the server has called the verb
+// `update_network_settings/2` since #211 phase 3.
+export type AdminNetworkSettingsPatch = {
+  services_flavor?: NetworksNetworkServicesFlavor | null;
+  visitor_enabled?: boolean;
+  visitor_autoconnect?: boolean;
   max_concurrent_visitor_sessions?: number | null;
   max_concurrent_user_sessions?: number | null;
   max_per_ip?: number | null;
@@ -2045,10 +2074,10 @@ export async function adminListNetworks(token: string): Promise<AdminNetwork[]> 
   return body.networks;
 }
 
-export async function adminPatchNetworkCaps(
+export async function adminPatchNetworkSettings(
   token: string,
   slug: string,
-  body: AdminNetworkCapsPatch,
+  body: AdminNetworkSettingsPatch,
 ): Promise<AdminNetwork> {
   const res = await fetch(`/admin/networks/${encodeURIComponent(slug)}`, {
     method: "PATCH",
@@ -2600,7 +2629,11 @@ export async function deleteInvite(
 }
 
 // Mirror of `GrappaWeb.ArchiveJSON.index/1` (CP15 B4) — wire shape:
-//   { "archive": [{"target", "kind", "last_activity", "row_count"}] }
+//   { "archive": [{"target", "kind", "last_activity"}] }
+// `row_count` was removed by #1626 (protocol v8): an exact per-target count
+// had to visit the whole partition, which is what kept the listing's cost
+// bound to the size of the account. cic never rendered it — only its schema
+// insisted on it, which is what would have broken.
 // Server-side `Scrollback.list_archive/3` already sorts by
 // `last_activity` DESC and excludes the active keyset (joined channels +
 // open query windows) + the `$server` pseudo-channel. The unwrap below
@@ -2790,6 +2823,77 @@ export async function updateNetworkIdentity(
   });
   if (!res.ok) throw await readError(res);
   return narrowCredentialResponse(await res.json());
+}
+
+// KVIrc-style CTCP USERINFO profile (age/gender/location/languages/a free
+// custom field), per (subject, network) for BOTH subjects
+// (`PATCH /networks/:slug/profile`). Unlike identity, this never bounces
+// the live upstream connection — see `NetworksController.profile/2` doc.
+// All fields optional; a present `""` clears that field. Returns the
+// updated credential JSON. 422 on validation (CRLF injection, over the
+// byte cap, an unrecognised gender); 404 if the caller holds no
+// credential on the network.
+export async function updateNetworkProfile(
+  token: string,
+  networkSlug: string,
+  fields: {
+    age?: string;
+    gender?: string;
+    location?: string;
+    languages?: string;
+    custom?: string;
+  },
+): Promise<CredentialJson> {
+  const res = await fetch(`/networks/${encodeURIComponent(networkSlug)}/profile`, {
+    method: "PATCH",
+    headers: buildHeaders(token),
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw await readError(res);
+  return (await res.json()) as CredentialJson;
+}
+
+// M3a — the credential's own avatar, per (subject, network) for BOTH
+// subjects (`PUT`/`DELETE /networks/:slug/avatar`). Same
+// never-bounces-the-connection posture as `updateNetworkProfile` above.
+// Plain `fetch` + `FormData` rather than `uploadHost.ts`'s XHR
+// primitive: that module targets THIRD-PARTY hosts (litterbox, or
+// grappa's own generic `/api/uploads`) and its XHR-vs-fetch choice
+// exists for cross-origin progress events + CORS-preflight quirks —
+// neither applies to this same-origin PUT that links the upload to a
+// credential in one request. `buildHeaders` is NOT used here: it
+// force-sets `content-type: application/json`, which would stomp the
+// multipart boundary the browser sets from the `FormData` body.
+export async function uploadNetworkAvatar(
+  token: string,
+  networkSlug: string,
+  file: File,
+): Promise<CredentialJson> {
+  const body = new FormData();
+  body.append("file", file);
+
+  const headers: Record<string, string> = { "x-grappa-client-id": getOrCreateClientId() };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const res = await fetch(`/networks/${encodeURIComponent(networkSlug)}/avatar`, {
+    method: "PUT",
+    headers,
+    body,
+  });
+  if (!res.ok) throw await readError(res);
+  return (await res.json()) as CredentialJson;
+}
+
+export async function deleteNetworkAvatar(
+  token: string,
+  networkSlug: string,
+): Promise<CredentialJson> {
+  const res = await fetch(`/networks/${encodeURIComponent(networkSlug)}/avatar`, {
+    method: "DELETE",
+    headers: buildHeaders(token),
+  });
+  if (!res.ok) throw await readError(res);
+  return (await res.json()) as CredentialJson;
 }
 
 // #189 — per-network on-connect perform list. `perform_list` is the raw

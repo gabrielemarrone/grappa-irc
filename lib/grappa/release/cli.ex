@@ -51,6 +51,7 @@ defmodule Grappa.Release.CLI do
   alias Grappa.{Accounts, Networks}
   alias Grappa.Accounts.User
   alias Grappa.Networks.Network
+  alias Grappa.Release.LiveNode
 
   @create_user_switches [password: :string, admin: :boolean]
 
@@ -62,6 +63,7 @@ defmodule Grappa.Release.CLI do
     auth: :string,
     tls: :boolean,
     password: :string,
+    server_pass: :string,
     autojoin: :string,
     realname: :string,
     sasl_user: :string,
@@ -99,13 +101,17 @@ defmodule Grappa.Release.CLI do
           from the terminal, so it stays out of shell history.
 
       add-network USER NETWORK --server HOST:PORT --nick NICK --auth METHOD
-                  [--tls | --no-tls] [--password PW] [--autojoin '#a,#b']
+                  [--tls | --no-tls] [--password PW] [--server-pass PW]
+                  [--autojoin '#a,#b']
                   [--realname NAME] [--sasl-user USER] [--source IP]
                   [--services-flavor FLAVOR]
           Gives USER access to NETWORK, creating the network and the
           server when they do not exist yet. --auth is one of
           auto|sasl|server_pass|nickserv_identify|none. TLS defaults to
           on for port 6697, off otherwise.
+          --password is the NickServ secret; --server-pass is the server
+          PASS a gated network demands before registration. They are
+          different secrets and may both be given (#1044).
 
       remove-network USER NETWORK
           Revokes that access and stops any live session for it.
@@ -245,10 +251,77 @@ defmodule Grappa.Release.CLI do
          {:ok, user} <- fetch_user(user_name),
          {:ok, {host, port}} <- parse_endpoint(Keyword.fetch!(opts, :server)),
          {:ok, auth_method} <- parse_auth(Keyword.fetch!(opts, :auth)),
-         {:ok, _} <- grant_access(user, slug, opts, {host, port}, auth_method) do
-      {:ok, "#{user.name} can now use #{slug} (server #{host}:#{port})"}
+         {:ok, credential} <- grant_access(user, slug, opts, {host, port}, auth_method) do
+      outcome = LiveNode.adopt(credential.user_id, credential.network_id)
+
+      {:ok,
+       "#{user.name} can now use #{slug} (server #{host}:#{port})\n" <>
+         outcome_line(user, outcome)}
     end
   end
+
+  # #1685 — the operator is told which of two things happened, because they
+  # are not the same thing and only one of them needs anything further from
+  # anybody.
+  #
+  # The row is bound either way: a refused spawn is not a failed bind (the
+  # operator asked to PROVISION access, and discarding their input because
+  # the bouncer was busy would be the wrong trade — the same call
+  # `Admin.CredentialsController.create/2` makes for the console door). So
+  # the exit status stays 0 in every branch below, which also keeps the
+  # normal first-run script — `create-user && add-network && start the
+  # service` — from breaking on the case that has no live node BY
+  # DEFINITION.
+  #
+  # Silence is what is not allowed. `Grappa.Release.cli/1` prints this
+  # whole string, so "parked and why" reaches the terminal even though the
+  # command succeeded.
+  @spec outcome_line(User.t(), {:ok, :started} | {:error, LiveNode.error()}) :: String.t()
+  defp outcome_line(%User{}, {:ok, :started}) do
+    "  started a session on the live node — nothing else to do"
+  end
+
+  defp outcome_line(%User{name: name}, {:error, reason}) do
+    # The restart caveat is load-bearing, not a courtesy. vjt's #1685
+    # ruling keeps `:parked` OUT of the boot adoption query
+    # (`connection_state in [:connected, :failing]`) on purpose: `:parked`
+    # means explicit user intent, and widening the query would resurrect
+    # every network a user had deliberately disconnected. The price is that
+    # an operator who seeds a box and restarts it gets nothing, so the
+    # message has to say so rather than let them find out.
+    "  the binding is PARKED: #{park_reason(reason)}.\n" <>
+      "  A restart will NOT dial it — #{name} connects it with Connect after logging in."
+  end
+
+  @spec park_reason(LiveNode.error()) :: String.t()
+  defp park_reason(:no_release_node), do: "there is no live node to reach from here"
+
+  defp park_reason(:distribution_disabled),
+    do: "RELEASE_DISTRIBUTION=none, so the running node has no distribution to call"
+
+  defp park_reason(:no_distribution),
+    do: "nothing is listening on epmd, so no bouncer is running here"
+
+  # The live node was reached and could not find the row this command just
+  # wrote. The usual cause is worth naming: the two VMs are looking at
+  # DIFFERENT databases (a `DATABASE_PATH` that differs between the service
+  # environment and this shell's).
+  defp park_reason(:not_found),
+    do:
+      "the live node cannot see this binding — check that it reads the same " <>
+        "DATABASE_PATH as this command"
+
+  # MEASURED (#1685): a cookie mismatch and a node that is simply not there
+  # are indistinguishable at this end — `Node.connect/1` answers `false` in
+  # 1–2 ms either way. Naming both beats guessing one.
+  defp park_reason(:unreachable),
+    do: "the live node did not answer (not running, or a different RELEASE_COOKIE)"
+
+  defp park_reason({:refused, reason}),
+    do: "the live node refused to start the session (#{inspect(reason)})"
+
+  defp park_reason({:call_failed, reason}),
+    do: "the call to the live node failed (#{inspect(reason)})"
 
   defp grant_access(%User{} = user, slug, opts, {host, port}, auth_method) do
     server = %{
@@ -269,10 +342,26 @@ defmodule Grappa.Release.CLI do
     settings = %{
       nick: Keyword.fetch!(opts, :nick),
       password: Keyword.get(opts, :password),
+      # #1044 — the server `PASS`, independent of `--password` (the NickServ
+      # secret). A password-gated network needs both at once; the mix-task
+      # twin `grappa.bind_network` carries the same pair.
+      server_pass: Keyword.get(opts, :server_pass),
       auth_method: auth_method,
       autojoin_channels: parse_autojoin(Keyword.get(opts, :autojoin)),
       realname: Keyword.get(opts, :realname),
-      sasl_user: Keyword.get(opts, :sasl_user)
+      sasl_user: Keyword.get(opts, :sasl_user),
+      # #1685 — bind `:parked`, NEVER the schema default `:connected`. This
+      # door was the last of the three that still inherited the default:
+      # `session_controller.ex` (#642) and
+      # `admin/credentials_controller.ex` (#1163) both write `:parked` and
+      # let the spawn promote the row. Here the write happens in a
+      # transient `eval` VM, so the row CLAIMED a session that VM could not
+      # possibly have started — cic rendered CONNECTED with nothing to
+      # press while every live-session operation answered `not_connected`.
+      #
+      # `Grappa.Operator.connect_credential/1` promotes it, over
+      # `LiveNode`, only once a `Session.Server` is actually running.
+      connection_state: :parked
     }
 
     case Networks.add_network(user, network_spec, settings) do

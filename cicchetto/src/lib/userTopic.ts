@@ -8,6 +8,7 @@ import { applyAutoAwayDebounceFromWire } from "./autoAway";
 import { setAwayState } from "./awayStatus";
 import { setBanlistBundle } from "./banlistCard";
 import { setServerBundleHash, setServerBundleVersion } from "./bundleHash";
+import { casemappingForSlug } from "./casemapping";
 import { onDirectoryComplete, onDirectoryFailed, onDirectoryProgress } from "./channelDirectory";
 import { channelKey } from "./channelKey";
 import { diagPush } from "./diagLog";
@@ -45,7 +46,7 @@ import { joinUser } from "./socket";
 import { seedSupportedUmodes } from "./supportedUmodes";
 import { seedUmodes } from "./umodes";
 import { MAX_DURATION_SECONDS } from "./videoPolicy";
-import { setWhoisBundle } from "./whoisCard";
+import { patchWhoisAvatarUrl, setWhoisBundle } from "./whoisCard";
 import { setWhoReply } from "./whoModal";
 import { setWhowasBundle } from "./whowasCard";
 import {
@@ -97,6 +98,7 @@ import {
   S_SessionWireSessionIdentityChangedPayload,
   S_SessionWireSupportedUmodesChangedPayload,
   S_SessionWireUmodeChangedPayload,
+  S_SessionWireWhoisAvatarReadyPayload,
   S_SessionWireWhoReplyPayload,
   S_SessionWireWhowasBundlePayload,
   S_SessionWireWindowInviteDeclinedPayload,
@@ -138,12 +140,14 @@ import { validate } from "./wireValidate";
 // #606 — is the rail currently showing the query whose partner is `target`
 // on `network`? Used to decide whether a `source: user` whois_bundle (an
 // operator /whois) should ALSO refresh the rail card. `nickEquals` folds
-// (#525) so a case-shift still matches. Read outside any reactive scope
+// (#525/#1861) so a case-shift still matches. Read outside any reactive scope
 // (a channel event callback), so this is a plain current-value read.
 function railIsShowingNick(network: string, target: string): boolean {
   const sel = selectedChannel();
   return (
-    sel?.kind === "query" && sel.networkSlug === network && nickEquals(sel.channelName, target)
+    sel?.kind === "query" &&
+    sel.networkSlug === network &&
+    nickEquals(sel.channelName, target, casemappingForSlug(network))
   );
 }
 
@@ -392,7 +396,9 @@ export function narrowUserEvent(raw: unknown): WireUserEvent | null {
         (r.account !== null && typeof r.account !== "string") ||
         typeof r.secure !== "boolean" ||
         (r.secure_cipher !== null && typeof r.secure_cipher !== "string") ||
-        (r.certfp !== null && typeof r.certfp !== "string")
+        (r.certfp !== null && typeof r.certfp !== "string") ||
+        // M3b — additive: absent (pre-M3b server) tolerates same as null.
+        (r.avatar_url !== null && r.avatar_url !== undefined && typeof r.avatar_url !== "string")
       )
         return null;
       let channels: string[] | null = null;
@@ -455,8 +461,16 @@ export function narrowUserEvent(raw: unknown): WireUserEvent | null {
         secure_cipher: r.secure_cipher as string | null,
         certfp: r.certfp as string | null,
         extra_lines: extraLines,
+        // M3b — the authenticated `/networks/:id/peer_avatar/:slug` path,
+        // never the peer's raw declared URL. `undefined` (pre-M3b server)
+        // normalizes to null, same as every other additive nullable field.
+        avatar_url: typeof r.avatar_url === "string" ? r.avatar_url : null,
       };
     }
+    case "whois_avatar_ready":
+      // M3b — incremental patch for a peer avatar fetch that completed
+      // AFTER the whois_bundle it belongs to was already sent.
+      return validate(S_SessionWireWhoisAvatarReadyPayload, r);
     case "names_reply":
       // #140 — /names roster bundle. A malformed member element drops the
       // whole payload rather than rendering a half-typed row, which is the
@@ -1067,6 +1081,12 @@ moduleRoot(() => {
           }
           return;
         }
+
+        case "whois_avatar_ready":
+          // M3b — patch the open /whois card's avatar_url if it's still
+          // showing this nick; silent no-op otherwise (see whoisCard.ts).
+          patchWhoisAvatarUrl(payload.network, payload.nick, payload.avatar_url);
+          return;
 
         case "names_reply": {
           // #140 — /names roster complete (server's 366 RPL_ENDOFNAMES,

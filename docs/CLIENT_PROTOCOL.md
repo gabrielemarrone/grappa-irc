@@ -98,11 +98,13 @@ There are **two** numbers, and they mean different things:
   client MUST ignore fields and events it does not recognise. The server,
   symmetrically, replies to an unknown client verb with a non-fatal error
   frame and keeps the socket open.
-- **Existing fields are never repurposed or removed.** A field means the
-  same thing forever.
+- **Existing fields are never repurposed.** A field means the same thing
+  forever.
+- **Removal is not "never" — it is "only on a ruling" (2026-08-26).**
+  See §2b. Design your client as if a field could go, i.e. do not make a
+  hard requirement of one you do not actually read.
 
-That half is unchanged, and it is what keeps an OLD client working
-against a NEW server.
+That half is what keeps an OLD client working against a NEW server.
 
 ### 2a. `protocol_version` moves on EVERY wire-shape change (2026-08-21)
 
@@ -142,6 +144,39 @@ is: `protocol_version` has moved several times under this rule while
 `min_protocol_version` has never left `1`. (The current pair is not
 written here on purpose — see the note under `GET /api/config`; the
 moving number is stale the moment it is typed, and it has been, twice.)
+
+### 2b. One field has been REMOVED, and what that costs you
+
+⚠️ `row_count` is gone from the archive entry
+(`GET /networks/:slug/archive`) as of protocol **v8**. It is the first
+and so far only field this wire has taken back.
+
+**Why it was allowed.** An exact per-target row count has to visit that
+target's rows, which is the whole `(subject, network)` partition, so
+while the field was emitted the listing's cost was bound to the size of
+the account rather than to its number of targets. The field was the only
+thing standing between the server and a listing that seeks once per
+target. Nothing else about the entry changed: `target`, `kind` and
+`last_activity` mean what they always meant.
+
+**The bar for a future removal**, so you can judge how likely another is:
+the field must be what blocks a property the server cannot otherwise
+have; the break must be measured against a real client rather than
+argued; and it takes an explicit ruling. Ordinary tidying does not
+qualify — nothing has ever been removed for being unused.
+
+**What it means for your client, concretely.** Validate *permissively*:
+tolerate an absent field you do not read, and never make a hard
+requirement of one you only pass through. The reference client got this
+wrong in exactly the way to learn from — it rendered `target` and `kind`
+only, never `row_count`, yet its generated schema listed the field as
+required, so a v8 server's response failed validation wholesale and its
+archive pane went blank. It never used the value it insisted on.
+
+`min_protocol_version` did **not** move for this, deliberately: it gates
+the whole socket, and this break is one listing. A pre-v8 client is
+still served everything else. The signal you get is `protocol_version`,
+in `GET /api/config` and in the user-topic join reply.
 
 ### 2b. What this means for you, as a client author
 
@@ -318,6 +353,49 @@ unrelated oper notice mode, so it reads identified for the wrong reason.
 The event is pushed on both the live edge and the user-topic cold snapshot,
 so a reload re-learns the verdict; the REST twin is the `registered` field
 of `GET /networks`' `connection` object.
+
+### 4a. Muting peer presence on a channel you are not reading (#1769)
+
+A per-channel topic accepts ONE join param. Join with
+
+```json
+{"presence": false}
+```
+
+and the server stops pushing you `join`, `part` and `quit` rows for that
+channel — the three whose only consumer is the member list. Everything else
+on that topic is delivered exactly as before: messages, `window_counts`, the
+read cursor, topic and mode changes, and the cold-subscribe snapshots.
+
+**You do not have to do anything.** Omit the param and you get everything, as
+you do today. Only the literal `false` suppresses — `true`, a string, or a
+misspelled key all mean the default — so a server that predates this reads
+your params and ignores them, and a client that never learns about them is
+unaffected. That is why this is a join param and not a negotiated capability:
+there is no flag day and nothing to coordinate.
+
+Three things are NEVER suppressed, and they are the reason the drop set is
+three kinds rather than five:
+
+* **`nick_change`** — you need it to migrate anything keyed by a nick
+  (scrollback, read cursors, an open query window). Miss one and your caches
+  point at a nick nobody holds, silently.
+* **`mode`** — channel-mode state outlives the pause.
+* **your OWN `join`/`part`/`quit`** — an own PART is how you learn the window
+  is gone. The server matches your live nick with the same ASCII fold it uses
+  everywhere else and follows it across a rename.
+
+The intended use is a window the operator has stopped looking at: leave the
+topic joined (leaving it would make the window blind, not quiet — it carries
+the messages too), re-join with `{"presence": false}` when the window goes
+cold, and re-join without the param when it comes back. **Re-join, plural:
+the param is read once, at join.** Changing your mind means joining the topic
+again — Phoenix closes the previous channel for you — and the events that
+arrive between the two joins are not replayed, so refetch the member list on
+resume and backfill messages from your last known id.
+
+Check `protocol_version >= 7` before relying on it. An older server will
+accept the join and quietly send you everything.
 
 ---
 

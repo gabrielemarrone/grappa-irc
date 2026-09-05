@@ -18,6 +18,14 @@ defmodule Grappa.DbLatencyTest do
   alias Grappa.DbLatency
 
   @handler_id "grappa-db-latency"
+
+  # 🔴 An INDEPENDENT copy of the production set, on purpose, and the
+  # `attached_events/0` equality assertion below is what keeps it from
+  # rotting. Deriving it from `DbLatency.attached_events/0` would make the
+  # boot-wiring test tautological; leaving it underived and UNCHECKED is what
+  # broke while #1901 was being built — a new emitter reached a new `fold/4`
+  # clause, the suite stayed green, and the ring was silently empty because
+  # this list never learned about the event.
   @events [
     [:grappa, :repo, :query],
     [:grappa, :scrollback, :persist, :stop],
@@ -25,7 +33,8 @@ defmodule Grappa.DbLatencyTest do
     [:grappa, :scrollback, :persist, :contention],
     [:grappa, :repo, :lock_stall, :detected],
     [:grappa, :repo, :lock_stall, :resolved],
-    [:grappa, :repo, :lock_stall, :unattributed]
+    [:grappa, :repo, :lock_stall, :unattributed],
+    [:grappa, :repo, :lock_stall, :nif_census]
   ]
 
   # Native-unit duration for a whole number of milliseconds, via the
@@ -119,6 +128,64 @@ defmodule Grappa.DbLatencyTest do
       assert_in_delta row.mean_ms, 6.0, 0.5
     end
 
+    test "an outlier survives the fold into a bucket a mean would erase (#1901)" do
+      # The end-to-end half of `Grappa.DbLatency.DistributionTest`: the unit
+      # test buys the arithmetic, this buys that the arithmetic actually
+      # reaches `snapshot/0` through the real telemetry fold. Until #1901 the
+      # bucket kept `{n, total}` only, so this 31 s write left the table
+      # reading 0.1 ms slower and nothing else.
+      for _ <- 1..99 do
+        :telemetry.execute(
+          [:grappa, :repo, :query],
+          %{total_time: ms(1), queue_time: ms(0)},
+          %{source: "messages", query: ~s|INSERT INTO "messages" ("body") VALUES (?)|}
+        )
+      end
+
+      :telemetry.execute(
+        [:grappa, :repo, :query],
+        %{total_time: ms(31_000), queue_time: ms(0)},
+        %{source: "messages", query: ~s|INSERT INTO "messages" ("body") VALUES (?)|}
+      )
+
+      row = query_row(DbLatency.snapshot(), "messages", :insert)
+
+      assert row.n == 100
+
+      # The mean is the number that hides it: 100 samples, 99 of them 1 ms.
+      # At production scale (324 679 samples) this moves by 0.1 ms.
+      assert_in_delta row.mean_ms, 310.99, 5.0
+
+      # 🔴 And the two that do not. A mutant that keeps the histogram but
+      # takes `max` from the bucket BOUND reports 30 000 ms for a 31 000 ms
+      # write; one that drops the histogram entirely has no max at all.
+      assert_in_delta row.max_ms, 31_000.0, 50.0
+
+      # The tail says it was one accident rather than a shifted population —
+      # the second half of the reading, and the reason a bare `max_ms` was
+      # not enough on its own.
+      assert row.p95_ms <= 1.0
+    end
+
+    test "the span families carry the same shape, so neither axis is half-migrated" do
+      # `persist` and `send_privmsg` fold the same way and hide an outlier
+      # the same way, so they get the same accumulator. A mutant that gives
+      # the histogram to `queries` only leaves the two write-path spans —
+      # mechanisms 1 and 3 of #357 — reading a mean and nothing else.
+      :telemetry.execute([:grappa, :scrollback, :persist, :stop], %{duration: ms(1)}, %{outcome: :ok})
+      :telemetry.execute([:grappa, :scrollback, :persist, :stop], %{duration: ms(9_000)}, %{outcome: :ok})
+      :telemetry.execute([:grappa, :session, :send_privmsg, :stop], %{duration: ms(4_000)}, %{outcome: :ok})
+
+      snapshot = DbLatency.snapshot()
+
+      assert_in_delta snapshot.persist.max_ms, 9_000.0, 20.0
+      assert snapshot.persist.p99_ms >= 9_000.0
+      assert_in_delta snapshot.send_privmsg.max_ms, 4_000.0, 20.0
+
+      # The outcome tally is untouched by the change of accumulator.
+      assert snapshot.persist.outcomes[:ok] == 2
+    end
+
     test "queries are returned sorted by total_ms descending" do
       :telemetry.execute(
         [:grappa, :repo, :query],
@@ -196,6 +263,7 @@ defmodule Grappa.DbLatencyTest do
         [:grappa, :repo, :lock_stall, :detected],
         %{held_ms: 2_400, waiter_count: 2},
         %{
+          observed_at: "2026-09-01T10:06:57.328000Z",
           holder: %{pid: "#PID<0.111.0>", stacktrace: ["Foo.bar/1"]},
           waiters: [%{pid: "#PID<0.222.0>"}, %{pid: "#PID<0.333.0>"}]
         }
@@ -204,7 +272,16 @@ defmodule Grappa.DbLatencyTest do
       :telemetry.execute(
         [:grappa, :repo, :lock_stall, :resolved],
         %{held_ms: 30_120},
-        %{holder_pid: "#PID<0.111.0>"}
+        %{
+          observed_at: "2026-09-01T10:07:28.554000Z",
+          holder_pid: "#PID<0.111.0>",
+          announced: true,
+          caller: %{
+            pid: "#PID<0.111.0>",
+            initial_call: "Grappa.Session.Server.init/1",
+            stacktrace: ["Grappa.Repo.immediate_transaction/1"]
+          }
+        }
       )
 
       assert [resolved, detected] = DbLatency.snapshot().lock_stalls
@@ -215,10 +292,27 @@ defmodule Grappa.DbLatencyTest do
       assert resolved.held_ms == 30_120
       assert resolved.holder == nil
 
+      # #1888 — `holder` stays nil (a `sample()` means "sampled while it
+      # stalled", and by release there is no pause site left to sample) while
+      # `caller` carries the write path that held the lock. Two different
+      # facts, two different keys: folding them would let a release-time stack
+      # be read as the frame the holder paused in.
+      assert resolved.caller.initial_call == "Grappa.Session.Server.init/1"
+      assert resolved.announced == true
+
+      # `waiter_count` is nil, not 0: nothing in a closing bracket counted a
+      # queue, and a 0 would assert an empty one was measured.
+      assert resolved.waiter_count == nil
+
       assert detected.phase == :detected
       assert detected.waiter_count == 2
       assert detected.holder.stacktrace == ["Foo.bar/1"]
       assert length(detected.waiters) == 2
+
+      # The instant, on both edges: a ring row that cannot be aligned with
+      # `erlang.log` cannot be matched to the freeze it belongs to.
+      assert resolved.observed_at == "2026-09-01T10:07:28.554000Z"
+      assert detected.observed_at == "2026-09-01T10:06:57.328000Z"
     end
 
     test "[:grappa, :repo, :lock_stall, :unattributed] folds with an explicit nil where the holder would be" do
@@ -226,6 +320,7 @@ defmodule Grappa.DbLatencyTest do
         [:grappa, :repo, :lock_stall, :unattributed],
         %{waiter_count: 3, longest_wait_ms: 31_303},
         %{
+          observed_at: "2026-09-01T10:07:28.554000Z",
           holders_registered: 0,
           waiters: [
             %{pid: "#PID<0.222.0>", elapsed_ms: 31_303, stacktrace: ["Exqlite.Sqlite3NIF.step/2"]},
@@ -249,6 +344,12 @@ defmodule Grappa.DbLatencyTest do
       assert row.held_ms == nil
       assert row.holder == nil
 
+      # #1888 — the same rule for the two fields the closing bracket adds.
+      # Nothing here released a hold, so there is no write path to name and no
+      # announcement to report; both stay explicitly absent.
+      assert row.caller == nil
+      assert row.announced == nil
+
       # The waiters ARE the payload: they are the only thing this episode can
       # honestly show, and the stack is what separates "blocked on the lock"
       # from "queued for a connection".
@@ -256,12 +357,70 @@ defmodule Grappa.DbLatencyTest do
       assert hd(row.waiters).stacktrace == ["Exqlite.Sqlite3NIF.step/2"]
     end
 
+    test "[:grappa, :repo, :lock_stall, :nif_census] folds the roster, and names nobody as the holder" do
+      :telemetry.execute(
+        [:grappa, :repo, :lock_stall, :nif_census],
+        %{parked_count: 2, longest_parked_ms: 31_402},
+        %{
+          observed_at: "2026-09-01T10:07:28.554000Z",
+          registered_holders: 0,
+          registered_waiters: 1,
+          parked: [
+            %{
+              pid: "#PID<0.222.0>",
+              elapsed_ms: 31_402,
+              current_function: "Exqlite.Sqlite3NIF.step/2",
+              stacktrace: ["Grappa.Scrollback.persist_row/1"]
+            },
+            %{pid: "#PID<0.333.0>", elapsed_ms: 30_011, current_function: "Exqlite.Sqlite3NIF.execute/2"}
+          ]
+        }
+      )
+
+      assert [row] = DbLatency.snapshot().lock_stalls
+
+      assert row.phase == :nif_census
+      assert row.observed_at == "2026-09-01T10:07:28.554000Z"
+
+      # 🔴 `holder_pid: nil` is a STRONGER statement here than on the
+      # `:unattributed` row, and a mutant that fills it in — say with the
+      # longest-parked pid, which is the plausible guess — dies here. On this
+      # phase a holder is certainly among `parked`; the instrument simply
+      # cannot say which, because exqlite's busy handler sleeps inside the
+      # same dirty-IO NIF the lock holder is executing in.
+      assert row.holder_pid == nil
+      assert row.held_ms == nil
+      assert row.holder == nil
+      assert row.caller == nil
+      assert row.announced == nil
+
+      # A census counts no QUEUE. `parked_count` is a different measurement
+      # and rides the measurements map, exactly as #1687 refused to reuse
+      # `held_ms` for a longest WAIT. A mutant that copies `parked_count` in
+      # here reports two blocked writers where nobody measured one.
+      assert row.waiter_count == nil
+      assert row.waiters == []
+
+      # The roster IS the payload, and the counts are what tell an operator
+      # whether to widen coverage or to scroll up to a line the other two
+      # arms already printed.
+      assert length(row.parked) == 2
+      assert hd(row.parked).stacktrace == ["Grappa.Scrollback.persist_row/1"]
+      assert row.registered_holders == 0
+      assert row.registered_waiters == 1
+    end
+
     test "the lock-stall ring is bounded, keeping the newest episodes" do
       for n <- 1..25 do
         :telemetry.execute(
           [:grappa, :repo, :lock_stall, :resolved],
           %{held_ms: n},
-          %{holder_pid: "#PID<0.#{n}.0>"}
+          %{
+            observed_at: "2026-09-01T10:07:#{String.pad_leading("#{n}", 2, "0")}.000000Z",
+            holder_pid: "#PID<0.#{n}.0>",
+            announced: false,
+            caller: %{pid: "#PID<0.#{n}.0>", initial_call: "unknown", stacktrace: []}
+          }
         )
       end
 
@@ -294,6 +453,16 @@ defmodule Grappa.DbLatencyTest do
       :telemetry.detach(@handler_id)
       on_exit(fn -> :telemetry.detach(@handler_id) end)
       :ok
+    end
+
+    test "the production event set and this file's expectation of it have not drifted" do
+      # The two failures this catches are asymmetric and BOTH are quiet.
+      # A production event with no clause in this file's `@events` never
+      # reaches an assertion, so a fold bug ships green; an entry here with no
+      # production event makes every test in the aggregation describe fold
+      # nothing, which reads as "the emitter is broken" and sends the reader
+      # to the wrong module. Naming the difference costs one assertion.
+      assert Enum.sort(DbLatency.attached_events()) == Enum.sort(@events)
     end
 
     test "attach_telemetry: true attaches the handler to every measured event" do

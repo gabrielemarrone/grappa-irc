@@ -70,7 +70,7 @@ name: release
 # packaging README.
 #
 # This workflow runs on a `v*` tag push (the real release — every job PUBLISHES)
-# OR via manual workflow_dispatch, which has TWO mutually-exclusive modes:
+# OR via manual workflow_dispatch, which has THREE mutually-exclusive modes:
 #
 #   * REPAIR (default, `docker_validation=false`, #504): (re)build an EXISTING
 #     tag's deb/arch/rpm AND its ghcr images and upload to its release, no tag
@@ -97,6 +97,17 @@ name: release
 #     proves the build (arm64 QEMU + ABI-lockstep assertion + cic + mix release)
 #     and publishes NOTHING. deb/arch/rpm/publish are skipped. Run it with:
 #       gh workflow run release.yml --ref <branch> -f docker_validation=true
+#   * DEB DRY-RUN (`deb_validation=true`, #1714): the same idea for the package
+#     job — a ZERO-PUBLICATION validation of the deb job ITSELF, from the
+#     DISPATCHED ref, so its proofs can be exercised BEFORE a release leans on
+#     them. It exists because #1714 put the distribution-hop arms in that job,
+#     AHEAD of the uploads: unprovable, the first thing to discover a broken arm
+#     would be a blocked release cut. No tag is involved (`RELEASE_TAG` resolves
+#     to the dispatched ref, the two tag-comparing steps opt out) and
+#     arch/rpm/docker/publish are skipped — `deb` still uploads its artifact, so
+#     it is the `publish` exclusion, not an empty artifact set, that keeps
+#     branch-built packages off a real release. Run it with:
+#       gh workflow run release.yml --ref <branch> -f deb_validation=true
 #
 # The tag-push path is unchanged by the dry-run plumbing: the default publishes.
 # A normal main-branch push never triggers this workflow (ci.yml + integration.yml
@@ -122,6 +133,11 @@ on:
         required: false
         type: boolean
         default: false
+      deb_validation:
+        description: "Zero-publication validation of the .deb job: build + install the package from the DISPATCHED ref (branch) and run its proofs, including the #1714 distribution-hop arms. No tag involved, NOTHING published. Skips arch/rpm/docker/publish."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -133,16 +149,26 @@ permissions:
 jobs:
   deb:
     name: build + prove .deb (amd64)
-    # Runs on a tag push and on a repair dispatch (unchanged). Skipped ONLY on a
-    # docker-image dry-run dispatch (docker_validation=true), which validates the
-    # release-image job alone and must publish nothing.
+    # Runs on a tag push, on a repair dispatch, and — since #1714 — on a
+    # deb-validation dispatch, which needs no change here: that path sets
+    # docker_validation=false, so the condition already admits it. Skipped ONLY
+    # on a docker-image dry-run dispatch (docker_validation=true), which
+    # validates the release-image job alone and must publish nothing.
     if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation) }}
     runs-on: ubuntu-latest
     env:
       # The release tag, resolved from whichever trigger fired: the input on a
       # manual repair dispatch, else the pushed tag. Every tag reference in this
       # job uses it (never bare GITHUB_REF_NAME, which is `main` on a dispatch).
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      #
+      # #1714 — on a deb-validation dispatch there IS no tag: the point is to
+      # prove this job's own steps from a branch, before a release leans on
+      # them. `inputs.tag` is ignored there and this resolves to the dispatched
+      # ref, so the checkout below takes the BRANCH. The two steps that compare
+      # against a tag opt out explicitly rather than being fed a branch name
+      # and asked to pretend.
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && !inputs.deb_validation && inputs.tag || github.ref_name }}
+      DEB_VALIDATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deb_validation }}
     steps:
       - name: Checkout (tags for #391 version derivation)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -159,8 +185,20 @@ jobs:
       - name: Verify the tag matches the VERSION file
         id: ver
         run: |
-          tag="${RELEASE_TAG#v}"
           srcv="$(infra/packaging/version.sh)"
+
+          # #1714 — a deb-validation dispatch builds a BRANCH: there is no tag
+          # to match, and matching a branch name against VERSION would fail for
+          # a reason that has nothing to do with what is being validated. The
+          # VERSION file is the single source either way (§ version.sh), so it
+          # supplies the number directly here.
+          if [ "$DEB_VALIDATION" = "true" ]; then
+            echo "deb-validation dispatch: no tag involved; version from VERSION ($srcv)"
+            echo "version=$srcv" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tag="${RELEASE_TAG#v}"
           echo "tag=$tag VERSION=$srcv"
           if [ "$tag" != "$srcv" ]; then
             echo "::error::tag v$tag does not match the VERSION file ($srcv) — bump VERSION before cutting the tag"
@@ -217,7 +255,16 @@ jobs:
             exit 1
           fi
 
+      # #1714 — skipped on a deb-validation dispatch, and the reason is this
+      # step's own contract: #391 says a CLEAN TAG makes `Grappa.Version` report
+      # the bare `X.Y.Z`. A branch is by definition not that — `git describe
+      # --exact-match` finds nothing and the release correctly reports the
+      # unreleased `X.Y.Z-<sha>`. Asserting the bare form there would fail on
+      # the version machinery working exactly as designed. The sibling proof
+      # below (the nfpm package stamp) derives from VERSION, not from a tag, and
+      # so keeps running on both paths.
       - name: Prove the artifact reports the bare tag version
+        if: ${{ env.DEB_VALIDATION != 'true' }}
         run: |
           want="${{ steps.ver.outputs.version }}"
           # Sentinel-prefix the printed version so a stray stdout line from the
@@ -312,6 +359,159 @@ jobs:
           [ "$got" = "$want" ] || {
             echo "::error::client package is stamped '$got', expected '$want'"; exit 1; }
 
+      # ── #1714: the release CLI's distribution hop, on the real substrate ──
+      #
+      # #1685 taught `grappa add-network` to cross out of its transient `eval`
+      # VM and into the running bouncer as Erlang terms. Every branch of that
+      # hop was proven by hand exactly once, and the branch a self-hoster meets
+      # FIRST — no live node at all — had no gate.
+      #
+      # WHICH OUTCOMES GET AN ARM, AND THE CRITERION USED
+      #
+      # `Grappa.Release.LiveNode.reach/2` distinguishes five transport
+      # outcomes before the far side is even reached: `:no_release_node`,
+      # `:distribution_disabled`, `:no_distribution`, `:unreachable`, and the
+      # `{:ok, :started}` round trip. Three are gated below and two are not.
+      # The split is NOT the issue title's "both branches" — it is which
+      # outcomes only THIS substrate can falsify:
+      #
+      #   gated here    `:no_distribution`, `:unreachable`, `{:ok, :started}`
+      #                 — each is a STATE OF THE DEPLOYMENT (is epmd up? is the
+      #                 node up?) and turns on systemd, epmd, the release
+      #                 cookie and the node name ERTS derives. Nothing
+      #                 in-process can make any of them true or false.
+      #   left to unit  `:no_release_node`, `:distribution_disabled`
+      #                 — both are refusals taken BEFORE any I/O, on the value
+      #                 of one environment variable, and
+      #                 test/grappa/release/live_node_test.exs already covers
+      #                 them. An arm here would re-read the same
+      #                 `System.get_env` through a slower door: CI minutes, no
+      #                 extra falsifying power.
+      #
+      # WHY THE TAIL OF THE JOB AND NOT WHERE #1714 PUT IT
+      #
+      # The issue says "right after Install both packages". That would run the
+      # live arm — which must START the service — BEFORE every existing proof
+      # in this job, leaving a daemon nobody asked for running underneath them.
+      # A proof that runs with unrequested state up no longer proves what it
+      # says it proves. So the arms go last among the proofs, and still ahead
+      # of the uploads: a failed arm must keep the artifacts unpublished.
+      #
+      # NOT asserted: the exit status. `Grappa.Release.CLI` returns 0 in every
+      # branch ON PURPOSE (cli.ex — the first-run script `create-user &&
+      # add-network && start the service` must not break on the case that has
+      # no live node BY DEFINITION). The bind is reported through stdout and
+      # the row, so that is what these steps read.
+      - name: Create the account the distribution-hop arms bind against
+        run: |
+          sudo grappa create-user gate --password 'ci-not-a-secret' | tee /tmp/hop-user.log
+          grep -q '^created user gate ' /tmp/hop-user.log || {
+            echo "::error::create-user did not report the account it created"; exit 1; }
+
+      # ARM 1 — no epmd at all. This is a box that has never started the
+      # service, which is the FIRST of the two no-live-node shapes #1685
+      # measured (`:net_kernel.start/2` itself fails `:nodistribution`) and the
+      # one whose cure, missing, "crashes on first run". The postinstall
+      # `enable`s the unit and deliberately does NOT start it (a real PHX_HOST
+      # must be set first), so this state is what the job is already sitting in.
+      #
+      # The premise is ASSERTED, not assumed: with epmd somehow already up this
+      # step would silently test arm 2 instead and report a green for a claim
+      # it never made.
+      - name: 'Hop arm 1/3: no epmd — the bind parks and says why'
+        run: |
+          pgrep -x epmd >/dev/null && {
+            echo "::error::epmd is already running — this arm cannot test the no-epmd shape"
+            exit 1; }
+          echo "epmd: not running (arm premise holds)"
+
+          sudo grappa add-network gate gate-no-epmd \
+            --server 127.0.0.1:6667 --nick gatebot --auth none | tee /tmp/hop-arm1.log
+
+          grep -qF 'the binding is PARKED: nothing is listening on epmd' /tmp/hop-arm1.log || {
+            echo "::error::expected the no-epmd park reason on stdout"; exit 1; }
+
+          state="$(sudo sqlite3 /var/lib/grappa/grappa.db \
+            "SELECT c.connection_state FROM network_credentials c
+               JOIN networks n ON n.id = c.network_id WHERE n.slug = 'gate-no-epmd'")"
+          echo "gate-no-epmd connection_state: '$state'"
+          [ "$state" = "parked" ] || {
+            echo "::error::row reads '$state', expected 'parked' — #1685's whole point"; exit 1; }
+
+      # ARM 2 — epmd up, nothing answering to the name. The SECOND no-live-node
+      # shape: `:net_kernel.start/2` succeeds and `Node.connect/1` returns
+      # false. It is reached here by starting epmd on its own rather than by
+      # stopping the service, and that is deliberate — systemd's default
+      # KillMode is control-group, so `systemctl stop grappa` takes epmd down
+      # WITH the node and lands back in arm 1. On a real host epmd outlives the
+      # service because something outside the unit started it; `epmd -daemon`
+      # from the release's own ERTS is that, staged.
+      - name: 'Hop arm 2/3: epmd up, node down — the bind parks on unreachable'
+        run: |
+          epmd_bin="$(find /usr/lib/grappa -type f -name epmd -perm -u+x -print -quit)"
+          [ -n "$epmd_bin" ] || { echo "::error::no epmd in the installed release"; exit 1; }
+          "$epmd_bin" -daemon
+          pgrep -x epmd >/dev/null || { echo "::error::epmd did not stay up"; exit 1; }
+          echo "epmd: running, no node registered (arm premise holds)"
+
+          sudo grappa add-network gate gate-no-node \
+            --server 127.0.0.1:6667 --nick gatebot --auth none | tee /tmp/hop-arm2.log
+
+          grep -qF 'the binding is PARKED: the live node did not answer' /tmp/hop-arm2.log || {
+            echo "::error::expected the unreachable park reason on stdout"; exit 1; }
+
+          state="$(sudo sqlite3 /var/lib/grappa/grappa.db \
+            "SELECT c.connection_state FROM network_credentials c
+               JOIN networks n ON n.id = c.network_id WHERE n.slug = 'gate-no-node'")"
+          echo "gate-no-node connection_state: '$state'"
+          [ "$state" = "parked" ] || {
+            echo "::error::row reads '$state', expected 'parked'"; exit 1; }
+
+      # ARM 3 — the hop itself. Starting the service is NEW scaffolding: no
+      # workflow in this repo has ever run `systemctl start grappa`, and the
+      # postinstall ships PHX_HOST=REPLACE_ME because it is the one value
+      # nothing can generate. Both are set here explicitly.
+      #
+      # The row assertion is NOT `= connected`, and the reason is #1675: since
+      # then `:connected` means REGISTERED UPSTREAM, and 127.0.0.1:6667 has
+      # nothing listening, so the session starts and then settles to `:failing`
+      # on its own. Pinning either value would be a race. What this arm exists
+      # to prove is that the hop LANDED — that the transport promoted the row
+      # out of `:parked`, which no amount of retrying can do from this side.
+      - name: 'Hop arm 3/3: live node — the session starts across the hop'
+        run: |
+          sudo sed -i 's/^PHX_HOST=.*/PHX_HOST=127.0.0.1/' /etc/grappa/grappa.env
+          sudo systemctl start grappa
+
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:4000/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4000/healthz >/dev/null || {
+            echo "::error::the service never became healthy"
+            sudo systemctl status grappa --no-pager || true
+            sudo journalctl -u grappa --no-pager -n 200 || true
+            exit 1; }
+          echo "service: healthy (arm premise holds)"
+
+          sudo grappa add-network gate gate-live \
+            --server 127.0.0.1:6667 --nick gatebot --auth none | tee /tmp/hop-arm3.log
+
+          grep -qF 'started a session on the live node' /tmp/hop-arm3.log || {
+            echo "::error::the CLI did not report a session started on the live node"
+            sudo journalctl -u grappa --no-pager -n 200 || true
+            exit 1; }
+
+          state="$(sudo sqlite3 /var/lib/grappa/grappa.db \
+            "SELECT c.connection_state FROM network_credentials c
+               JOIN networks n ON n.id = c.network_id WHERE n.slug = 'gate-live'")"
+          echo "gate-live connection_state: '$state'"
+          case "$state" in
+            connected|failing) ;;
+            *) echo "::error::row reads '$state' — the hop did not promote it out of parked"
+               exit 1 ;;
+          esac
+
       # Two packages, two upload steps (#1447 slice B). One glob over a shared
       # directory would publish whatever landed there next; a step per artifact
       # keeps publication something a human wrote down. `publish` then attaches
@@ -334,8 +534,10 @@ jobs:
 
   arch:
     name: build + prove Arch pkg (x86_64)
-    # See the deb job: skipped only on a docker-image dry-run dispatch.
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation) }}
+    # See the deb job: skipped on either dry-run dispatch — the docker-image one
+    # and, since #1714, the deb one (which proves the deb job alone and must
+    # publish nothing).
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && !inputs.deb_validation) }}
     runs-on: ubuntu-latest
     container: archlinux:latest
     env:
@@ -554,8 +756,9 @@ jobs:
 
   rpm:
     name: build + prove .rpm (x86_64)
-    # See the deb job: skipped only on a docker-image dry-run dispatch.
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation) }}
+    # See the deb job: skipped on either dry-run dispatch — the docker-image one
+    # and, since #1714, the deb one.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && !inputs.deb_validation) }}
     runs-on: ubuntu-latest
     # Pinned Fedora MAJOR (not :latest): a release artifact's glibc floor must
     # not move under us (#438 open-q2). The rule: the OLDEST still-supported
@@ -803,7 +1006,11 @@ jobs:
     #
     # A repair dispatch with an EMPTY tag input is not a repair: it falls through
     # to no job at all, rather than silently republishing main as some tag.
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.docker_validation) || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && inputs.tag != '') }}
+    # #1714 adds one exclusion to the repair arm: a deb-validation dispatch
+    # proves the deb job alone and must not build images nobody asked for. The
+    # docker_validation arm is untouched — asking for both dry-runs at once is
+    # contradictory but harmless, since neither publishes anything.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.docker_validation) || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && !inputs.deb_validation && inputs.tag != '') }}
     runs-on: ubuntu-latest
     # Job-level permissions REPLACE the workflow default (contents: write) for
     # this job — so re-grant `contents: read` for checkout and ADD
@@ -812,6 +1019,16 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      # #1834 — the credit roll the image was built with, handed DOWN to smoke
+      # rather than re-derived there. Two reasons, and the second is the one
+      # that bites: a build arg is part of buildkit's cache key, so smoke's
+      # dry-run re-export must pass the BYTE-IDENTICAL value or it misses the
+      # cache and silently rebuilds stage 1 in-context — which is exactly the
+      # degraded build this change exists to stop, wearing a green face.
+      # Re-deriving it there would also read a fetch-depth-1 checkout, whose
+      # `git shortlog` sees one commit.
+      credits: ${{ steps.credits.outputs.credits }}
     env:
       # ONE definition of "this is a repair run", referenced by every step that
       # has to behave differently. Re-deriving the condition per step is how the
@@ -931,6 +1148,78 @@ jobs:
             echo "scaffolding=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── #1834: the credit roll, derived HERE because the build cannot ─────
+      #
+      # `.git` is .dockerignore'd for this image, deliberately (it is why
+      # Grappa.Version takes its no-git path), so `credits.sh` running inside
+      # stage 1 reaches its own no-repo guard and answers
+      # `{"sha":null,"date":null,"contributors":[]}` — honestly, and uselessly.
+      # Measured on the built dist, not inferred: that is the payload
+      # `ghcr.io/vjt/grappa` was baking into the credits easter egg.
+      #
+      # This runner is a full checkout (fetch-depth 0, for the #391 version
+      # derivation and the `:latest` gate), so the facts exist HERE. Derive
+      # them with the SAME script every other substrate uses and hand the
+      # result to the build as an arg; `Dockerfile.release` keeps its
+      # in-context call as the fallback, so a plain `docker build` from a
+      # source checkout is byte-for-byte unchanged.
+      #
+      # The payload must reach the build VERBATIM — vite.config.ts parses it as
+      # JSON and refuses a malformed one — so the two properties `build-args`
+      # actually needs are ASSERTED here rather than assumed: non-empty, and
+      # exactly one line (a `build-args: |` block is line-delimited, so an
+      # embedded newline would silently become a second, bogus argument).
+      - name: Derive the credit roll (the build context has no .git)
+        id: credits
+        run: |
+          # ABSENT is warned about rather than fatal here — and that is a
+          # smaller claim than it looks, so it is spelled out. A repair
+          # dispatch checks out the TAG's tree while taking the Dockerfile
+          # from the dispatched ref, and every tag cut before #1773 predates
+          # this script: the same hazard the scaffolding step above documents
+          # for prerelease_flag.sh, except credits.sh is deliberately NOT on
+          # that list (the image COPYs it, so taking it from elsewhere would
+          # move the artifact). Such a repair therefore dies at
+          # `COPY infra/packaging/credits.sh` regardless — this arm does not
+          # rescue it. What it buys is that the run does not die HERE first,
+          # at exit 127, blaming the credit roll for a tag being too old.
+          if [ ! -f infra/packaging/credits.sh ]; then
+            echo "::warning::infra/packaging/credits.sh is absent from this tree (pre-#1773 tag) — the image will bake the degraded credit roll"
+            {
+              echo 'credits<<CREDITS_EOF'
+              echo 'CREDITS_EOF'
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          credits="$(sh infra/packaging/credits.sh)"
+
+          # Degraded HERE means the deriver failed, not that the build has no
+          # history: this step only runs with the script present and the
+          # checkout intact. Shipping the nulls anyway is precisely the silent
+          # regression #1834 closes, and the job already refuses to publish on
+          # a verdict it could not derive (see the `:latest` gate below).
+          case "$credits" in
+            *'"sha":null'*)
+              echo "::error::credits.sh derived the DEGRADED payload on a full checkout ($credits) — refusing to publish an image whose credit roll is empty"
+              exit 1
+              ;;
+          esac
+
+          # `printf '%s'` appends nothing, so this counts EMBEDDED newlines.
+          embedded="$(printf '%s' "$credits" | wc -l | tr -d ' ')"
+          if [ "$embedded" != "0" ]; then
+            echo "::error::the credits payload spans $((embedded + 1)) lines — a build-args block is line-delimited and would truncate it"
+            exit 1
+          fi
+
+          echo "credit roll: $credits"
+          {
+            echo 'credits<<CREDITS_EOF'
+            echo "$credits"
+            echo 'CREDITS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Compute image names + tag lists
         id: img
         run: |
@@ -1024,6 +1313,14 @@ jobs:
           # arm64 builds under QEMU emulation (slow — the gha cache below keeps
           # re-runs cheap).
           platforms: linux/amd64,linux/arm64
+          # #1834 — the credit roll, derived above from this full checkout. The
+          # cic stage declares the matching `ARG` and prefers it over its own
+          # in-context call; empty (a pre-#1773 tag being repaired) falls back
+          # to that call, which is also the plain-`docker build` behaviour.
+          # smoke's dry-run re-export MUST pass the same value — see the job
+          # output that carries it there.
+          build-args: |
+            GRAPPA_CREDITS=${{ steps.credits.outputs.credits }}
           # ZERO PUBLICATION on a dry-run: push on a tag push and on a repair. A
           # docker_validation dispatch still builds BOTH arches (proving the
           # arm64 QEMU path + the ABI-lockstep assertion + cic + mix release) and
@@ -1088,7 +1385,11 @@ jobs:
     # obtained, this job FAILS. A smoke test that quietly passes having tested
     # nothing is worse than not having one, and a repair is precisely the run
     # you least want to take on trust: it publishes a mixed tree.
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.docker_validation) || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && inputs.tag != '') }}
+    # #1714 adds one exclusion to the repair arm: a deb-validation dispatch
+    # proves the deb job alone and must not build images nobody asked for. The
+    # docker_validation arm is untouched — asking for both dry-runs at once is
+    # contradictory but harmless, since neither publishes anything.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.docker_validation) || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && !inputs.deb_validation && inputs.tag != '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1156,6 +1457,16 @@ jobs:
           load: true
           push: false
           tags: grappa-release:smoke
+          # #1834 — BYTE-IDENTICAL to what the docker job passed, taken from
+          # its job output rather than re-derived. A build arg participates in
+          # buildkit's cache key: a different value (or none) misses the cic
+          # layer, rebuilds stage 1 inside a context with no `.git`, and the
+          # image smoke then probes carries the degraded roll while the one
+          # that would have shipped does not. Re-deriving here would also read
+          # this job's fetch-depth-1 checkout, whose `git shortlog` sees one
+          # commit.
+          build-args: |
+            GRAPPA_CREDITS=${{ needs.docker.outputs.credits }}
           # MUST name the same scope the docker job's bouncer build writes
           # (#1168). That build is scoped now, because the bridge build shares
           # this job's gha cache backend; an unscoped `cache-from` here would
@@ -1185,7 +1496,13 @@ jobs:
     # the attach step, not here, because it needs the downloaded asset set.
     # ALSO skipped on a docker-image dry-run dispatch (its needs are skipped and
     # there is nothing to publish) — else it would fail "no artifacts present".
-    if: ${{ !cancelled() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation)) }}
+    # 🔴 And, since #1714, on a deb-validation dispatch — where the exclusion is
+    # not about empty artifacts but about REACH: that path builds a BRANCH, and
+    # publishing would attach branch-built assets to a real release. `deb` DOES
+    # run there and does upload its artifact, so the "nothing downloaded" guard
+    # would not have caught it. This condition is the only thing standing
+    # between a validation run and a published release.
+    if: ${{ !cancelled() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && !inputs.deb_validation)) }}
     runs-on: ubuntu-latest
     env:
       # The release to attach to — the input on a repair dispatch, else the

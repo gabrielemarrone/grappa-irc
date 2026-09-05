@@ -612,6 +612,69 @@ export async function listSessionLogSessions(
   return body.session_log_sessions;
 }
 
+// issue 1889 — remove an upload the way an operator removes one, so a spec can
+// drive the REAL 404 the viewer has to tell apart from a broken load.
+// `Admin.UploadsController.delete` unlinks the file first and then soft-deletes
+// the row, which is exactly the state the incident describes; faking it with a
+// `page.route` fulfil would prove the branch and not the behaviour.
+//
+// Two hops because the admin surface keys uploads by `id` while everything a
+// spec can see — the URL in the scrollback, the POST response — carries the
+// `slug`. The listing INCLUDES soft-deleted rows (it is the operator's audit
+// trail), so resolving by slug is unambiguous only before a second upload
+// reuses it, which the 26-char base32 slug rules out.
+export async function adminDeleteUploadBySlug(adminToken: string, slug: string): Promise<void> {
+  const listRes = await fetch(`${GRAPPA_BASE_URL}/admin/uploads`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  });
+  if (!listRes.ok) {
+    throw new Error(
+      `grappaApi.adminDeleteUploadBySlug: GET /admin/uploads → ${listRes.status} ${await listRes.text()}`,
+    );
+  }
+  const body = (await listRes.json()) as { uploads: Array<{ id: string; slug: string }> };
+  const row = body.uploads.find((u) => u.slug === slug);
+  // Loud rather than idempotent, deliberately: a spec that reaches the click
+  // without having deleted anything would assert the GONE text against a live
+  // upload and fail somewhere far from the cause.
+  if (row === undefined) {
+    throw new Error(`grappaApi.adminDeleteUploadBySlug: no upload row for slug ${slug}`);
+  }
+
+  const delRes = await fetch(`${GRAPPA_BASE_URL}/admin/uploads/${encodeURIComponent(row.id)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  });
+  if (!delRes.ok) {
+    throw new Error(
+      `grappaApi.adminDeleteUploadBySlug: DELETE ${row.id} → ${delRes.status} ${await delRes.text()}`,
+    );
+  }
+}
+
+// issue 1889 — what the PUBLIC upload route answers now, as a precondition a
+// spec can assert before it goes looking for the client's reaction to it.
+//
+// Takes the minted absolute URL and re-roots its path onto `GRAPPA_BASE_URL`
+// rather than fetching it as given: the mint carries whatever host
+// `Endpoint.url/0` is configured with, and the runner reaches grappa by its
+// compose service name. Re-rooting keeps this working wherever the deployment
+// thinks it lives, and the path is the whole of what identifies the upload.
+//
+// `method` is REQUIRED rather than defaulted to GET, because the two verbs
+// answer two different questions and a caller has to say which one it is
+// asking. GET is "is the route gone"; HEAD is "does the verb the viewer's
+// probe actually uses reach that same answer" — `Plug.Head` is supposed to
+// rewrite HEAD to GET above the router, and a default would let a spec assert
+// the first while believing it had checked the second.
+export async function publicUploadStatus(
+  uploadUrl: string,
+  method: "GET" | "HEAD",
+): Promise<number> {
+  const res = await fetch(`${GRAPPA_BASE_URL}${new URL(uploadUrl).pathname}`, { method });
+  return res.status;
+}
+
 // M-cluster M-8 — operator-side delete via admin bearer. Mirrors
 // `Grappa.Operator.delete_visitor/1`. Used by e2e tests that mint
 // a visitor and need teardown cleanup on early-assertion-failure
@@ -632,6 +695,24 @@ export async function adminDeleteVisitor(adminToken: string, visitorId: string):
       `grappaApi.adminDeleteVisitor: ${visitorId} → ${res.status} ${await res.text()}`,
     );
   }
+}
+
+// #1770 — "is this visitor row still there?", read from the admin listing.
+//
+// The oracle is deliberately the ADMIN index and not the visitor's own bearer
+// coming back 401: a revoked-but-present row answers 401 too, so that reading
+// could not tell a deleted row from a merely logged-out one — and "the row is
+// gone" is the whole claim. `GET /admin/visitors` renders
+// `Grappa.Visitors.AdminWire.index_payload/1`, i.e. `{visitors: [...]}`.
+export async function visitorExists(adminToken: string, visitorId: string): Promise<boolean> {
+  const res = await fetch(`${GRAPPA_BASE_URL}/admin/visitors`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  });
+  if (!res.ok) {
+    throw new Error(`grappaApi.visitorExists: ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as { visitors: Array<{ id: string }> };
+  return body.visitors.some((v) => v.id === visitorId);
 }
 
 // #574 — reap minted visitors LOUD in test cleanup. The single de-swallowing
@@ -920,6 +1001,66 @@ export async function patchNetworkConnectionState(
   }
 }
 
+// Settle a network back to "fully autojoined and NAMES-seeded" after a spec
+// parked it. Returns as soon as that holds; gives up silently after the
+// budget, because the caller is a best-effort `afterEach` and throwing there
+// would replace one spec's failure with a confusing second one.
+//
+// #1796 — extracted from `cp15-b6-parked-disconnect-reconnect.spec.ts`, which
+// is where the argument was made and paid for; a second network-parking spec
+// re-typing it is how the subtle half of it (the 200-vs-204 distinction) would
+// get dropped. Its reasoning, unchanged:
+//
+//   The testnet does NOT reset between specs, so leaving a parked credential
+//   breaks every following spec that expects autojoin to be live. Observed:
+//   skipping this poll cascaded 18 failures across m1-m9 and the downstream
+//   cp15-b6-* specs, because every following spec inherits a half-spawned
+//   Session.
+//
+//   #522 — `joined` is NOT a sufficient settle signal. The channels endpoint
+//   reports `joined: true` the instant the channel enters `state.members` (the
+//   self-JOIN echo), which lands BEFORE the 353/366 NAMES burst seeds the
+//   member list; returning there leaks a mid-stabilization session into the
+//   next spec and flakes its members assertion ~60% of the time. Only a 200
+//   from GET /members (channel in `seeded_channels` → 366 landed, no NAMES in
+//   flight) WITH the own nick present is the deterministic signal. HTTP 204
+//   (`:uninitialized`) is joined-but-pre-NAMES → keep polling.
+//
+//   60 × 500ms = 30s: SpawnOrchestrator → IRC connect → SASL → autojoin →
+//   JOIN echo → 353/366 → members seeded is empirically ~3-5s on a healthy
+//   testnet; the ceiling absorbs upstream rate-limit penalties accumulated by
+//   prior specs' churn. Budget the CALLER's `test.setTimeout` for it.
+export async function settleNetworkAutojoin(
+  token: string,
+  networkSlug: string,
+  channel: string,
+  ownNick: string,
+): Promise<void> {
+  await patchNetworkConnectionState(token, networkSlug, {
+    connection_state: "connected",
+  }).catch(() => {});
+
+  const headers = { authorization: `Bearer ${token}` };
+  const channelsUrl = `${GRAPPA_BASE_URL}/networks/${networkSlug}/channels`;
+  const membersUrl = `${GRAPPA_BASE_URL}/networks/${networkSlug}/channels/${encodeURIComponent(
+    channel,
+  )}/members`;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const res = await fetch(channelsUrl, { headers }).catch(() => null);
+    if (res?.ok) {
+      const channels = (await res.json()) as Array<{ name: string; joined: boolean }>;
+      if (channels.find((c) => c.name === channel)?.joined) {
+        const membersRes = await fetch(membersUrl, { headers }).catch(() => null);
+        if (membersRes?.status === 200) {
+          const { members } = (await membersRes.json()) as { members: Array<{ nick: string }> };
+          if (members.some((m) => m.nick === ownNick)) return;
+        }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 // #498 — self-serve accretion (`POST /session/networks`). Binds + spawns
 // the visitor_enabled `slug` for the authenticated subject, anon
 // (`auth_method: :none`), with the account name as the default nick. `204`
@@ -1118,5 +1259,32 @@ export async function setCredentialAutojoin(
   if (!res.ok) {
     const text = await res.text().catch(() => "<no body>");
     throw new Error(`setCredentialAutojoin(${userId}/${networkId}) → ${res.status} ${text}`);
+  }
+}
+
+/**
+ * #1883 — turn the pre-upload confirm opt-in on (or off) for this subject.
+ *
+ * The confirm is OFF by default, which is what `uploadJourney.pickFile`
+ * describes. A spec whose SUBJECT is the confirm calls this after login and
+ * then drives `sendPickedFiles` after the privacy notice's Continue — the
+ * order being privacy first, confirm second (#1883e).
+ *
+ * Server-side and per-user, so it survives the page load the spec is about to
+ * do; nothing in localStorage carries it.
+ */
+export async function setUploadConfirmEnabled(token: string, enabled: boolean): Promise<void> {
+  const response = await fetch(`${GRAPPA_BASE_URL}/me/settings/upload-confirm-enabled`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ upload_confirm_enabled: enabled }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `setUploadConfirmEnabled(${enabled}) failed: ${response.status} ${await response.text()}`,
+    );
   }
 }

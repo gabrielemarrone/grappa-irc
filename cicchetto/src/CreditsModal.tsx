@@ -1,4 +1,12 @@
-import { type Component, createEffect, For, onCleanup, Show, untrack } from "solid-js";
+import {
+  type Component,
+  createEffect,
+  createSignal,
+  For,
+  onCleanup,
+  Show,
+  untrack,
+} from "solid-js";
 import { buildCredits, creditsDateLabel } from "./lib/buildCredits";
 import { bootBundleVersionAccessor } from "./lib/bundleHash";
 import { type CreditsArpeggio, startCreditsArpeggio } from "./lib/creditsAudio";
@@ -8,6 +16,7 @@ import {
   creditsMuted,
   toggleCreditsMuted,
 } from "./lib/creditsModal";
+import { createProseDeck, type ProseSet } from "./lib/creditsProse";
 import { creditsRainLook } from "./lib/creditsRain";
 import { creditsRollPass } from "./lib/creditsRoll";
 import { createOverlayLock } from "./lib/overlayScrollLock";
@@ -55,6 +64,46 @@ const CreditsModal: Component = () => {
   // which is why the declaration sits above the audio effect: both readers
   // close over it, neither runs before it is assigned.
   let roll: HTMLDivElement | undefined;
+
+  // ── prose between the passes (#1924) ────────────────────────────────────
+  // A THIRD reader of the same animation, and deliberately not a third clock:
+  // `animationiteration` is the roll telling us it has come back round, so the
+  // paragraph turns over at the exact frame the column jumps back below the
+  // fold — the one moment in the cycle where swapping text is invisible,
+  // because the block is off-screen while it changes.
+  //
+  // The deck lives for the session rather than per open: it is what keeps the
+  // sets from repeating, and rebuilding it on every open would re-deal from a
+  // full bag and hand you the set you just watched.
+  const deck = createProseDeck();
+  const [prose, setProse] = createSignal<ProseSet | null>(null);
+
+  // Which pass is on screen, for the ONE thing that needs to know: the names
+  // are shown once and never again (vjt, #grappa 2026-09-05 — "mostriamo i
+  // credits una volta sola, chi se ne frega di ri-vederli"). Every later pass
+  // is prose alone.
+  //
+  // Set from `creditsRollPass`, i.e. from the animation's own
+  // `currentIteration`, rather than incremented here. The event is the TRIGGER
+  // and the animation stays the VALUE — a counter of my own would be a second
+  // tally that can disagree with the clock everything else reads.
+  const [pass, setPass] = createSignal(0);
+
+  createEffect(() => {
+    // Drawn on OPEN rather than at construction: this component is mounted in
+    // Shell for the whole session, so a draw in the body would burn a set at
+    // boot for a modal nobody may open. Empty until then, and the roll simply
+    // has no prose block — which is also the honest render for a pool that
+    // shipped empty.
+    //
+    // The pass resets with it: `Show` builds a fresh element on every open, so
+    // its animation genuinely starts over, and carrying the old count would
+    // hide the names from the second viewing onwards.
+    if (creditsModalOpen()) {
+      setPass(0);
+      setProse(deck.draw());
+    }
+  });
 
   // ── soundtrack lifecycle ────────────────────────────────────────────────
   // Tied to the OPEN signal, not to this component's mount: Shell mounts the
@@ -155,48 +204,96 @@ const CreditsModal: Component = () => {
             data-testid="credits-roll"
             ref={(node) => {
               roll = node;
+              // #1924 — no `onCleanup`, and that is not an omission: the
+              // listener is on THIS element, `Show` discards the element on
+              // close, and a listener on a discarded node is collected with
+              // it. Registering a teardown would be teardown for a thing that
+              // cannot outlive what it is attached to.
+              //
+              // `event.target === node` because `animationiteration` bubbles:
+              // any future animated descendant of the roll would otherwise
+              // turn the paragraph over on its own schedule.
+              node.addEventListener("animationiteration", (event) => {
+                if (event.target !== node) return;
+                setPass(creditsRollPass(node));
+                setProse(deck.draw());
+              });
             }}
           >
-            <h2 class="credits-title" data-testid="credits-title">
-              GRAPPA IRC
-            </h2>
-            <p class="credits-version" data-testid="credits-version">
-              {versionLabel()}
-            </p>
-            <p class="credits-build" data-testid="credits-build">
-              <span data-testid="credits-sha">{credits.sha ?? "no build sha"}</span>
-              <Show when={dateLabel()}>
-                {(day) => (
-                  <>
-                    <span aria-hidden="true"> · </span>
-                    <span data-testid="credits-date">{day()}</span>
-                  </>
-                )}
-              </Show>
-            </p>
+            {/* #1924 — the names are a FIRST-PASS thing. vjt: "mostriamo i
+                credits una volta sola, chi se ne frega di ri-vederli, e poi
+                solo i paragrafi, con i relativi titoli." A loop that re-runs
+                the same list every 34s teaches the viewer to stop reading,
+                which is the surest way to make the prose invisible too.
 
-            <h3 class="credits-heading">contributors</h3>
-            <ul class="credits-list">
-              <For
-                each={credits.contributors}
-                fallback={
-                  // Honest, not blank: this is what a build from a source
-                  // tarball looks like, and it is a legitimate build.
-                  <li class="credits-empty" data-testid="credits-empty">
-                    this build carries no history
-                  </li>
-                }
-              >
-                {(person) => (
-                  <li class="credits-person" data-testid="credits-person">
-                    <span class="credits-person-name">{person.name}</span>
-                    <span class="credits-person-count">{person.commits}</span>
-                  </li>
-                )}
-              </For>
-            </ul>
+                The swap rides the same `animationiteration` as the prose, so
+                it lands on the frame the column is parked off the top —
+                nothing is seen disappearing. */}
+            <Show when={pass() === 0}>
+              <h2 class="credits-title" data-testid="credits-title">
+                GRAPPA IRC
+              </h2>
+              <p class="credits-version" data-testid="credits-version">
+                {versionLabel()}
+              </p>
+              <p class="credits-build" data-testid="credits-build">
+                <span data-testid="credits-sha">{credits.sha ?? "no build sha"}</span>
+                <Show when={dateLabel()}>
+                  {(day) => (
+                    <>
+                      <span aria-hidden="true"> · </span>
+                      <span data-testid="credits-date">{day()}</span>
+                    </>
+                  )}
+                </Show>
+              </p>
 
-            <p class="credits-coda">an always-on IRC bouncer, and a client that looks like irssi</p>
+              <h3 class="credits-heading">contributors</h3>
+              <ul class="credits-list">
+                <For
+                  each={credits.contributors}
+                  fallback={
+                    // Honest, not blank: this is what a build from a source
+                    // tarball looks like, and it is a legitimate build.
+                    <li class="credits-empty" data-testid="credits-empty">
+                      this build carries no history
+                    </li>
+                  }
+                >
+                  {(person) => (
+                    <li class="credits-person" data-testid="credits-person">
+                      <span class="credits-person-name">{person.name}</span>
+                      <span class="credits-person-count">{person.commits}</span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+
+            {/* #1924 — inside the column, directly under the names. That
+                placement is the feature: the paragraph enters through the
+                bottom of the viewport while the contributor list is still
+                leaving through the top, so nothing waits for the titles to
+                scroll away and there is no second screen to cut to. */}
+            <Show when={prose()}>
+              {(set) => (
+                <div class="credits-prose" data-testid="credits-prose">
+                  <h3 class="credits-prose-title" data-testid="credits-prose-title">
+                    {set().title}
+                  </h3>
+                  <For each={set().paragraphs}>{(paragraph) => <p>{paragraph}</p>}</For>
+                </div>
+              )}
+            </Show>
+
+            {/* The coda goes with the names for the same reason: it is a
+                tagline, and a tagline on a loop stops being read and starts
+                being a boast. */}
+            <Show when={pass() === 0}>
+              <p class="credits-coda">
+                an always-on IRC bouncer, and a client that looks like irssi
+              </p>
+            </Show>
           </div>
         </div>
       </div>

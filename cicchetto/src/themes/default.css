@@ -14671,6 +14671,47 @@ audio.media-viewer-media {
   color: var(--muted);
 }
 
+/* #1924 — the prose that rides between one pass of the names and the next,
+   in the column and directly under them, so it enters through the bottom of
+   the viewport while the list is still leaving through the top.
+
+   LEFT-aligned inside a centred column, and that is a readability call rather
+   than a slip: the rest of the roll is one or two words per line, where
+   centring reads as a title sequence, while these are forty-word paragraphs,
+   where a ragged left edge costs the reader the start of every line.
+
+   The measure is capped in `ch`, not `rem`. This is a monospace pastiche, so
+   the line length that reads well is a count of characters; a `rem` cap would
+   grow with the font and hand a 120-character line to anyone who scaled the
+   interface up. */
+.credits-prose {
+  margin: 1.5rem 0;
+  max-width: min(58ch, 88vw);
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  text-align: left;
+  font-size: 0.95em;
+  line-height: 1.55;
+}
+
+.credits-prose p {
+  margin: 0;
+}
+
+/* Italic, per vjt: the set titles are kept, and they are the one place in the
+   roll where a slant marks "this is a heading, not a line of the text". No
+   letter-spacing here — `.credits-heading` tracks out because it is a single
+   word under a list, and tracking a five-word title just makes it a second
+   paragraph. */
+.credits-prose-title {
+  margin: 0;
+  font-size: 1em;
+  font-weight: normal;
+  font-style: italic;
+  color: var(--accent);
+}
+
 .credits-empty,
 .credits-coda {
   margin: 0;

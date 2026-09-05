@@ -1,4 +1,12 @@
-import { type Component, createEffect, For, onCleanup, Show, untrack } from "solid-js";
+import {
+  type Component,
+  createEffect,
+  createSignal,
+  For,
+  onCleanup,
+  Show,
+  untrack,
+} from "solid-js";
 import { buildCredits, creditsDateLabel } from "./lib/buildCredits";
 import { bootBundleVersionAccessor } from "./lib/bundleHash";
 import { type CreditsArpeggio, startCreditsArpeggio } from "./lib/creditsAudio";
@@ -8,6 +16,7 @@ import {
   creditsMuted,
   toggleCreditsMuted,
 } from "./lib/creditsModal";
+import { createProseDeck, type ProseSet } from "./lib/creditsProse";
 import { creditsRainLook } from "./lib/creditsRain";
 import { creditsRollPass } from "./lib/creditsRoll";
 import { createOverlayLock } from "./lib/overlayScrollLock";
@@ -55,6 +64,28 @@ const CreditsModal: Component = () => {
   // which is why the declaration sits above the audio effect: both readers
   // close over it, neither runs before it is assigned.
   let roll: HTMLDivElement | undefined;
+
+  // ── prose between the passes (#1924) ────────────────────────────────────
+  // A THIRD reader of the same animation, and deliberately not a third clock:
+  // `animationiteration` is the roll telling us it has come back round, so the
+  // paragraph turns over at the exact frame the column jumps back below the
+  // fold — the one moment in the cycle where swapping text is invisible,
+  // because the block is off-screen while it changes.
+  //
+  // The deck lives for the session rather than per open: it is what keeps the
+  // sets from repeating, and rebuilding it on every open would re-deal from a
+  // full bag and hand you the set you just watched.
+  const deck = createProseDeck();
+  const [prose, setProse] = createSignal<ProseSet | null>(null);
+
+  createEffect(() => {
+    // Drawn on OPEN rather than at construction: this component is mounted in
+    // Shell for the whole session, so a draw in the body would burn a set at
+    // boot for a modal nobody may open. Empty until then, and the roll simply
+    // has no prose block — which is also the honest render for a pool that
+    // shipped empty.
+    if (creditsModalOpen()) setProse(deck.draw());
+  });
 
   // ── soundtrack lifecycle ────────────────────────────────────────────────
   // Tied to the OPEN signal, not to this component's mount: Shell mounts the
@@ -155,6 +186,18 @@ const CreditsModal: Component = () => {
             data-testid="credits-roll"
             ref={(node) => {
               roll = node;
+              // #1924 — no `onCleanup`, and that is not an omission: the
+              // listener is on THIS element, `Show` discards the element on
+              // close, and a listener on a discarded node is collected with
+              // it. Registering a teardown would be teardown for a thing that
+              // cannot outlive what it is attached to.
+              //
+              // `event.target === node` because `animationiteration` bubbles:
+              // any future animated descendant of the roll would otherwise
+              // turn the paragraph over on its own schedule.
+              node.addEventListener("animationiteration", (event) => {
+                if (event.target === node) setProse(deck.draw());
+              });
             }}
           >
             <h2 class="credits-title" data-testid="credits-title">
@@ -195,6 +238,22 @@ const CreditsModal: Component = () => {
                 )}
               </For>
             </ul>
+
+            {/* #1924 — inside the column, directly under the names. That
+                placement is the feature: the paragraph enters through the
+                bottom of the viewport while the contributor list is still
+                leaving through the top, so nothing waits for the titles to
+                scroll away and there is no second screen to cut to. */}
+            <Show when={prose()}>
+              {(set) => (
+                <div class="credits-prose" data-testid="credits-prose">
+                  <h3 class="credits-prose-title" data-testid="credits-prose-title">
+                    {set().title}
+                  </h3>
+                  <For each={set().paragraphs}>{(paragraph) => <p>{paragraph}</p>}</For>
+                </div>
+              )}
+            </Show>
 
             <p class="credits-coda">an always-on IRC bouncer, and a client that looks like irssi</p>
           </div>

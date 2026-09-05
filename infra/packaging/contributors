@@ -1,0 +1,32 @@
+# contributors — git author name → the handle to credit them by (#1927).
+#
+# The credit roll reads `nick (Name)`, and the nick is the handle the project
+# actually knows the person by. It cannot be derived from the commit: a git
+# author is a name and an email, and the GitHub handle behind them is only
+# resolvable through the API — which credits.sh must not need, since it runs
+# in a FreeBSD jail and from a release tarball with no `.git` and no network
+# (see the header of credits.sh). So the mapping is static data, kept here.
+#
+# Format: one contributor per line, `<git author name><TAB><nick>`. Lines that
+# are blank or start with `#` are comments. An author who is NOT listed simply
+# gets no nick and is rendered by name alone — an unknown contributor must
+# never be a build failure, same contract as every other probe in credits.sh.
+#
+# The default nick is the person's GitHub handle. Where the project knows
+# someone by another handle, that one wins — this file records the owner's
+# call, not GitHub's opinion. Both such overrides are marked below.
+#
+# Match the author name EXACTLY as `git shortlog -sn --no-merges HEAD` prints
+# it; if someone starts committing under a second name, add a second line
+# pointing at the same nick rather than rewriting history.
+
+Marcello Barnaba	vjt
+Stefy Lanza	nextime
+Alessio Bonforti	Hypnotize
+# Override: his GitHub handle is @gmsrc, but the project calls him peluche.
+Gabriele Marrone	peluche
+Lucy	Lucy
+vjt-claude	vjt-claude
+Pasquale Minervini	deadbeef
+# Override: GitHub handle differs; Sonic is the handle he is known by here.
+Michele Vacca	Sonic

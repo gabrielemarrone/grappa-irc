@@ -27,12 +27,23 @@ describe("coerceBuildCredits (#1773)", () => {
       sha: "a453325e",
       date: "2026-08-25T23:15:06+02:00",
       contributors: [
-        { name: "Marcello Barnaba", commits: 5102 },
-        { name: "Stefy Lanza", commits: 147 },
+        { name: "Marcello Barnaba", nick: "vjt", commits: 5102 },
+        { name: "Stefy Lanza", nick: "nextime", commits: 147 },
       ],
     };
 
     expect(coerceBuildCredits(JSON.stringify(payload))).toEqual(payload);
+  });
+
+  it("reads a payload baked before nicks existed as nickless, not as broken", () => {
+    // A bundle built by an older credits.sh carries no `nick` field at all
+    // (#1927). Those contributors are still contributors — the roll shows
+    // their bare names, exactly as it did before the field was added.
+    const preNick = '{"sha":null,"date":null,"contributors":[{"name":"Ada Lovelace","commits":3}]}';
+
+    expect(coerceBuildCredits(preNick).contributors).toEqual([
+      { name: "Ada Lovelace", nick: null, commits: 3 },
+    ]);
   });
 
   it("accepts the no-git payload as data, not as a fault", () => {
@@ -63,16 +74,22 @@ describe("coerceBuildCredits (#1773)", () => {
       sha: null,
       date: null,
       contributors: [
-        { name: "Ada Lovelace", commits: 3 },
-        { name: "", commits: 9 },
+        { name: "Ada Lovelace", nick: "ada", commits: 3 },
+        { name: "", nick: "ghost", commits: 9 },
         { name: "No Count" },
         { name: "Negative", commits: -1 },
         { name: "Fractional", commits: 1.5 },
+        // A nick that is not a usable string costs the handle, not the row:
+        // the name and the count are still true.
+        { name: "Bad Nick", nick: 42, commits: 7 },
         "not an object",
       ],
     });
 
-    expect(coerceBuildCredits(mixed).contributors).toEqual([{ name: "Ada Lovelace", commits: 3 }]);
+    expect(coerceBuildCredits(mixed).contributors).toEqual([
+      { name: "Ada Lovelace", nick: "ada", commits: 3 },
+      { name: "Bad Nick", nick: null, commits: 7 },
+    ]);
   });
 
   it("degrades to the empty payload on anything that is not a credits object", () => {

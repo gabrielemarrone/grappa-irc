@@ -80,8 +80,12 @@ const POPULATED: BuildCredits = {
   sha: "a453325e",
   date: "2026-08-25T23:15:06+02:00",
   contributors: [
-    { name: "Marcello Barnaba", commits: 5102 },
-    { name: "Stefy Lanza", commits: 147 },
+    { name: "Marcello Barnaba", nick: "vjt", commits: 5102 },
+    { name: "Stefy Lanza", nick: "nextime", commits: 147 },
+    // The two degenerate rows of #1927: a handle that IS the name, and a
+    // contributor missing from the nick table entirely. Both render bare.
+    { name: "Lucy", nick: "Lucy", commits: 26 },
+    { name: "Ada Lovelace", nick: null, commits: 3 },
   ],
 };
 
@@ -143,13 +147,29 @@ describe("CreditsModal (#1773)", () => {
     expect(screen.getByTestId("credits-date").textContent).toBe("2026-08-25");
 
     const people = screen.getAllByTestId("credits-person");
-    expect(people).toHaveLength(2);
-    expect(people[0]?.textContent).toContain("Marcello Barnaba");
+    expect(people).toHaveLength(4);
+    // Handle first, real name as an italic parenthetical (#1927).
+    expect(people[0]?.querySelector(".credits-person-name")?.textContent).toBe(
+      "vjt (Marcello Barnaba)",
+    );
+    expect(people[0]?.querySelector("em.credits-person-realname")?.textContent).toBe(
+      "Marcello Barnaba",
+    );
     // The COUNT, not just the name: a roll that lists everyone with no
     // numbers is the same DOM shape and a different feature.
     expect(people[0]?.textContent).toContain("5102");
-    expect(people[1]?.textContent).toContain("Stefy Lanza");
+    expect(people[1]?.querySelector(".credits-person-name")?.textContent).toBe(
+      "nextime (Stefy Lanza)",
+    );
     expect(people[1]?.textContent).toContain("147");
+
+    // Nick equal to the name, and no nick at all: one identifier, no
+    // parentheses, nothing in italics. "Lucy (Lucy)" is the bug this asserts
+    // against.
+    expect(people[2]?.querySelector(".credits-person-name")?.textContent).toBe("Lucy");
+    expect(people[2]?.querySelector("em")).toBeNull();
+    expect(people[3]?.querySelector(".credits-person-name")?.textContent).toBe("Ada Lovelace");
+    expect(people[3]?.querySelector("em")).toBeNull();
   });
 
   it("says the build carries no history rather than rolling an empty list", () => {

@@ -2,7 +2,7 @@
 # credits.sh — echo the build's git credits payload, as ONE line of JSON.
 #
 #   {"sha":"a453325e","date":"2026-08-25T18:04:11+02:00",
-#    "contributors":[{"name":"…","commits":903},…]}
+#    "contributors":[{"name":"…","nick":"…","commits":903},…]}
 #
 # Sibling of version.sh, and deliberately shaped like it: the cic build runs
 # in containers that mount ONLY ./cicchetto (cicchetto/vite.config.ts:30-39),
@@ -74,10 +74,23 @@ if [ -e "${REPO_ROOT}/.git" ]; then
 	shortlog="$(git -C "${REPO_ROOT}" shortlog -sn --no-merges HEAD 2>/dev/null || true)"
 fi
 
-# ONE awk pass builds the whole payload: the contributor rows come in on
-# stdin, the two scalars on -v. LC_ALL=C keeps substr/length byte-oriented, so
-# a multi-byte name is copied through byte by byte and reassembles exactly —
-# awk never reorders what it concatenates.
+# The nick table (#1927) — `<author name>\t<handle>`, documented in its own
+# header. OPTIONAL by construction: a tree without it, or one where it cannot
+# be read, yields every contributor with `nick:null` and the roll falls back to
+# bare names. Same posture as every probe above — degrade, never abort.
+NICKS="${SCRIPT_DIR}/contributors"
+[ -r "${NICKS}" ] || NICKS=/dev/null
+
+# ONE awk run builds the whole payload: the nick table comes in as the first
+# operand, the contributor rows on stdin, the two scalars on -v. LC_ALL=C keeps
+# substr/length byte-oriented, so a multi-byte name is copied through byte by
+# byte and reassembles exactly — awk never reorders what it concatenates.
+#
+# The two inputs are told apart by the `pass=` assignments BETWEEN the operands
+# (POSIX: command-line assignments take effect in operand order), not by the
+# usual `NR == FNR` idiom — that one silently misreads the second file as the
+# first whenever the first is EMPTY, which here is the everyday case of a
+# missing table (/dev/null) and would parse the shortlog as nick mappings.
 printf '%s' "${shortlog}" | LC_ALL=C awk -v sha="${sha}" -v head_date="${date}" '
 	# JSON string literal. Character-by-character rather than gsub: the
 	# replacement text of gsub gives `\` and `&` their own meanings, which is
@@ -106,6 +119,36 @@ printf '%s' "${shortlog}" | LC_ALL=C awk -v sha="${sha}" -v head_date="${date}" 
 		return s == "" ? "null" : jsonstr(s)
 	}
 
+	# Blanks around either field (and a CR, if the table was ever edited on
+	# Windows) would otherwise become part of the key or of the nick — an
+	# invisible edit that silently stops matching, or ships a handle with a
+	# space in it. git strips leading and trailing blanks from an author name
+	# itself, so nothing legitimate is lost here.
+	function trim(s) {
+		sub(/^[ \t\r]+/, "", s)
+		sub(/[ \t\r]+$/, "", s)
+		return s
+	}
+
+	function nickof(name) {
+		return (name in nick) ? jsonstr(nick[name]) : "null"
+	}
+
+	# First operand: the nick table. `<author name>\t<handle>`, `#` comments and
+	# blank lines skipped. A malformed line is dropped rather than guessed at —
+	# a typo must cost one missing nick, not a broken payload.
+	pass == 1 {
+		if ($0 ~ /^[ \t]*(#|$)/) {
+			next
+		}
+		tab = index($0, "\t")
+		if (tab == 0) {
+			next
+		}
+		nick[trim(substr($0, 1, tab - 1))] = trim(substr($0, tab + 1))
+		next
+	}
+
 	{
 		# `shortlog -sn` emits "<count>\t<name>"; a line without the tab is
 		# not a contributor row and is dropped rather than guessed at.
@@ -113,10 +156,22 @@ printf '%s' "${shortlog}" | LC_ALL=C awk -v sha="${sha}" -v head_date="${date}" 
 		if (tab == 0) {
 			next
 		}
+		name = substr($0, tab + 1)
+		# Bots are dropped where the list is BORN, not hidden in the renderer:
+		# what the roll will never show has no business travelling in the
+		# bundle. `[bot]` is the suffix GitHub gives every App identity, so
+		# dependabot[bot] (#1927, the one that outranked half the humans by
+		# commit count) and its future siblings go the same way. A human whose
+		# name genuinely ends in "[bot]" does not exist; a bot we DO want to
+		# credit — vjt-claude — commits under a plain name and is unaffected.
+		if (length(name) > 5 && substr(name, length(name) - 4) == "[bot]") {
+			next
+		}
 		if (n > 0) {
 			rows = rows ","
 		}
-		rows = rows "{\"name\":" jsonstr(substr($0, tab + 1)) ",\"commits\":" ($1 + 0) "}"
+		rows = rows "{\"name\":" jsonstr(name) ",\"nick\":" nickof(name) \
+			",\"commits\":" ($1 + 0) "}"
 		n++
 	}
 
@@ -124,4 +179,4 @@ printf '%s' "${shortlog}" | LC_ALL=C awk -v sha="${sha}" -v head_date="${date}" 
 		printf "{\"sha\":%s,\"date\":%s,\"contributors\":[%s]}\n",
 			jsonornull(sha), jsonornull(head_date), rows
 	}
-'
+' pass=1 "${NICKS}" pass=2 -

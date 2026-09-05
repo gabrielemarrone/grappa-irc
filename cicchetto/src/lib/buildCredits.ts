@@ -22,9 +22,18 @@
 // meta, which `Grappa.Cic.Bundle` parses out of the deployed dist), so the
 // meta channel buys nothing here.
 
-/** One credited author and the number of non-merge commits they authored. */
+/**
+ * One credited author and the number of non-merge commits they authored.
+ *
+ * `nick` is the handle the project knows them by, mapped from the git author
+ * name by the static table at `infra/packaging/contributors` (#1927). It is
+ * `null` for anyone absent from that table — a new contributor lands in the
+ * history before anyone edits it, and that must degrade to a bare name, not
+ * fail a build.
+ */
 export type Contributor = {
   readonly name: string;
+  readonly nick: string | null;
   readonly commits: number;
 };
 
@@ -63,11 +72,18 @@ function presence(value: unknown): string | null {
 
 function contributor(entry: unknown): Contributor | null {
   if (typeof entry !== "object" || entry === null) return null;
-  const { name, commits } = entry as { name?: unknown; commits?: unknown };
+  const { name, nick, commits } = entry as {
+    name?: unknown;
+    nick?: unknown;
+    commits?: unknown;
+  };
   const named = presence(name);
   if (named === null) return null;
   if (typeof commits !== "number" || !Number.isInteger(commits) || commits < 0) return null;
-  return { name: named, commits };
+  // A missing or unusable `nick` costs the handle, not the contributor: a
+  // payload baked by an older credits.sh has no such field at all, and that
+  // build still deserves its roll.
+  return { name: named, nick: presence(nick), commits };
 }
 
 /**

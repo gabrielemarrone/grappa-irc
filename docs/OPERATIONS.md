@@ -4428,7 +4428,20 @@ there. It echoes ONE line of JSON with the three facts the credits easter
 egg needs and a browser cannot have:
 
     {"sha":"a1d57bd3","date":"2026-08-27T12:22:32+02:00",
-     "contributors":[{"name":"…","commits":5193},…]}
+     "contributors":[{"name":"…","nick":"…","commits":5193},…]}
+
+**The `nick` is a lookup, not a git fact (#1927).** The roll credits people
+as `nick (Name)`, and a commit carries no handle — resolving one would mean
+the GitHub API, which this script cannot reach from a FreeBSD jail or from a
+release tarball. So the mapping is static data at
+`infra/packaging/contributors`: one `<git author name><TAB><handle>` line per
+person, `#` comments allowed, read by the same awk run that builds the
+payload. **Add a line there when a new contributor appears** — an author the
+table does not name gets `nick:null` and is rendered by their bare name,
+which is a missing credit and never a failed build. The same awk drops any
+author whose name ends in `[bot]`, GitHub's suffix for App identities:
+filtering where the list is BORN keeps rows the roll will never show from
+travelling inside the bundle.
 
 Every cic-build entrypoint that exports `GRAPPA_VERSION` exports
 `GRAPPA_CREDITS` beside it, from this script, and `cicchetto/vite.config.ts`

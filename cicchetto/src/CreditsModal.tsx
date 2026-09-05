@@ -262,7 +262,21 @@ const CreditsModal: Component = () => {
                 >
                   {(person) => (
                     <li class="credits-person" data-testid="credits-person">
-                      <span class="credits-person-name">{person.name}</span>
+                      <span class="credits-person-name">
+                        {person.nick ?? person.name}
+                        {/*
+                          The real name is a parenthetical to the handle, and
+                          only when it says something the handle does not: for
+                          Lucy, or for a bot committing under its own handle,
+                          the two are the same string and "Lucy (Lucy)" would
+                          be noise. Nobody in the table, no nick — the bare
+                          name above is already the whole row.
+                        */}
+                        <Show when={person.nick !== null && person.nick !== person.name}>
+                          {" "}
+                          (<em class="credits-person-realname">{person.name}</em>)
+                        </Show>
+                      </span>
                       <span class="credits-person-count">{person.commits}</span>
                     </li>
                   )}

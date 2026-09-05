@@ -38,7 +38,14 @@
 import { loginAs, openSettingsDrawer } from "../fixtures/cicchettoPage";
 import { expect, specUser, test } from "../fixtures/test";
 
-type BakedContributor = { readonly name: string; readonly commits: number };
+type BakedContributor = {
+  readonly name: string;
+  // #1927 — the handle the roll credits, from `infra/packaging/contributors`.
+  // `null` (or absent, in a payload baked before the field existed) for a
+  // contributor the table does not name; the roll then paints the bare name.
+  readonly nick?: string | null;
+  readonly commits: number;
+};
 type BakedCredits = {
   readonly sha: string | null;
   readonly date: string | null;
@@ -125,13 +132,47 @@ test("#1773 — the credits roll paints the sha, date and contributors the build
   // The whole list and its ORDER, not a spot check: `git shortlog -sn` ranks
   // by commit count, and a roll that renamed, reordered or truncated the list
   // is exactly as wrong as an empty one.
+  //
+  // Since #1927 a row reads `nick (Name)`, with the parenthetical dropped when
+  // the handle IS the name or when there is no handle at all. The expectation
+  // is built from the payload rather than hardcoded, so it stays true of a
+  // build whose table has since grown a line.
   const painted = await page.getByTestId("credits-person").evaluateAll((rows) =>
     rows.map((row) => ({
       name: row.querySelector(".credits-person-name")?.textContent ?? "",
       commits: Number(row.querySelector(".credits-person-count")?.textContent ?? "NaN"),
     })),
   );
-  expect(painted).toEqual(baked.contributors.map((c) => ({ name: c.name, commits: c.commits })));
+  expect(painted).toEqual(
+    baked.contributors.map((c) => ({
+      name:
+        c.nick === undefined || c.nick === null || c.nick === c.name
+          ? c.name
+          : `${c.nick} (${c.name})`,
+      commits: c.commits,
+    })),
+  );
+
+  // ── and the real name is the ITALIC half of the pair ─────────────────────
+  // The pairing is the feature; without this, a build that stopped emitting
+  // the `<em>` would still satisfy the text comparison above.
+  const withNick = baked.contributors.filter(
+    (c) => c.nick !== undefined && c.nick !== null && c.nick !== c.name,
+  );
+  expect(
+    withNick.length,
+    "this checkout's contributor table must name at least one person, or the italic assertion below is vacuous",
+  ).toBeGreaterThan(0);
+  const italics = await page
+    .getByTestId("credits-person")
+    .evaluateAll((rows) =>
+      rows.map((row) => row.querySelector("em.credits-person-realname")?.textContent ?? null),
+    );
+  expect(italics).toEqual(
+    baked.contributors.map((c) =>
+      c.nick === undefined || c.nick === null || c.nick === c.name ? null : c.name,
+    ),
+  );
 
   // And the empty-state line is ABSENT — it is the fallback the degraded
   // build shows, and seeing it here would mean the list rendered from nothing.

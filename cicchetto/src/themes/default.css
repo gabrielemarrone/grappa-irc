@@ -14671,6 +14671,15 @@ audio.media-viewer-media {
   color: var(--muted);
 }
 
+/* The real name behind the handle (#1927). Italic said outright rather than
+   left to the `em` default: the roll is a monospace pastiche whose stack has
+   no guaranteed italic face, so this is the line to look at when it renders
+   upright. Muted for the same reason the count is — the handle is the row. */
+.credits-person-realname {
+  font-style: italic;
+  color: var(--muted);
+}
+
 /* #1924 — the prose that rides between one pass of the names and the next,
    in the column and directly under them, so it enters through the bottom of
    the viewport while the list is still leaving through the top.

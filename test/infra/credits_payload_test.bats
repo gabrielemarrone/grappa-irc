@@ -29,7 +29,15 @@
 #      env var, and a multi-line payload would arrive mangled;
 #   6. one person gets ONE credit — `.mailmap` collapses the identities a
 #      contributor has committed under, and the roll must show the collapsed
-#      list rather than the same person two or three times (#1808).
+#      list rather than the same person two or three times (#1808);
+#   7. the NICK is looked up, and its absence is NOT a fault — the roll reads
+#      `nick (Name)`, the mapping lives in the static table
+#      `infra/packaging/contributors`, and a contributor missing from it (or a
+#      missing table entirely, which is every tree built before it shipped)
+#      degrades to `nick:null` rather than to a broken build (#1927);
+#   8. bot identities are dropped where the list is BORN — `dependabot[bot]`
+#      outranked half the humans by commit count, and filtering it in the
+#      renderer instead would still ship it inside the bundle (#1927).
 #
 # The sandbox repos are built here rather than measured against this checkout:
 # the real history changes every commit, so a case reading it could only
@@ -92,7 +100,7 @@ init_repo() {
     [ "$status" -eq 0 ]
     # Descending by count, which is what `shortlog -sn` orders by and what a
     # credit roll wants — the exact string, so a re-ordering fails too.
-    [[ "$output" == *'"contributors":[{"name":"Ada Lovelace","commits":3},{"name":"Grace Hopper","commits":1}]'* ]]
+    [[ "$output" == *'"contributors":[{"name":"Ada Lovelace","nick":null,"commits":3},{"name":"Grace Hopper","nick":null,"commits":1}]'* ]]
 }
 
 @test "the sha and the date are the ones HEAD actually carries" {
@@ -126,8 +134,8 @@ init_repo() {
 
     [ "$status" -eq 0 ]
     refute grep -q 'Mergebot' <<< "$output"
-    [[ "$output" == *'{"name":"Ada Lovelace","commits":2}'* ]]
-    [[ "$output" == *'{"name":"Grace Hopper","commits":1}'* ]]
+    [[ "$output" == *'{"name":"Ada Lovelace","nick":null,"commits":2}'* ]]
+    [[ "$output" == *'{"name":"Grace Hopper","nick":null,"commits":1}'* ]]
 }
 
 @test "a name carrying a quote or a backslash is escaped, not emitted raw" {
@@ -148,7 +156,7 @@ init_repo() {
     [ "$status" -eq 0 ]
     # Single-quoted pattern: bash takes every character literally, so this is
     # the payload's exact bytes — two escaped quotes, one escaped backslash.
-    [[ "$output" == *'{"name":"A \"B\" C\\D","commits":1}'* ]]
+    [[ "$output" == *'{"name":"A \"B\" C\\D","nick":null,"commits":1}'* ]]
 }
 
 @test "no git is an honest empty payload, not a failure (AUR tarball, Dockerfile.release)" {
@@ -208,7 +216,7 @@ init_repo() {
     [ "$status" -eq 0 ]
     # Three commits on ONE row. The exact string, like the case at the top of
     # this file: a partial collapse (two rows for Ada) is as wrong as none.
-    [[ "$output" == *'"contributors":[{"name":"Ada Lovelace","commits":3},{"name":"Grace Hopper","commits":1}]'* ]]
+    [[ "$output" == *'"contributors":[{"name":"Ada Lovelace","nick":null,"commits":3},{"name":"Grace Hopper","nick":null,"commits":1}]'* ]]
 }
 
 @test "#1808 — every alias this repo's .mailmap collapses resolves to one identity" {
@@ -248,10 +256,10 @@ init_repo() {
     # Anti-hollow-green: a checkout with no readable git yields the honest
     # empty payload, against which every `refute` below holds vacuously. The
     # canonical names must be PRESENT before their aliases may be absent.
-    [[ "$output" == *'{"name":"Marcello Barnaba","commits":'* ]]
-    [[ "$output" == *'{"name":"Gabriele Marrone","commits":'* ]]
-    [[ "$output" == *'{"name":"vjt-claude","commits":'* ]]
-    [[ "$output" == *'{"name":"Stefy Lanza","commits":'* ]]
+    [[ "$output" == *'{"name":"Marcello Barnaba","nick":"vjt","commits":'* ]]
+    [[ "$output" == *'{"name":"Gabriele Marrone","nick":"peluche","commits":'* ]]
+    [[ "$output" == *'{"name":"vjt-claude","nick":"vjt-claude","commits":'* ]]
+    [[ "$output" == *'{"name":"Stefy Lanza","nick":"nextime","commits":'* ]]
     refute grep -q '"name":"vjt"' <<< "$output"
     refute grep -q '"name":"gabrielemarrone"' <<< "$output"
     refute grep -q '"name":"claude"' <<< "$output"
@@ -275,4 +283,161 @@ init_repo() {
 
     [ "$status" -eq 0 ]
     [ "$output" = 'vjt-claude <marcello.barnaba@gmail.com>' ]
+}
+
+# ── #1927 — nick (Name), and no bots in a roll of people ────────────────────
+#
+# The roll credits people by the handle the project knows them by, with the
+# real name as an italic parenthetical. A git commit carries no handle, and
+# resolving one through the GitHub API is out of reach here by design (this
+# script runs in a FreeBSD jail and from a release tarball, with no network),
+# so the mapping is static data at `infra/packaging/contributors` — read by
+# the same awk run that builds the payload.
+#
+# Every case below is about the DEGRADE as much as the lookup: an unmapped
+# contributor, a malformed line and a missing table must each cost one nick,
+# never the build. The sandbox has no table unless a case writes one, which is
+# why every assertion further up this file reads `"nick":null`.
+
+write_nicks() {
+    printf '%s\n' "$@" > "$REPO/infra/packaging/contributors"
+}
+
+@test "#1927 — the table maps an author name to the handle the roll credits" {
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    commit_as "Ada Lovelace" "ada@example.invalid" "two"
+    commit_as "Grace Hopper" "grace@example.invalid" "three"
+    write_nicks "$(printf 'Ada Lovelace\tada')" "$(printf 'Grace Hopper\tamazing_grace')"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"contributors":[{"name":"Ada Lovelace","nick":"ada","commits":2},{"name":"Grace Hopper","nick":"amazing_grace","commits":1}]'* ]]
+}
+
+@test "#1927 — a contributor absent from the table keeps the credit, loses the nick" {
+    # The everyday case: someone lands in the history before anyone edits the
+    # table. Dropping them, or failing, would make the table a gate on
+    # contributing.
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    commit_as "Grace Hopper" "grace@example.invalid" "two"
+    write_nicks "$(printf 'Ada Lovelace\tada')"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'{"name":"Ada Lovelace","nick":"ada","commits":1}'* ]]
+    [[ "$output" == *'{"name":"Grace Hopper","nick":null,"commits":1}'* ]]
+}
+
+@test "#1927 — comments, blanks and a tabless line cost one mapping, not the payload" {
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    commit_as "Grace Hopper" "grace@example.invalid" "two"
+    # A comment, an indented comment, a blank line, and the typo that matters:
+    # a row written with SPACES where the format wants a tab. It is dropped
+    # rather than guessed at — guessing would map "Grace" to "Hopper amazing".
+    write_nicks \
+        '# the header this file really carries' \
+        '   # indented, still a comment' \
+        '' \
+        'Grace Hopper amazing_grace' \
+        "$(printf 'Ada Lovelace\tada')"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'{"name":"Ada Lovelace","nick":"ada","commits":1}'* ]]
+    [[ "$output" == *'{"name":"Grace Hopper","nick":null,"commits":1}'* ]]
+}
+
+@test "#1927 — trailing blanks in the table are not part of the nick" {
+    # An invisible edit that would otherwise ship a handle nobody can match
+    # against anything on screen.
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    write_nicks "$(printf 'Ada Lovelace \t ada \t')"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'{"name":"Ada Lovelace","nick":"ada","commits":1}'* ]]
+}
+
+@test "#1927 — an EMPTY table is not read as the shortlog it precedes" {
+    # The `NR == FNR` idiom would take the FIRST stdin line as a table row here
+    # — an empty first file makes the two indistinguishable — and the roll
+    # would silently lose its top contributor. The `pass=` assignments between
+    # the operands are what keeps them apart; this case dies if they go.
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    commit_as "Ada Lovelace" "ada@example.invalid" "two"
+    commit_as "Grace Hopper" "grace@example.invalid" "three"
+    : > "$REPO/infra/packaging/contributors"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"contributors":[{"name":"Ada Lovelace","nick":null,"commits":2},{"name":"Grace Hopper","nick":null,"commits":1}]'* ]]
+}
+
+@test "#1927 — a nick carrying a JSON metacharacter is escaped like a name" {
+    # The table is hand-edited data reaching the same payload the names do, so
+    # it goes through the same escaper. Raw, one quote here is a broken build.
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    write_nicks "$(printf 'Ada Lovelace\tA "B" C\\D')"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'{"name":"Ada Lovelace","nick":"A \"B\" C\\D","commits":1}'* ]]
+}
+
+@test "#1927 — a [bot] identity never reaches the payload" {
+    init_repo
+    commit_as "Ada Lovelace" "ada@example.invalid" "one"
+    commit_as "dependabot[bot]" "49699333+dependabot[bot]@users.noreply.github.com" "bump"
+    commit_as "dependabot[bot]" "49699333+dependabot[bot]@users.noreply.github.com" "bump again"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    # Gone entirely — not present with a null nick, not present last. The
+    # anti-hollow-green half: the human it outranked is still there, so this
+    # cannot pass on an empty payload.
+    [[ "$output" == *'{"name":"Ada Lovelace","nick":null,"commits":1}'* ]]
+    refute grep -q 'dependabot' <<< "$output"
+}
+
+@test "#1927 — a name that merely CONTAINS [bot] is a contributor, not a bot" {
+    # The filter keys on the trailing `[bot]` GitHub appends to App identities.
+    # A substring match would eat a human, and silently.
+    init_repo
+    commit_as "Bot[bot]tomley" "human@example.invalid" "one"
+    commit_as "[bot]" "short@example.invalid" "two"
+
+    run "$SANDBOX_SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'{"name":"Bot[bot]tomley","nick":null,"commits":1}'* ]]
+    # Exactly `[bot]` and nothing else is five characters: too short to be an
+    # App identity (`<app>[bot]`), so it is a name and it stays.
+    [[ "$output" == *'{"name":"[bot]","nick":null,"commits":1}'* ]]
+}
+
+@test "#1927 — this checkout's own table names every contributor in its roll" {
+    # Reads THIS repo, like the #1808 mapping case: the table is a committed
+    # artefact, so it can be asserted exactly. A contributor who lands without
+    # a table entry shows up here as a null nick — that is the reminder to add
+    # the line, and it is deliberately louder than the silent bare-name render.
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    # Anti-hollow-green: a checkout with no readable git yields the empty
+    # payload, against which the refute below holds vacuously.
+    [[ "$output" == *'{"name":"Marcello Barnaba","nick":"vjt","commits":'* ]]
+    refute grep -q '"nick":null' <<< "$output"
 }

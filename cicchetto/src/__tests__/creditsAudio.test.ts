@@ -649,6 +649,88 @@ describe("the credits suite (#1920)", () => {
     expect(new Set(oscillators.map((osc) => osc.type))).toEqual(new Set(["square", "triangle"]));
   });
 
+  it("gives every movement its own RHYTHM, not just its own chords", () => {
+    // #1922 — the complaint on the deployed #1920 was "le musichette so tutte
+    // uguali", and the tests above could not have caught it: every one of them
+    // compares PITCHES, and #1920's four movements were four transpositions of
+    // a single rhythm. So this compares the placements and the lengths with the
+    // pitches thrown away — which is the thing an ear uses to tell two tunes
+    // apart, and the thing that was identical.
+    const rhythmOf = (movement: number): string =>
+      JSON.stringify(
+        movementEvents(movement)
+          .filter((event) => event.voice === "lead")
+          .map((event) => [event.at, event.durS]),
+      );
+
+    const rhythms = new Set(Array.from({ length: MOVEMENT_COUNT }, (_unused, m) => rhythmOf(m)));
+    expect(rhythms.size).toBe(MOVEMENT_COUNT);
+  });
+
+  it("varies how BUSY the movements are, not only where the notes fall", () => {
+    // Two rhythms can differ event by event and still carry the same number of
+    // notes at the same speed, which is a variation nobody hears as one. The
+    // suite has to span densities: the sparsest movement and the busiest one
+    // must not be within a note of each other.
+    const notes = Array.from(
+      { length: MOVEMENT_COUNT },
+      (_unused, m) => movementEvents(m).filter((event) => event.voice === "lead").length,
+    );
+    expect(Math.max(...notes)).toBeGreaterThan(Math.min(...notes) * 2);
+  });
+
+  it("lets a note be held and a beat be silent", () => {
+    // The two slot values #1922 added, proven by their audible consequence
+    // rather than by reading the score back: a HOLD is a lead note longer than
+    // its movement's own shortest one, and a REST is a bar whose lead does not
+    // sound all the way through.
+    const leadOf = (m: number): CreditsEvent[] =>
+      movementEvents(m).filter((event) => event.voice === "lead");
+
+    const held = Array.from({ length: MOVEMENT_COUNT }, (_unused, m) => leadOf(m)).some(
+      (lead) => new Set(lead.map((event) => event.durS)).size > 1,
+    );
+    expect(held).toBe(true);
+
+    const rested = Array.from({ length: MOVEMENT_COUNT }, (_unused, m) =>
+      leadOf(m).reduce((sum, event) => sum + event.durS, 0),
+    ).some((sounding) => sounding < BAR_COUNT * BAR_S - 1e-9);
+    expect(rested).toBe(true);
+  });
+
+  it("never sounds two lead notes at once", () => {
+    // A hold that lengthened a note WITHOUT swallowing the slot it holds would
+    // leave two lead notes overlapping — inaudible as a mistake, audible as a
+    // chord, and straight through the gain budget, which is stated in terms of
+    // one lead at a time.
+    for (let m = 0; m < MOVEMENT_COUNT; m += 1) {
+      const lead = movementEvents(m)
+        .filter((event) => event.voice === "lead")
+        .sort((a, b) => a.at - b.at);
+      for (let i = 1; i < lead.length; i += 1) {
+        const previous = lead[i - 1];
+        expect(lead[i]?.at ?? 0).toBeGreaterThanOrEqual(
+          (previous?.at ?? 0) + (previous?.durS ?? 0) - 1e-9,
+        );
+      }
+    }
+  });
+
+  it("keeps every lead note under the pulse's aliasing ceiling", () => {
+    // A `PeriodicWave` of PULSE_HARMONICS partials folds back above
+    // Nyquist / harmonics, and a folded pulse is an out-of-tune whistle rather
+    // than a bright note. #1922's finale runs sixteenths high in the register,
+    // which is exactly where a future edit would trip over this.
+    const NYQUIST = 48_000 / 2;
+    const HARMONICS = 24;
+    for (let m = 0; m < MOVEMENT_COUNT; m += 1) {
+      for (const event of movementEvents(m)) {
+        if (event.hz === null) continue;
+        expect(event.hz * HARMONICS).toBeLessThan(NYQUIST);
+      }
+    }
+  });
+
   it("falls back to the square when the engine cannot build a wave", () => {
     // An engine with no `createPeriodicWave` (and a context that refuses one)
     // must lose the WIDTH, not the note. Silence here would be a movement that

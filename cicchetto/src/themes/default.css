@@ -14671,13 +14671,27 @@ audio.media-viewer-media {
   color: var(--muted);
 }
 
+/* A hair of depth under the handle so it reads ahead of the real name without
+   going bold — bold in a monospace pastiche shouts, and the roll is a whisper.
+   The accent glow is repeated on purpose: `text-shadow` REPLACES the inherited
+   list rather than adding to it, so leaving it out would strip the nick of the
+   glow `.credits-roll` gives every other line. */
+.credits-person-name {
+  text-shadow:
+    0 0 0.5rem var(--accent),
+    0 1px 1px rgb(0 0 0 / 55%);
+}
+
 /* The real name behind the handle (#1927). Italic said outright rather than
    left to the `em` default: the roll is a monospace pastiche whose stack has
    no guaranteed italic face, so this is the line to look at when it renders
-   upright. Muted for the same reason the count is — the handle is the row. */
+   upright. Muted for the same reason the count is — the handle is the row.
+   The drop shadow stops at the handle: it is what separates the two, so the
+   name inside falls back to the roll's plain glow. */
 .credits-person-realname {
   font-style: italic;
   color: var(--muted);
+  text-shadow: 0 0 0.5rem var(--accent);
 }
 
 /* #1924 — the prose that rides between one pass of the names and the next,

@@ -240,7 +240,23 @@ defmodule Grappa.Protocol do
   #
   # @min_protocol_version stays at 1: the route is purely additive and no
   # existing client asks for it, so every v1..v9 bundle is served unchanged.
-  @protocol_version 10
+  # v11 (#1883) — the pre-upload confirm becomes a per-user setting, and with
+  # it a read/write door: `GET`/`PUT /me/settings/upload-confirm-enabled`,
+  # carrying `upload_confirm_enabled`.
+  #
+  # ⚠️ Same shape as v10 above, and the gate is green either way for the same
+  # reason: the digest spans the GENERATED artefacts, and a settings endpoint
+  # whose shape lives in a controller is invisible to it (`mix
+  # grappa.wire_pin --check` said "wire shape and protocol 10 agree" with this
+  # route already in the router). The number moves on the RULE: reason (1)
+  # applies literally — a cic bundle that renders the opt-in CALLS this route
+  # at boot and gets a 404 from any server predating it, which is the
+  # new-client-to-old-server direction the number exists to express.
+  #
+  # @min_protocol_version stays at 1: purely additive, and the client treats a
+  # failed read as the server's own default (`false`), so every v1..v10 bundle
+  # is served unchanged.
+  @protocol_version 11
   @min_protocol_version 1
 
   @doc "The protocol version the server currently speaks."

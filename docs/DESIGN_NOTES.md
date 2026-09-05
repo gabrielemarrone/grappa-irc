@@ -46150,3 +46150,165 @@ contained to `creditsRainLook`.
   is not measured either, and the two are not claimed to cancel.
 
 _Deploy: **HOT — `--cic` only.** Client-side; no server change._
+<!-- entry #1931 -->
+
+---
+
+## 2026-09-06 — #1931: the credits end — a spent deck, a manifesto, a pulsing heart and a way out
+
+The credit roll never finished. `createProseDeck()` is an infinite shuffle
+bag, so once the sixteen prose sets had been dealt it reshuffled and started
+again. vjt's brief is that the sequence should have an ENDING, and an addendum
+dictated the same evening put a fourth thing in it. End to end:
+
+    block (roll + cow + thanks, #1929)
+      → prose sets until the bag is spent
+      → the manifesto, under music of its own
+      → the credits AGAIN + a pulsing <3 + a closing line + a close button
+
+### The trigger is the deck, and the deck now says so
+
+The ending fires when every set has been dealt once — not on a pass counter
+and not on a timer. Both of those are a second tally of what the reader has
+actually been shown, and the one thing an ending must not get wrong is
+arriving early.
+
+`ProseDeck.exhausted()` is DERIVED rather than counted: the bag, the last
+index dealt and the pool size already say it between them, so a `dealt` field
+would be a parallel account of one fact and the copy that drifts is always the
+one the ending reads. The subtlety is the `last !== null` conjunct — the
+refill is lazy, so a bag that has never been filled and one that has been
+dealt out are the same empty array. Without it an empty pool reads as
+"everything has been shown" and cuts to the ending on pass one. That case has
+a test.
+
+### A stage, not a pass number
+
+`CreditsModal` had `pass()`, set from the roll's own `currentIteration`. It
+could express "show the names" and nothing else. It could not express "the
+deck is spent", and it could not tell the manifesto from the finale — both
+would have become arithmetic on a number that means something different, which
+is exactly how an early "that's all, folks" gets written.
+
+So the modal carries a closed set: `"block" | "prose" | "manifesto" |
+"finale"`, walked by `advance()` on the roll's `animationiteration`. The BRANCH
+ORDER inside it is the guarantee, and the test asserts the heart's absence on
+every one of the sixteen turns before the end rather than on a sample, because
+the interesting failure here is an off-by-one.
+
+`endingDue` is one session-scoped boolean and it is **not** a copy of
+`deck.exhausted()`. The deck reports an EDGE — the draw that empties the bag —
+and the ending is two turnovers later, so something has to hold the news in
+between. Clearing it when the finale arrives is what makes both reopen cases
+right, and they pull in opposite directions:
+
+* close one set short and come back → you land on the ending. The deck is
+  session-scoped on purpose, so progress across viewings is not thrown away.
+* come back after a FINISHED run → you get prose again. A latch that stayed
+  set would replay the ending for ever and put all sixteen sets out of reach
+  for the rest of the session.
+
+### The roll STOPS, and that is what settles the rain
+
+Everything in this modal travels. A close button that scrolls off the top is a
+button the reader waits a full 34 s cycle for — so when the ending arrives the
+roll is parked, reusing the posture `prefers-reduced-motion` already has in
+this stylesheet (`position: static; animation: none`) rather than inventing a
+second one.
+
+The reuse pays a second time, and this is the answer to "the rain must not
+fight the heart, and no third clock": **both readers in `creditsRain` ask the
+roll's animation what phase it is in, and an element with `animation: none`
+has none to report** — which they already answer "steady" to, pinned since
+#1807 by the no-animation case. The rain settles with no new code, no new
+dial, and nothing in `creditsRain.ts` touched.
+
+The fade splits off `.credits-block` onto `.credits-block-fading`, because the
+block COMES BACK for the finale and the fade is `1 forwards`: a re-mounted
+element still carrying it would dissolve the ending as it arrives. Invisible
+in review, fatal to the one screen the reader is meant to act on.
+
+CSS cannot share declarations across a media boundary, so the ended rules and
+the reduced-motion rules carry the same text twice. A test compares them
+declaration for declaration, with a positive control that the travel is
+genuinely off — a comment asking the next reader to keep two rules in step is
+what lets rules drift.
+
+### Three pieces of music on one graph, dissolved rather than cut
+
+vjt: *"musichette crossfade"*. The soundtrack gains a manifesto theme and a
+closing cadence beside the suite, and the joins are dissolves.
+
+That is why there are now three gain buses under the master. A crossfade needs
+both pieces audible at the same instant, which one retargeted bus cannot
+express — it can only dip to silence and come back, which is the cut with
+extra steps. Notes connect to the bus of the piece that ARMED them, so the
+outgoing bar rings on while its bus ramps down, and the incoming piece enters
+at `currentTime` instead of at the next bar line, which can be most of a bar
+away and would run the fade out over silence.
+
+`linearRampToValueAtTime`, not the `setTargetAtTime` the mute uses:
+setTargetAtTime approaches asymptotically and never arrives, so two of them
+cannot share the landing instant that makes a pair of ramps a crossfade.
+
+**The master is deliberately outside all of it**, and that is load-bearing
+rather than incidental layering. Mute and teardown have to work MID-DISSOLVE,
+when two buses sound and three carry ramps scheduled into the future. Mute
+acts above the buses, so it silences the fade without fighting it on the same
+params; the teardown cancels the pending ramps on every bus before dropping
+the graph. Closing the context would mask a missing cancel in practice — which
+is why the test asserts the cancel and not the close, at the exact moment of
+the fade.
+
+The cadence is ONE-SHOT. An ending on a loop is a ringtone, which is the
+defect #1916 was filed for.
+
+### What is licensed, and what is therefore NOT in the tree
+
+* **The tune quotes nothing.** The Looney Tunes outro is "The Merry-Go-Round
+  Broke Down" (1937) — US copyright to 2033 — and "That's all Folks!" is a
+  Warner Bros. trademark, which does not expire at all. The cadence borrows
+  the SHAPE of an ending (rise, turn, land, over a plagal iv–i) which is
+  nobody's property. A test pins the contour rather than the pitches, so the
+  tune can be rewritten without touching it, and forbids the trademarked
+  string by name.
+* 🔴 **The manifesto's TEXT is not here.** "The Conscience of a Hacker" (The
+  Mentor — Loyd Blankenship, *Phrack* Vol. 1 Issue 7 Phile 3, 8 January 1986)
+  is from 1986, was never dedicated to the public domain and was never put
+  under a free licence. Forty years of universal reproduction is custom, not
+  permission, and grappa ships a public PWA and a `.deb`. vjt's instruction is
+  verbatim: *do not include it until vjt confirms in writing*. So the BLOCK is
+  built and the text is a placeholder behind one named constant, with a test
+  that fails if the manifesto's own opening lines appear. Its ATTRIBUTION
+  renders now, beside the empty slot, because a credit left to a follow-up is
+  a credit that never ships.
+* 🔴 **The closing line is a placeholder too**, for a smaller reason: the
+  wording is vjt's call, not the implementer's.
+* **The manifesto is its own block and not a seventeenth prose set.** It is
+  ~570 words against a cap of 150, and the cheap way to fit it is to raise the
+  cap — which silently un-bounds all sixteen sets the cap exists to keep
+  readable. `PROSE_SET_MAX_WORDS` is therefore pinned BY NUMBER, so raising it
+  is a red test rather than a quiet edit.
+
+⚠️ **Measured, correcting the issue:** the issue states the cap is "300 after
+the raise". There was no raise. `git log -S 'PROSE_SET_MAX_WORDS = 300'` on
+`creditsProse.ts` returns nothing, while the same search for `= 150` returns
+`31fa3bd92`, the commit that introduced it. The manifesto is ~3.8× the cap
+rather than ~1.9×, which strengthens the case for a separate block.
+
+### What is NOT established here
+
+* **Nothing was seen.** No browser and no handset in this session, so every
+  visual claim is arithmetic and unit tests. That the heart reads as a
+  heartbeat rather than as a spinner, that the dissolves sound like dissolves,
+  and that the stopped roll leaves the button somewhere sensible on a phone,
+  are a human's verdict on a real screen.
+* **The crossfade is measured as SCHEDULING, not as sound.** The tests assert
+  which ramps are scheduled on which bus and when; no test renders audio. An
+  `OfflineAudioContext` would measure the mix, and this does not use one.
+* **The gain budget is pinned per piece, not across a dissolve.** Each new
+  piece is proven no louder than the loudest bar of the suite; during the
+  overlap two buses sound at once, and the argument that the fade keeps their
+  sum in hand is arithmetic, not a measurement.
+
+_Deploy: **HOT — `--cic` only.** Client-side; no server change._

@@ -46139,6 +46139,14 @@ contained to `creditsRainLook`.
   so a taller block is a quicker block. The block gained the cow and the thanks
   and LOST the prose to the second pass, which nets out at roughly +15% travel
   distance by line count — not measured, and not obviously worth the layout
-  read per resize that #1920 already declined.
+  read per resize that #1920 already declined. **Re-derived against #1927,
+  which landed under this branch:** dropping `[bot]` authors takes the
+  contributor list from 9 rows to 8 (`git shortlog -sn --no-merges`, measured
+  on `3037acb14` — `dependabot[bot]`, 49 commits, is the only one), so the
+  estimate was computed over one row more than the roll now carries. Direction
+  unchanged and the shift is inside the imprecision the word "roughly" was
+  already carrying; the countervailing term — `nick (Name)` being a longer
+  string that may wrap to a second line on a narrow viewport, ADDING height —
+  is not measured either, and the two are not claimed to cancel.
 
 _Deploy: **HOT — `--cic` only.** Client-side; no server change._

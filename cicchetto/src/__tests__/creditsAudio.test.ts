@@ -4,6 +4,7 @@ import {
   BAR_S,
   type CreditsEvent,
   creditsBar,
+  MOVEMENT_COUNT,
   PEAK_GAIN,
   PHRASE_S,
   startCreditsArpeggio,
@@ -53,8 +54,14 @@ type StubOscillator = {
   disconnect: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
+  setPeriodicWave: ReturnType<typeof vi.fn>;
+  /** The wave this oscillator was given, or `null` while it is a `type`. */
+  wave: StubWave | null;
   onended: (() => void) | null;
 };
+
+/** What `createPeriodicWave` hands back — the coefficients, kept for #1920. */
+type StubWave = { real: Float32Array; imag: Float32Array };
 
 type StubBufferSource = {
   buffer: unknown;
@@ -74,13 +81,26 @@ function stubParam(): StubParam {
   };
 }
 
-function makeCtx() {
+/**
+ * @param periodicWaves whether this engine can build a `PeriodicWave` at all.
+ *   `false` is a real browser (and jsdom, and a context that refuses), and the
+ *   pulse widths #1920 added have to degrade to the square rather than to
+ *   silence there.
+ */
+function makeCtx(periodicWaves = true) {
   const oscillators: StubOscillator[] = [];
   const bufferSources: StubBufferSource[] = [];
   const gains: { gain: StubParam; connect: ReturnType<typeof vi.fn> }[] = [];
+  const waves: StubWave[] = [];
   const close = vi.fn();
   const resume = vi.fn();
   const startedAt = Date.now();
+
+  const createPeriodicWave = (real: Float32Array, imag: Float32Array): StubWave => {
+    const wave: StubWave = { real, imag };
+    waves.push(wave);
+    return wave;
+  };
 
   const ctx = {
     // Seconds since this context was made, off the faked `Date` — see the
@@ -107,6 +127,15 @@ function makeCtx() {
         disconnect: vi.fn(),
         start: vi.fn(),
         stop: vi.fn(),
+        setPeriodicWave: vi.fn((wave: StubWave) => {
+          // A real oscillator reports `"custom"` once a wave is set, and the
+          // timbre assertions below read `type` — so the stub has to do the
+          // same or a periodic-wave voice would still look like whatever it
+          // was constructed as.
+          node.type = "custom";
+          node.wave = wave;
+        }),
+        wave: null,
         onended: null,
       };
       oscillators.push(node);
@@ -127,9 +156,18 @@ function makeCtx() {
       bufferSources.push(node);
       return node;
     },
+    ...(periodicWaves ? { createPeriodicWave } : {}),
   };
 
-  return { ctx: ctx as unknown as AudioContext, oscillators, bufferSources, gains, close, resume };
+  return {
+    ctx: ctx as unknown as AudioContext,
+    oscillators,
+    bufferSources,
+    gains,
+    waves,
+    close,
+    resume,
+  };
 }
 
 /** How many lead notes one bar carries — read off the score, never hardcoded. */
@@ -358,19 +396,28 @@ describe("the credits phrase (#1916)", () => {
     // float ULP. Measured before that was fixed — the bound read 2.61 instead
     // of 1.41, i.e. it counted two leads and two basses that were, in reality,
     // 10⁻¹⁵ s apart.
-    const timeline: CreditsEvent[] = [];
-    for (let bar = 0; bar < BAR_COUNT * 2; bar += 1) {
-      for (const event of creditsBar(bar)) {
-        timeline.push({ ...event, at: bar * BAR_S + event.at });
+    // #1920 — measured across EVERY movement, not just the opening one. The
+    // suite spends its headroom differently per movement (a harmony line in
+    // two of them, sixteenths in a third), so "the arrangement is under the
+    // ceiling" is a claim about the loudest movement and nothing less.
+    const worstOf = (movement: number): number => {
+      const timeline: CreditsEvent[] = [];
+      for (let bar = 0; bar < BAR_COUNT * 2; bar += 1) {
+        for (const event of creditsBar(bar, movement)) {
+          timeline.push({ ...event, at: bar * BAR_S + event.at });
+        }
       }
-    }
+      return Math.max(
+        ...timeline.map((anchor) =>
+          timeline
+            .filter((event) => event.at <= anchor.at && anchor.at < event.at + event.decayS)
+            .reduce((sum, event) => sum + event.peak, 0),
+        ),
+      );
+    };
 
     const worstInstant = Math.max(
-      ...timeline.map((anchor) =>
-        timeline
-          .filter((event) => event.at <= anchor.at && anchor.at < event.at + event.decayS)
-          .reduce((sum, event) => sum + event.peak, 0),
-      ),
+      ...Array.from({ length: MOVEMENT_COUNT }, (_unused, m) => worstOf(m)),
     );
 
     // The positive control. A single voice, or an arrangement whose voices
@@ -401,5 +448,218 @@ describe("the credits phrase (#1916)", () => {
     vi.advanceTimersByTime(250);
 
     expect(oscillators.length).toBeLessThanOrEqual(oneBar * 2);
+  });
+});
+
+describe("the credits suite (#1920)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  /** Every event of one whole movement, laid on a single timeline. */
+  const movementEvents = (movement: number): CreditsEvent[] => {
+    const out: CreditsEvent[] = [];
+    for (let bar = 0; bar < BAR_COUNT; bar += 1) {
+      for (const event of creditsBar(bar, movement)) {
+        out.push({ ...event, at: bar * BAR_S + event.at });
+      }
+    }
+    return out;
+  };
+
+  const voicesOf = (movement: number): Set<string> =>
+    new Set(movementEvents(movement).map((event) => event.voice));
+
+  it("is several movements long, and each one is its own music", () => {
+    // The complaint is "the second pass sounds exactly like the first", so
+    // what has to be proven is that the passes DIFFER. Proven on the score
+    // rather than on a frequency list: rewriting a movement costs nothing
+    // here, deleting the variety costs a red test.
+    expect(MOVEMENT_COUNT).toBeGreaterThan(1);
+
+    const shapes = new Set(
+      Array.from({ length: MOVEMENT_COUNT }, (_unused, m) =>
+        JSON.stringify(movementEvents(m).map((e) => [e.voice, e.hz, e.at, e.duty])),
+      ),
+    );
+    expect(shapes.size).toBe(MOVEMENT_COUNT);
+
+    // ...and the suite wraps rather than running out.
+    expect(creditsBar(0, MOVEMENT_COUNT)).toEqual(creditsBar(0));
+  });
+
+  it("keeps every movement the same number of bars", () => {
+    // `BAR_COUNT` and `PHRASE_S` are exported as if they described the whole
+    // suite. They do — but only while the movements agree, and a movement that
+    // ran long would be heard truncated at the roll's cycle anyway.
+    for (let m = 0; m < MOVEMENT_COUNT; m += 1) {
+      expect(creditsBar(BAR_COUNT, m)).toEqual(creditsBar(0, m));
+    }
+  });
+
+  it("carries more voices than the lead-bass-drums #1916 shipped", () => {
+    // "più voci" was the ask. The union across the suite must be strictly
+    // bigger than what one movement carries, or the extra channels are
+    // declared and never sounded.
+    const union = new Set<string>();
+    for (let m = 0; m < MOVEMENT_COUNT; m += 1) {
+      for (const voice of voicesOf(m)) union.add(voice);
+    }
+    expect(union).toContain("lead");
+    expect(union).toContain("bass");
+    expect(union).toContain("harmony");
+    expect(union).toContain("arp");
+    expect(union.size).toBeGreaterThan(voicesOf(0).size);
+  });
+
+  it("never sounds the harmony and the arpeggio at once — they are ONE channel", () => {
+    // The chip model is the reason the two are mutually exclusive rather than
+    // both playing: a second pulse channel can do one or the other. A movement
+    // carrying both would sound fuller and be a lie about the instrument, and
+    // it would also blow the gain budget the loudness test measures.
+    for (let m = 0; m < MOVEMENT_COUNT; m += 1) {
+      const voices = voicesOf(m);
+      expect(voices.has("harmony") && voices.has("arp")).toBe(false);
+    }
+  });
+
+  it("keeps the harmony under the lead, in key, at every step", () => {
+    // A "harmony" derived by transposing blindly would be in the right place
+    // and the wrong key. Every harmony note must be a chord tone below the
+    // lead note sounding at the same instant — the pitch-class check is what
+    // says "in key", the comparison is what says "underneath".
+    for (let m = 0; m < MOVEMENT_COUNT; m += 1) {
+      const events = movementEvents(m);
+      const harmonies = events.filter((e) => e.voice === "harmony");
+      for (const harmony of harmonies) {
+        const lead = events.find((e) => e.voice === "lead" && e.at === harmony.at);
+        expect(lead?.hz).toBeDefined();
+        expect(harmony.hz ?? 0).toBeLessThan(lead?.hz ?? 0);
+      }
+    }
+  });
+
+  it("follows the roll: the movement turns over when the titles come back round", () => {
+    // THE thing #1920 exists for. The scheduler could walk a perfect suite
+    // while ignoring the accessor entirely, and every assertion above would
+    // still be green.
+    let pass = 0;
+    const { ctx, oscillators } = makeCtx();
+    startCreditsArpeggio(ctx, false, () => pass);
+
+    vi.advanceTimersByTime(PHRASE_S * 1000);
+    const opening = oscillators.map((osc) => osc.frequency.value);
+    expect(opening.length).toBeGreaterThan(0);
+
+    // The roll wraps. The next bar armed must come from movement one.
+    pass = 1;
+    const beforeSwitch = oscillators.length;
+    vi.advanceTimersByTime(BAR_S * 2 * 1000);
+    const after = oscillators.slice(beforeSwitch).map((osc) => osc.frequency.value);
+
+    expect(after.length).toBeGreaterThan(0);
+    // Not "some note differs": the whole bar has to be a bar the opening
+    // movement never plays, which is what a progression change means.
+    const openingBars = Array.from({ length: BAR_COUNT }, (_unused, b) =>
+      JSON.stringify(creditsBar(b, 0).map((e) => e.hz)),
+    );
+    const armed = JSON.stringify(creditsBar(0, 1).map((e) => e.hz));
+    expect(openingBars).not.toContain(armed);
+    expect(after.some((hz) => !opening.includes(hz))).toBe(true);
+  });
+
+  it("re-enters the new movement at its FIRST bar, not wherever the old one was", () => {
+    // Otherwise the turn-over lands mid-phrase and reads as a glitch rather
+    // than as a new movement. `creditsBar(0, 1)`'s lead is the tell.
+    let pass = 0;
+    const { ctx, oscillators } = makeCtx();
+    startCreditsArpeggio(ctx, false, () => pass);
+
+    // Three bars into the opening movement, so "bar 0" cannot be a coincidence.
+    vi.advanceTimersByTime(BAR_S * 3 * 1000);
+    pass = 1;
+    const mark = oscillators.length;
+    vi.advanceTimersByTime(BAR_S * 1000);
+
+    const armedLead = oscillators
+      .slice(mark)
+      .filter((osc) => osc.type === "custom" || osc.type === "square")
+      .map((osc) => osc.frequency.value);
+    const wanted = creditsBar(0, 1)
+      .filter((e) => e.voice === "lead")
+      .map((e) => e.hz ?? 0);
+
+    for (const hz of wanted) expect(armedLead).toContain(hz);
+  });
+
+  it("survives an accessor that throws or answers with nonsense", () => {
+    // The accessor reaches into the DOM for an animation that may not be
+    // there. A throw inside the pump would kill the timer and take the whole
+    // soundtrack with it, silently — and NaN would index no movement at all.
+    const { ctx, oscillators } = makeCtx();
+    startCreditsArpeggio(ctx, false, () => {
+      throw new Error("no animation");
+    });
+    vi.advanceTimersByTime(BAR_S * 2 * 1000);
+    expect(oscillators.length).toBeGreaterThan(0);
+
+    const nonsense = makeCtx();
+    startCreditsArpeggio(nonsense.ctx, false, () => Number.NaN);
+    vi.advanceTimersByTime(BAR_S * 2 * 1000);
+    expect(nonsense.oscillators.length).toBeGreaterThan(0);
+    expect(nonsense.oscillators.every((osc) => Number.isFinite(osc.frequency.value))).toBe(true);
+  });
+
+  it("renders the narrow pulse widths as periodic waves", () => {
+    // "più chiptune" is mostly this: a 25% or 12.5% pulse is what hardware
+    // sounds like, and `OscillatorNode` has no such type. Sampled at a pass
+    // that uses one, so a suite that declared widths and never built a wave
+    // fails here.
+    let pass = 0;
+    const { ctx, oscillators, waves } = makeCtx();
+    startCreditsArpeggio(ctx, false, () => pass);
+    pass = 1;
+    vi.advanceTimersByTime(BAR_S * 2 * 1000);
+
+    expect(waves.length).toBeGreaterThan(0);
+    expect(oscillators.some((osc) => osc.type === "custom")).toBe(true);
+
+    // Built ONCE per width and shared: a wave per note would be hundreds of
+    // identical immutable objects a minute.
+    const distinct = new Set(oscillators.filter((o) => o.wave !== null).map((o) => o.wave));
+    expect(distinct.size).toBeLessThanOrEqual(waves.length);
+    expect(waves.length).toBeLessThanOrEqual(4);
+  });
+
+  it("leaves the opening movement on the built-in square", () => {
+    // Movement one is #1916's phrase and #1916's timbre, deliberately: the
+    // first pass of the titles is the one everybody sees, and a 50% pulse
+    // rebuilt from 24 harmonics is a ringing approximation of a wave the
+    // engine already has exactly.
+    const { ctx, oscillators, waves } = makeCtx();
+    startCreditsArpeggio(ctx, false);
+    vi.advanceTimersByTime(BAR_S * 2 * 1000);
+
+    expect(waves.length).toBe(0);
+    expect(new Set(oscillators.map((osc) => osc.type))).toEqual(new Set(["square", "triangle"]));
+  });
+
+  it("falls back to the square when the engine cannot build a wave", () => {
+    // An engine with no `createPeriodicWave` (and a context that refuses one)
+    // must lose the WIDTH, not the note. Silence here would be a movement that
+    // simply stops playing on older Safari.
+    let pass = 0;
+    const { ctx, oscillators } = makeCtx(false);
+    startCreditsArpeggio(ctx, false, () => pass);
+    pass = 2;
+    vi.advanceTimersByTime(BAR_S * 2 * 1000);
+
+    expect(oscillators.length).toBeGreaterThan(0);
+    expect(oscillators.every((osc) => osc.type === "square" || osc.type === "triangle")).toBe(true);
   });
 });

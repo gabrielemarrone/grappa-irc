@@ -184,6 +184,11 @@ export function nestedRuleBodies(selector: string): string[] {
  * for `(pointer: coarse)` (CLAUDE.md "implement once, reuse everywhere") — a
  * second copy of the depth counter is a second place to get an unbalanced
  * sheet wrong.
+ *
+ * The scan is brace-matching and knows nothing about `@media`, so `opener` may
+ * be ANY at-rule prelude — #1920 reads `@supports not (height: 100dvh)` with
+ * it, which is the only way to reach an `@keyframes` nested inside a gate
+ * (`nestedRuleBodies`' `[^{}]` classes cannot span the inner block).
  */
 export function mediaGatedBlocks(opener: RegExp, label: string): string[] {
   if (!opener.global) {

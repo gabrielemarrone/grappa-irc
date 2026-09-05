@@ -6,7 +6,7 @@ import {
   creditsRainLook,
   rollIsParked,
 } from "../lib/creditsRain";
-import { ruleBody, themeCss } from "./helpers/themeCss";
+import { mediaGatedBlocks, ruleBody, themeCss } from "./helpers/themeCss";
 
 // #1807 — the credits rain reads as rain, and the burst rides the roll's own
 // clock.
@@ -158,13 +158,51 @@ describe("credits roll timing (#1807 — the stylesheet owns the interlude)", ()
     expect(interlude).toBeLessThanOrEqual(7);
   });
 
-  it("holds it OFF-SCREEN, and re-enters from the bottom", () => {
+  it("holds it OFF-SCREEN, and re-enters from the bottom EDGE", () => {
     // Not a pause mid-list: the parked transform is the one that has the roll
-    // fully above the fold, and the cycle restarts from fully below it — the
-    // same entrance as the first pass.
+    // fully above the fold, and the cycle restarts from below the bottom of
+    // the WINDOW — the same entrance as the first pass.
+    //
+    // #1920: this test used to pin `translateY(100%)` here while its own name
+    // claimed "from the bottom", and the two disagreed. A percentage translate
+    // resolves against the element's own border box, so 100% parks the roll's
+    // top edge at its own height — below the fold only for a roll TALLER than
+    // the window. With nine contributors it is a few hundred px against a
+    // ~1000px viewport, so every cycle began with the titles already halfway
+    // up the screen (vjt, #grappa: "riappaiono in mezzo allo schermo").
+    //
+    // So the assertion is on the UNIT, not on a number: the entrance has to be
+    // viewport-relative or the defect is back, and no roll height can make a
+    // `%` entrance correct on every window.
     const all = stops();
-    expect(all[0]?.transform).toBe("translateY(100%)");
+    expect(all[0]?.transform).toMatch(/^translateY\(100d?vh\)$/);
     expect(all.at(-1)?.transform).toBe("translateY(-100%)");
+  });
+
+  it("keeps the exit self-relative, because clearing the top is about the ROLL", () => {
+    // The asymmetry is deliberate and worth a test of its own, since it reads
+    // like an oversight: the roll leaves when it has travelled its OWN height
+    // past the top edge, which is a fact about the roll, while it arrives from
+    // the window's bottom, which is a fact about the window. Swapping either
+    // for the other's unit breaks a different size of roll.
+    const all = stops();
+    const exits = all.filter((stop) => stop.transform.includes("-100%"));
+    expect(exits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("carries a vh fallback for engines with no dynamic-viewport units", () => {
+    // #205's posture, applied to the roll: biome forbids the classic
+    // `transform: translateY(100vh); transform: translateY(100dvh)` duplicate,
+    // so the fallback is a whole re-declaration of the animation under
+    // `@supports not (height: 100dvh)`. Without it, Safari < 15.4 drops the
+    // 0% stop entirely and the roll starts at translate zero — which is
+    // mid-screen, i.e. exactly the bug this issue closed.
+    const fallback = mediaGatedBlocks(
+      /@supports\s*not\s*\(\s*height\s*:\s*100dvh\s*\)\s*\{/g,
+      "@supports not (height: 100dvh)",
+    ).find((block) => block.includes("@keyframes credits-roll"));
+    expect(fallback, "no dvh fallback for @keyframes credits-roll").toBeDefined();
+    expect(fallback).toMatch(/transform:\s*translateY\(100vh\)/);
   });
 
   it("did not slow the titles down to buy the interlude", () => {

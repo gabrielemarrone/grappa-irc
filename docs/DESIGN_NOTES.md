@@ -45840,3 +45840,118 @@ revocable from the UI), and now that upload preferences have a home in settings
 the reset belongs next to the opt-in. Deliberately out of scope for this slice.
 
 _Deploy: **HOT — `--cic` only.** Client ordering; no server change._
+<!-- entry #1920 -->
+
+---
+
+## 2026-09-05 — #1920: the credit roll enters from the bottom, and the soundtrack becomes a suite
+
+Two reports from vjt on #grappa against staging `b06262041`, one a defect and
+one an ask, shipped together because they are the same loop seen twice: what
+happens when the titles come back round.
+
+### The entrance was measured against the wrong box
+
+> «i credits riappaiono in mezzo allo schermo dopo esser scrollati tutti su,
+> dovrebbero ri-apparire dal fondo»
+
+`@keyframes credits-roll` opened on `transform: translateY(100%)`. **A
+percentage translate resolves against the element's OWN border box**, and
+`.credits-roll` is `position: absolute` with `left`/`right` but no `top`, so
+its static position puts its top edge at y=0 of `.credits-viewport`.
+`translateY(100%)` therefore parked that edge at y = the roll's own height —
+below the fold ONLY for a roll taller than the window.
+
+It is not. With the nine contributors this repo bakes, the roll is a few
+hundred px against a ~1000px viewport, so every cycle began with the titles
+already fully on screen, halfway up. The exit was never wrong: `-100%` is
+exactly the roll's own height past the top, which is what "cleared" means for
+the roll.
+
+So the fix is an ASYMMETRY, and it reads like an oversight unless it is
+written down: **the entrance is viewport-relative (`100dvh`) and the exit
+stays self-relative (`-100%`)**, because arriving is a fact about the window
+and leaving is a fact about the roll. `dvh` rather than `vh` for the reason
+#205 records at `#root` — `100vh` is iOS Safari's URL-bar-hidden LAYOUT
+viewport, which would start the roll below the visible bottom and eat the
+first seconds of the entrance — with #205's `@supports not (height: 100dvh)`
+re-declaration carrying the `vh` fallback, since biome forbids the classic
+duplicate-property spelling.
+
+**The test that should have caught this was the one that encoded it.**
+`creditsRain.test.ts` asserted `all[0]?.transform === "translateY(100%)"`
+under the name *"holds it OFF-SCREEN, and re-enters from the bottom"*. The
+name and the value disagreed and the value won for two issues. It now asserts
+on the UNIT (`/^translateY\(100d?vh\)$/`) rather than on a number: no roll
+height makes a `%` entrance correct on every window, so pinning the unit is
+pinning the claim.
+
+**Accepted cost, stated so it is not rediscovered as a bug.** The cycle is
+still 34s while the distance covered grew, so the titles travel faster than
+they did — on a short roll, noticeably. The alternative is measuring the
+distance in JS and setting the duration from it, i.e. a layout read per
+resize to hold steady a number nobody has complained about. Declined.
+
+### One bar became four movements, and the ROLL picks which
+
+> «e dovrebbe cambiare la musichetta quando ri-appaiono» /
+> «più variegata più chiptune più voci»
+
+#1916 made the phrase four bars and left it looping verbatim: about four and a
+half repeats per 34s cycle, identical on every cycle. `MOVEMENTS` replaces
+`BARS` — four movements of four bars, each with its own progression, pulse
+width, drum pattern and second-channel role — and the movement index comes
+from `creditsRoll.creditsRollPass(roll)`, which reads `currentIteration` off
+the roll's own CSS animation.
+
+**ONE CLOCK, the same doctrine `creditsRain.rollIsParked` follows.** A
+`setInterval` at 34s would be a second clock, and it would disagree exactly
+where it matters: a backgrounded tab freezes rAF and the animation with it
+while timers keep running, so the music would turn over while the titles stood
+still. The accessor is read inside the scheduler's own pump, one bar ahead of
+what is heard, so the switch can only land on a bar line; `barIndex` resets
+with it, so the incoming movement enters at ITS first bar rather than wherever
+the outgoing one had got to.
+
+**The channel model is the NES's, and that is what makes `harmony` and `arp`
+mutually exclusive.** Two pulses, one triangle, one noise. The lead owns pulse
+one; the second pulse does a harmony line OR sixteenths, never both, because
+it is one channel and a chip that could sound both would not be a chip. The
+harmony is DERIVED rather than written out — the nearest chord tone below the
+lead note, which tracks it in thirds and fourths that are in key by
+construction; a second `Eight<Note>` per bar would be the same information
+typed twice, and the copy that drifts is always the one nobody hums.
+
+**"Più chiptune" is mostly the pulse WIDTH.** `OscillatorNode` has no 25% or
+12.5% type, so those are `PeriodicWave`s built from the duty-`d` series
+`(2/nπ)·sin(nπd)`, 24 harmonics, cached per width and normalisation left ON so
+the rendered peak stays ≤ 1 (the gain budget is stated in those terms). 50%
+stays the built-in `square`, so the OPENING movement is #1916's timbre exactly
+rather than a ringing 24-harmonic approximation of a wave the engine already
+has. An engine with no `createPeriodicWave` loses the width, never the note.
+
+### The gain budget did not move, and that is the constraint the rest bends around
+
+`PEAK_GAIN` is untouched, and the ceiling is still #1773's worst instant
+(1.4167 × master). More voices had to be paid for out of existing headroom, so
+a lead WITH a second channel under it comes down to 0.74 by exactly what that
+channel takes, and a lead without one keeps 1. Both arrangements land on 1.36
+— under #1916's 1.41, so this is quieter at its worst, not louder — and the
+opening movement is therefore not quieter than what shipped, which would have
+been an odd thing to trade for an improvement to pass two.
+
+`creditsAudio.test.ts` measures that across EVERY movement rather than
+trusting the arithmetic above: the per-movement peak is the claim, and a suite
+whose loudest movement is untested is a suite with no bound at all.
+
+### What is NOT proven here
+
+The vitest suite could not be run on the host that wrote this (`nowhere`,
+node 20: jsdom's undici needs `webidl.util.markAsUncloneable`, node ≥22). Types
+(`tsc --noEmit`) and lint (`biome check`) are green locally, and the score's
+arithmetic — the per-movement loudness bound, the harmony staying below the
+lead, the movements being distinct, the suite wrapping — was measured directly
+off an esbuild bundle of the module. **The unit suite's verdict is CI's**, and
+nothing here should be read as a claim that it passed locally.
+
+_Deploy: **HOT — `--cic` only.** Client-side; no server change._

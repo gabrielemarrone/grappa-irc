@@ -128,3 +128,72 @@ describe("createProseDeck (#1924)", () => {
     expect(deck.draw()).toBeNull();
   });
 });
+
+describe("the deck reports its own exhaustion (#1931)", () => {
+  // The credits now END, and the trigger for the ending is THIS: the bag has
+  // dealt every set once. Not a pass counter and not a timer — both of those
+  // would be a second tally that can disagree with what the reader has
+  // actually been shown, which is the one thing the ending must not get wrong.
+
+  it("is not exhausted before it has dealt anything", () => {
+    // A fresh bag is empty in the same sense a dealt-out one is — the refill
+    // is lazy — so "the bag array is empty" alone cannot be the reading. This
+    // is the case that separates the two.
+    expect(createProseDeck().exhausted()).toBe(false);
+  });
+
+  it("stays unexhausted while sets are still to come", () => {
+    const deck = createProseDeck();
+    for (let i = 0; i < CREDITS_PROSE.length - 1; i += 1) {
+      deck.draw();
+      expect(deck.exhausted(), `after draw ${i + 1}`).toBe(false);
+    }
+  });
+
+  it("reports exhaustion exactly once per full bag", () => {
+    // Twice through the pool: the reading must go true on the draw that empties
+    // the bag and false again on the next one, which is the refill. A reading
+    // that latched would send every later pass to the ending.
+    const deck = createProseDeck();
+    const draws = CREDITS_PROSE.length * 2;
+    const exhaustedAt: number[] = [];
+    for (let i = 1; i <= draws; i += 1) {
+      deck.draw();
+      if (deck.exhausted()) exhaustedAt.push(i);
+    }
+    expect(exhaustedAt).toEqual([CREDITS_PROSE.length, CREDITS_PROSE.length * 2]);
+  });
+
+  it("counts the whole pool, not a lucky early repeat", () => {
+    // The property the ending depends on: when it reports exhausted, EVERY set
+    // has been on screen. Asserted by collecting them rather than by counting.
+    const deck = createProseDeck();
+    const seen = new Set<string>();
+    let draws = 0;
+    while (!deck.exhausted() && draws <= CREDITS_PROSE.length) {
+      const set = deck.draw();
+      if (set !== null) seen.add(set.title);
+      draws += 1;
+    }
+    expect(deck.exhausted()).toBe(true);
+    expect(seen.size).toBe(CREDITS_PROSE.length);
+  });
+
+  it("is exhausted by its one set when that is all it has", () => {
+    const deck = createProseDeck([{ title: "only", paragraphs: ["only"] }]);
+    expect(deck.exhausted()).toBe(false);
+    deck.draw();
+    expect(deck.exhausted()).toBe(true);
+  });
+
+  it("an empty pool is never exhausted, because it has nothing to deal", () => {
+    // The failure this forbids is the loud one: a pool filtered down to
+    // nothing would otherwise read as "everything has been shown" on the very
+    // first pass and cut straight to the ending.
+    const deck = createProseDeck([]);
+    expect(deck.exhausted()).toBe(false);
+    deck.draw();
+    deck.draw();
+    expect(deck.exhausted()).toBe(false);
+  });
+});

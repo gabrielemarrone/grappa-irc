@@ -178,6 +178,24 @@ export const CREDITS_PROSE: readonly ProseSet[] = [
 export type ProseDeck = {
   /** The set for the pass that is starting now, or `null` from an empty pool. */
   draw(): ProseSet | null;
+  /**
+   * Has the current bag dealt every set it holds? (#1931)
+   *
+   * TRUE for exactly the window between the draw that empties the bag and the
+   * next one, which refills it — so a caller reading this once per pass sees
+   * it once per full bag, and the credits' ending fires once per bag rather
+   * than on every pass thereafter.
+   *
+   * This is DERIVED, never tallied. The bag, the last index dealt and the pool
+   * size already say it between them; a `dealt` counter alongside them would
+   * be a second account of the same fact, and the one that drifts is always
+   * the one the ending reads.
+   *
+   * `false` from an empty pool: nothing has been shown, so nothing has been
+   * exhausted — the reading a bare `bag.length === 0` gets wrong, and it gets
+   * it wrong in the direction that cuts straight to the ending on pass one.
+   */
+  exhausted(): boolean;
 };
 
 /**
@@ -237,6 +255,13 @@ export function createProseDeck(
       const index = bag.pop() as number;
       last = index;
       return sets[index] as ProseSet;
+    },
+
+    exhausted(): boolean {
+      // `last !== null` is what separates a bag that has been dealt out from
+      // one that has never been filled: the refill is lazy, so both leave
+      // `bag` empty and only "something has been dealt" tells them apart.
+      return sets.length > 0 && last !== null && bag.length === 0;
     },
   };
 }

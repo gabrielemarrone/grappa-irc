@@ -14625,6 +14625,56 @@ audio.media-viewer-media {
   }
 }
 
+/* #1929 — the FIRST block (titles, contributors, the cow, the special thanks)
+   and the fade that ends it. Everything after this block is prose, and the
+   fade is the seam between the two.
+
+   The layout properties are `inherit`ed rather than restated: this element
+   exists only to carry an animation, and a second copy of the roll's column
+   metrics would be a number to keep in step for nothing.
+
+   ONE CLOCK, still. The fade is a CSS animation on the same 34s as the roll
+   and starting with it, so it cannot drift from the travel it is timed
+   against — a JS `setTimeout` at "about thirty seconds" would be a second
+   clock, and it would disagree in the case that always breaks these: a
+   backgrounded tab freezes the animation and keeps the timer running.
+
+   `1 forwards`, not `infinite`: the block fades once and stays gone. The
+   element is removed at the first `animationiteration` anyway (the roll swaps
+   to prose), so `forwards` is only holding opacity 0 across the parked tail. */
+.credits-block {
+  display: flex;
+  flex-direction: inherit;
+  align-items: inherit;
+  gap: inherit;
+  animation: credits-block-fade 34s linear 1 forwards;
+}
+
+/* The fade REACHES ZERO at 82%, which is the offset `@keyframes credits-roll`
+   parks at — the block finishes dissolving exactly as it finishes leaving, so
+   the interlude that follows is pure rain with nothing half-visible in it.
+   Those two numbers must agree, and `creditsRain.test.ts` reads both out of
+   this stylesheet and fails if they ever stop agreeing.
+
+   The 70% start is the only number here that is its own: it buys ~4s of
+   dissolve, which is long enough to read as a fade rather than as a cut.
+   `creditsRain` reads it back off these keyframes instead of copying it, so
+   retiming the dissolve moves the rain's surge with it. */
+@keyframes credits-block-fade {
+  0% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 .credits-title {
   margin: 0 0 0.25rem;
   font-size: 1.8em;
@@ -14694,6 +14744,52 @@ audio.media-viewer-media {
   font-style: italic;
   color: var(--muted);
   text-shadow: 0 0 0.5rem var(--accent);
+}
+
+/* #1929 — bahamut's Super Cow, reused verbatim (see `creditsBlock.ts`).
+
+   `pre`, not `pre-wrap`: this is 38 columns of fixed-width art, and wrapping
+   it does not degrade it, it destroys it. So the art never wraps and the FONT
+   gives way instead — `min()` caps the size at 0.8em on anything roomy and
+   scales it down by viewport below that, which is what keeps the cow whole on
+   a 320px phone where 38 columns at 0.8em would not fit.
+
+   ⚠️ Sized by arithmetic (38 columns x ~0.6em advance against the 88vw the
+   rest of the roll keeps for itself), NOT verified on a real handset — this
+   session has no device and no browser to launch one in. */
+.credits-cow {
+  margin: 0 0 1.5rem;
+  font-family: var(--font-mono);
+  font-size: min(0.8em, 3vw);
+  line-height: 1.15;
+  white-space: pre;
+  color: var(--muted);
+  text-shadow: none;
+}
+
+/* LEFT-aligned inside the centred column, for the reason `.credits-prose`
+   records: a forty-word reason centred costs the reader the start of every
+   line. Same `ch` cap, same argument — the measure that reads well in a
+   monospace pastiche is a count of characters, not a multiple of the font. */
+.credits-thanks {
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: min(58ch, 88vw);
+  text-align: left;
+  font-size: 0.95em;
+  line-height: 1.5;
+}
+
+.credits-thanks-who {
+  color: var(--accent);
+}
+
+.credits-thanks-why {
+  color: var(--muted);
 }
 
 /* #1924 — the prose that rides between one pass of the names and the next,

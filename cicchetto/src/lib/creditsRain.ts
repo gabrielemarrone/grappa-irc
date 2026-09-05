@@ -44,6 +44,13 @@ export const CREDITS_RAIN_LOOK: MatrixRainLook = {
  * column to light. It is rendered here as more of each column being lit
  * (brighter glyph, longer streak) rather than as more columns, and that is a
  * substitution, not the same thing.
+ *
+ * #1929 reuses this look for the FIRST block's fade rather than introducing a
+ * third one, and that is a deliberate reuse of the two-look model rather than
+ * an interpolation between them: "the rain thickens" is satisfied by reaching
+ * this look as the dissolve begins. A ramp would mean lerping four knobs
+ * (one of them an rgba string) to render a four-second nuance, which is more
+ * mechanism than the effect is worth — see DESIGN_NOTES.
  */
 export const CREDITS_RAIN_BURST_LOOK: MatrixRainLook = {
   glyphAlpha: 0.45,
@@ -54,13 +61,79 @@ export const CREDITS_RAIN_BURST_LOOK: MatrixRainLook = {
 
 /**
  * The look for RIGHT NOW, given the element carrying the `credits-roll`
- * animation. Handed to `MatrixRain` as its `look` prop, so it is called from
- * inside the frame loop that already exists.
+ * animation and the one carrying `credits-block-fade`. Handed to `MatrixRain`
+ * as its `look` prop, so it is called from inside the frame loop that already
+ * exists.
+ *
+ * #1929 — TWO reasons to burst now, and they are the same reason: there is
+ * nothing left on screen to compete with the rain. The interlude is that state
+ * arrived at by the roll parking; the fade is it arrived at by the first block
+ * dissolving. The rain thickens THROUGH the dissolve rather than after it,
+ * which is what makes the block hand over to the prose instead of just
+ * stopping.
  *
  * @param roll the `.credits-roll` element, or `undefined` before it mounts
+ * @param block the `.credits-block` element, or `undefined` before it mounts
+ *   and after the first pass has taken it away
  */
-export function creditsRainLook(roll: HTMLElement | undefined): MatrixRainLook {
-  return rollIsParked(roll) ? CREDITS_RAIN_BURST_LOOK : CREDITS_RAIN_LOOK;
+export function creditsRainLook(
+  roll: HTMLElement | undefined,
+  block: HTMLElement | undefined,
+): MatrixRainLook {
+  return rollIsParked(roll) || blockIsFading(block) ? CREDITS_RAIN_BURST_LOOK : CREDITS_RAIN_LOOK;
+}
+
+/**
+ * Is the first block dissolving — i.e. has `credits-block-fade` reached the
+ * stretch where its opacity is on the way down?
+ *
+ * Same posture as `rollIsParked`, deliberately: the phase is READ off the
+ * animation that performs the fade, so the rain cannot surge at a different
+ * moment than the block dissolves. Retime the dissolve in the stylesheet and
+ * the surge moves with it, with nothing here to edit.
+ *
+ * Degrades to "not fading" for the same three real cases as its sibling, plus
+ * a fourth of its own: after the first pass the block is gone from the DOM,
+ * and `undefined` is then the honest answer rather than a missing element.
+ */
+export function blockIsFading(block: HTMLElement | undefined): boolean {
+  if (block === undefined) return false;
+
+  const effect = block.getAnimations?.()[0]?.effect ?? null;
+  if (effect === null) return false;
+
+  const progress = effect.getComputedTiming().progress;
+  if (typeof progress !== "number") return false;
+
+  const startsAt = fadeOffset(effect);
+  return startsAt !== null && progress >= startsAt;
+}
+
+/**
+ * The offset at which the block STARTS losing opacity, read off the fade's own
+ * keyframes — the last stop that is still fully opaque.
+ *
+ * Read rather than declared, for the reason `parkOffset` is: a constant here
+ * would be a second copy of a number living in `@keyframes
+ * credits-block-fade`, and the two would drift the first time anyone retimed
+ * the dissolve.
+ *
+ * `null` when there is no dissolve to be inside of — a fade whose first stop
+ * is already transparent, or one that never stops being opaque.
+ */
+function fadeOffset(effect: AnimationEffect): number | null {
+  const keyframed = effect as AnimationEffect & {
+    readonly getKeyframes?: () => readonly ComputedKeyframe[];
+  };
+  const frames = keyframed.getKeyframes?.();
+  if (frames === undefined) return null;
+
+  let opaqueUntil: number | null = null;
+  for (const frame of frames) {
+    if (frame.opacity !== "1") break;
+    opaqueUntil = frame.computedOffset;
+  }
+  return opaqueUntil !== null && opaqueUntil > 0 && opaqueUntil < 1 ? opaqueUntil : null;
 }
 
 /**

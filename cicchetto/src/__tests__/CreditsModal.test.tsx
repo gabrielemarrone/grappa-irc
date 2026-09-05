@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CreditsModal from "../CreditsModal";
 import type { BuildCredits } from "../lib/buildCredits";
+import { CREDITS_SPECIAL_THANKS } from "../lib/creditsBlock";
 import {
   closeCreditsModal,
   creditsMuted,
@@ -170,6 +171,60 @@ describe("CreditsModal (#1773)", () => {
     expect(people[2]?.querySelector("em")).toBeNull();
     expect(people[3]?.querySelector(".credits-person-name")?.textContent).toBe("Ada Lovelace");
     expect(people[3]?.querySelector("em")).toBeNull();
+  });
+
+  // #1929 — the roll, the cow and the special thanks are ONE block, the first
+  // one, and the prose sets begin only after it has gone.
+  //
+  // `getAnimations` is absent in jsdom, so `creditsRollPass` would read every
+  // pass as the first and the swap could never be observed. Stubbing it on the
+  // roll is what makes the SECOND pass reachable here at all; the fade itself
+  // is CSS and belongs to `creditsRain.test.ts`, which reads the stylesheet.
+  const turnTheRollOver = (): void => {
+    const roll = screen.getByTestId("credits-roll");
+    Object.defineProperty(roll, "getAnimations", {
+      configurable: true,
+      value: () => [{ effect: { getComputedTiming: () => ({ currentIteration: 1 }) } }],
+    });
+    roll.dispatchEvent(new Event("animationiteration", { bubbles: true }));
+  };
+
+  it("shows the cow and every dictated thanks inside the first block", () => {
+    render(() => <CreditsModal />);
+    openCreditsModal();
+
+    // The cow is IN the block, not beside it: the block is what fades, so
+    // anything outside it would survive the dissolve and sit on the rain.
+    const block = screen.getByTestId("credits-block");
+    expect(block.contains(screen.getByTestId("credits-cow"))).toBe(true);
+    expect(screen.getByTestId("credits-cow").textContent).toContain("Super Cow Powers");
+
+    // Every line, not a sample: the list is dictated, so a render that drops
+    // one is the failure mode worth catching.
+    const thanks = screen.getAllByTestId("credits-thanks");
+    expect(thanks).toHaveLength(CREDITS_SPECIAL_THANKS.length);
+    for (const entry of CREDITS_SPECIAL_THANKS) {
+      expect(thanks.some((line) => line.textContent?.includes(entry.who))).toBe(true);
+      expect(thanks.some((line) => line.textContent?.includes(entry.why))).toBe(true);
+    }
+  });
+
+  it("carries no prose during the first block, and nothing but prose after it", () => {
+    // The seam #1929 asked for, as an outcome rather than as a timing: on the
+    // first pass the block is alone, and once the roll comes round the block
+    // is gone and a paragraph set has taken its place.
+    render(() => <CreditsModal />);
+    openCreditsModal();
+
+    expect(screen.getByTestId("credits-block")).toBeTruthy();
+    expect(screen.queryByTestId("credits-prose")).toBeNull();
+
+    turnTheRollOver();
+
+    expect(screen.queryByTestId("credits-block")).toBeNull();
+    expect(screen.queryByTestId("credits-cow")).toBeNull();
+    expect(screen.queryAllByTestId("credits-thanks")).toHaveLength(0);
+    expect(screen.getByTestId("credits-prose")).toBeTruthy();
   });
 
   it("says the build carries no history rather than rolling an empty list", () => {

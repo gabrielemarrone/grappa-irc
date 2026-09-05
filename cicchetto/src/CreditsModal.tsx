@@ -10,6 +10,7 @@ import {
 import { buildCredits, creditsDateLabel } from "./lib/buildCredits";
 import { bootBundleVersionAccessor } from "./lib/bundleHash";
 import { type CreditsArpeggio, startCreditsArpeggio } from "./lib/creditsAudio";
+import { CREDITS_COW, CREDITS_SPECIAL_THANKS } from "./lib/creditsBlock";
 import {
   closeCreditsModal,
   creditsModalOpen,
@@ -65,6 +66,20 @@ const CreditsModal: Component = () => {
   // close over it, neither runs before it is assigned.
   let roll: HTMLDivElement | undefined;
 
+  // #1929 — the first block's own element, and the second thing the rain
+  // reads. It carries `credits-block-fade`, so its phase is what tells
+  // `creditsRainLook` the dissolve has started; the roll's phase alone cannot,
+  // because the roll is still travelling at that point.
+  //
+  // A SEPARATE ref rather than a subtree lookup: `roll.getAnimations({subtree:
+  // true})` would return both animations and the existing readers index `[0]`,
+  // so the two would start depending on an unspecified order.
+  //
+  // Reassigned to `undefined` when the block goes, because after the first
+  // pass there genuinely is no block — a stale reference would keep the rain
+  // bursting off a dead element's filled-forwards animation.
+  let block: HTMLDivElement | undefined;
+
   // ── prose between the passes (#1924) ────────────────────────────────────
   // A THIRD reader of the same animation, and deliberately not a third clock:
   // `animationiteration` is the roll telling us it has come back round, so the
@@ -90,18 +105,18 @@ const CreditsModal: Component = () => {
   const [pass, setPass] = createSignal(0);
 
   createEffect(() => {
-    // Drawn on OPEN rather than at construction: this component is mounted in
-    // Shell for the whole session, so a draw in the body would burn a set at
-    // boot for a modal nobody may open. Empty until then, and the roll simply
-    // has no prose block — which is also the honest render for a pool that
-    // shipped empty.
+    // #1929 — CLEARED on open, not drawn. The first pass is the block (names,
+    // cow, thanks) and carries no prose at all, so a set drawn here would be
+    // dealt out of the bag and never seen: the first `animationiteration`
+    // replaces it before it is ever on screen. Drawing lazily is what keeps
+    // the deck's no-repeat promise honest.
     //
     // The pass resets with it: `Show` builds a fresh element on every open, so
     // its animation genuinely starts over, and carrying the old count would
-    // hide the names from the second viewing onwards.
+    // hide the block from the second viewing onwards.
     if (creditsModalOpen()) {
       setPass(0);
-      setProse(deck.draw());
+      setProse(null);
     }
   });
 
@@ -167,7 +182,7 @@ const CreditsModal: Component = () => {
         <MatrixRain
           class="credits-rain"
           testId="credits-matrix-rain"
-          look={() => creditsRainLook(roll)}
+          look={() => creditsRainLook(roll, block)}
         />
 
         <div class="credits-chrome">
@@ -226,70 +241,127 @@ const CreditsModal: Component = () => {
                 the same list every 34s teaches the viewer to stop reading,
                 which is the surest way to make the prose invisible too.
 
-                The swap rides the same `animationiteration` as the prose, so
-                it lands on the frame the column is parked off the top —
-                nothing is seen disappearing. */}
-            <Show when={pass() === 0}>
-              <h2 class="credits-title" data-testid="credits-title">
-                GRAPPA IRC
-              </h2>
-              <p class="credits-version" data-testid="credits-version">
-                {versionLabel()}
-              </p>
-              <p class="credits-build" data-testid="credits-build">
-                <span data-testid="credits-sha">{credits.sha ?? "no build sha"}</span>
-                <Show when={dateLabel()}>
-                  {(day) => (
-                    <>
-                      <span aria-hidden="true"> · </span>
-                      <span data-testid="credits-date">{day()}</span>
-                    </>
-                  )}
-                </Show>
-              </p>
+                #1929 — and they are not alone in it: the titles, the
+                contributors, the cow and the special thanks are ONE block, the
+                first one, which ends in a fade. So the wrapper is not
+                decorative — it is the element carrying `credits-block-fade`,
+                and it is what dissolves and what the rain reads. Putting that
+                animation on the roll instead would fade the prose too, for
+                ever, since the roll outlives the block.
 
-              <h3 class="credits-heading">contributors</h3>
-              <ul class="credits-list">
-                <For
-                  each={credits.contributors}
-                  fallback={
-                    // Honest, not blank: this is what a build from a source
-                    // tarball looks like, and it is a legitimate build.
-                    <li class="credits-empty" data-testid="credits-empty">
-                      this build carries no history
-                    </li>
-                  }
-                >
-                  {(person) => (
-                    <li class="credits-person" data-testid="credits-person">
-                      <span class="credits-person-name">
-                        {person.nick ?? person.name}
-                        {/*
-                          The real name is a parenthetical to the handle, and
-                          only when it says something the handle does not: for
-                          Lucy, or for a bot committing under its own handle,
-                          the two are the same string and "Lucy (Lucy)" would
-                          be noise. Nobody in the table, no nick — the bare
-                          name above is already the whole row.
-                        */}
-                        <Show when={person.nick !== null && person.nick !== person.name}>
-                          {" "}
-                          (<em class="credits-person-realname">{person.name}</em>)
-                        </Show>
-                      </span>
-                      <span class="credits-person-count">{person.commits}</span>
-                    </li>
-                  )}
-                </For>
-              </ul>
+                The DOM swap still rides `animationiteration`, i.e. it lands a
+                full interlude after the fade has finished: by then the block
+                is transparent AND parked off the top, so what is removed has
+                been invisible twice over. */}
+            <Show when={pass() === 0}>
+              <div
+                class="credits-block"
+                data-testid="credits-block"
+                ref={(node) => {
+                  block = node;
+                  // A detached element reports no animations, so a stale ref
+                  // would already answer "not fading" — this is here to make
+                  // the lifetime explicit rather than to rely on that.
+                  onCleanup(() => {
+                    block = undefined;
+                  });
+                }}
+              >
+                <h2 class="credits-title" data-testid="credits-title">
+                  GRAPPA IRC
+                </h2>
+                <p class="credits-version" data-testid="credits-version">
+                  {versionLabel()}
+                </p>
+                <p class="credits-build" data-testid="credits-build">
+                  <span data-testid="credits-sha">{credits.sha ?? "no build sha"}</span>
+                  <Show when={dateLabel()}>
+                    {(day) => (
+                      <>
+                        <span aria-hidden="true"> · </span>
+                        <span data-testid="credits-date">{day()}</span>
+                      </>
+                    )}
+                  </Show>
+                </p>
+
+                <h3 class="credits-heading">contributors</h3>
+                <ul class="credits-list">
+                  <For
+                    each={credits.contributors}
+                    fallback={
+                      // Honest, not blank: this is what a build from a source
+                      // tarball looks like, and it is a legitimate build.
+                      <li class="credits-empty" data-testid="credits-empty">
+                        this build carries no history
+                      </li>
+                    }
+                  >
+                    {(person) => (
+                      <li class="credits-person" data-testid="credits-person">
+                        <span class="credits-person-name">
+                          {person.nick ?? person.name}
+                          {/*
+                            The real name is a parenthetical to the handle, and
+                            only when it says something the handle does not: for
+                            Lucy, or for a bot committing under its own handle,
+                            the two are the same string and "Lucy (Lucy)" would
+                            be noise. Nobody in the table, no nick — the bare
+                            name above is already the whole row.
+                          */}
+                          <Show when={person.nick !== null && person.nick !== person.name}>
+                            {" "}
+                            (<em class="credits-person-realname">{person.name}</em>)
+                          </Show>
+                        </span>
+                        <span class="credits-person-count">{person.commits}</span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+
+                {/* Azzurra's own Super Cow, from bahamut's `/info`. A `pre`
+                    because it is fixed-width art: the glyphs mean nothing
+                    except in the columns they were drawn in. */}
+                <pre class="credits-cow" data-testid="credits-cow">
+                  {CREDITS_COW}
+                </pre>
+
+                {/* Dictated by vjt, verbatim — see `creditsBlock.ts`. The
+                    dash is `aria-hidden` for the reason the build separator
+                    above is: it is punctuation between two fields, and a
+                    screen reader announcing it reads as a word. */}
+                <h3 class="credits-heading">special thanks</h3>
+                <ul class="credits-thanks">
+                  <For each={CREDITS_SPECIAL_THANKS}>
+                    {(entry) => (
+                      <li data-testid="credits-thanks">
+                        <span class="credits-thanks-who">{entry.who}</span>
+                        <span aria-hidden="true"> — </span>
+                        <span class="credits-thanks-why">{entry.why}</span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+
+                {/* The coda closes the block for the same reason it used to
+                    close the names: it is a tagline, and a tagline on a loop
+                    stops being read and starts being a boast. */}
+                <p class="credits-coda">
+                  an always-on IRC bouncer, and a client that looks like irssi
+                </p>
+              </div>
             </Show>
 
-            {/* #1924 — inside the column, directly under the names. That
-                placement is the feature: the paragraph enters through the
-                bottom of the viewport while the contributor list is still
-                leaving through the top, so nothing waits for the titles to
-                scroll away and there is no second screen to cut to. */}
-            <Show when={prose()}>
+            {/* #1924 — inside the column, so a paragraph enters through the
+                bottom of the viewport rather than cutting to a second screen.
+
+                #1929 — but NOT during the first pass any more. The block is
+                the first thing and the prose is what comes after it, so the
+                gate is on the pass and not merely on there being a set: the
+                two used to share the column, and the block would otherwise be
+                trailed by a paragraph it is supposed to hand over to. */}
+            <Show when={pass() > 0 && prose()}>
               {(set) => (
                 <div class="credits-prose" data-testid="credits-prose">
                   <h3 class="credits-prose-title" data-testid="credits-prose-title">
@@ -298,15 +370,6 @@ const CreditsModal: Component = () => {
                   <For each={set().paragraphs}>{(paragraph) => <p>{paragraph}</p>}</For>
                 </div>
               )}
-            </Show>
-
-            {/* The coda goes with the names for the same reason: it is a
-                tagline, and a tagline on a loop stops being read and starts
-                being a boast. */}
-            <Show when={pass() === 0}>
-              <p class="credits-coda">
-                an always-on IRC bouncer, and a client that looks like irssi
-              </p>
             </Show>
           </div>
         </div>

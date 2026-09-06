@@ -480,15 +480,20 @@ const CreditsModal: Component = () => {
     // would move the capture onto the new pointer and hand the release to a
     // finger that never took the hold.
     if (heldPointer !== null) return;
+    // The chrome is buttons, and none of this gesture belongs to them: a double
+    // tap on the mute toggle is two mute presses, not a skip, and a press on a
+    // button is not a hold. Bailing out BEFORE the capture is the whole point —
+    // once the modal captures the pointer, the compatibility `click` is
+    // dispatched at the CAPTURE TARGET, so the button's own onClick never runs
+    // and the mute/close controls go dead. Measured: e2e #1773 read
+    // aria-pressed="false" after clicking mute, nine polls in a row.
+    if ((event.target as Element | null)?.closest?.(".credits-chrome") != null) return;
     heldPointer = event.pointerId;
     const target = event.currentTarget as HTMLElement;
     // Guarded: jsdom has no pointer capture, and the tests drive this handler.
     target.setPointerCapture?.(event.pointerId);
     setHeld(true);
-    // The chrome is buttons, and a double tap on the mute toggle is two mute
-    // presses, not a skip. Everything else on the modal is reading surface.
-    const onChrome = (event.target as Element | null)?.closest?.(".credits-chrome") != null;
-    tapStartedAt = onChrome ? 0 : Date.now();
+    tapStartedAt = Date.now();
   };
 
   // ── double tap: skip to the next set (vjt, #grappa 12:13) ───────────────

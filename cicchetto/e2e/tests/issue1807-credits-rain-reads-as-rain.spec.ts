@@ -201,9 +201,19 @@ test("#1807 — the credits rain paints a bright leader, and the burst rides the
   const finalTransform = stops.at(-1)?.transform;
   const parkAt = stops.find((stop) => stop.transform === finalTransform)?.at ?? 1;
   expect(parkAt, "the roll never parks — there is no interlude to hold on").toBeLessThan(1);
-  const interludeMs = (timing?.durationMs ?? 0) * (1 - parkAt);
-  expect(interludeMs).toBeGreaterThanOrEqual(5_000);
-  expect(interludeMs).toBeLessThanOrEqual(7_000);
+  // The interlude is a SHARE of the cycle, not a count of seconds. The roll's
+  // duration is written at runtime by `syncRollDistance` — it scales with how
+  // far each set has to travel — and vjt moved the park from 82% to 91% on
+  // 2026-09-06, which shortens the hold at every duration. What survives both
+  // is the shape: the roll parks late, and the hold after it is brief but real.
+  const interludeShare = 1 - parkAt;
+  expect(parkAt, "the roll parks early — the titles are being rushed").toBeGreaterThanOrEqual(0.85);
+  expect(interludeShare).toBeGreaterThan(0);
+  expect(interludeShare).toBeLessThanOrEqual(0.15);
+  const interludeMs = (timing?.durationMs ?? 0) * interludeShare;
+  expect(interludeMs, "the interlude is too short to read as a pause").toBeGreaterThanOrEqual(
+    2_000,
+  );
 
   // ── mid-roll there is no white ──────────────────────────────────────────
   // The counter-claim. Without it, a rain that bursts CONTINUOUSLY would pass

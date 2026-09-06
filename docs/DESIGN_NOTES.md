@@ -46498,3 +46498,82 @@ on its own row.
   label, and rewriting it across the tree buys nothing the reader needs.
 
 _Deploy: **HOT — `--cic` only.** Client-side; no server change._
+<!-- entry #1942 -->
+
+---
+
+## 2026-09-06 — #1942: bandit, cowboy, cowlib — every advisory that has a fix, and the three that do not
+
+Three lock lines move and nothing else: `bandit` 1.12.4 → 1.12.5, `cowboy`
+2.17.0 → 2.18.0, `cowlib` 2.18.0 → 2.19.0. `mix.exs` is untouched, because it
+did not need touching — `bandit "~> 1.6"` and `bypass "~> 2.1"` already admit
+the targets, and `plug_cowboy 2.9.0` asks for `cowboy ~> 2.7`, which 2.18.0
+satisfies. Sibling of #1938 (mint), same shape, same posture.
+
+### bandit is the one that matters, and the reason is the listener
+
+Production serves on Bandit, so its two advisories sit on the live HTTP
+listener rather than behind a test-only dependency: EEF-CVE-2026-74836 /
+GHSA-xj8g-532w-jv94 (HIGH — HTTP/2 connection-window starvation pins Plug
+processes indefinitely) and EEF-CVE-2026-75484 / GHSA-x3gh-xhj4-3vq8 (MEDIUM —
+HTTP/2 header values carrying CR, LF or NUL reach the application
+unvalidated). Both first patched in 1.12.5. cowboy's EEF-CVE-2026-65624
+(MEDIUM, `max_headers` bypass via duplicate header names) and cowlib's
+EEF-CVE-2026-59248 (HIGH, unbounded HPACK/QPACK prefixed-integer decoding) are
+the same class of memory-exhaustion DoS but arrive only through `bypass`
+(`only: :test`), so they are hygiene rather than exposure.
+
+### What it closes, measured rather than asserted
+
+`mix hex.audit` was run before and after and the two lists diffed by advisory
+id, so the claim is a set difference and not a reading of the tail:
+
+| | ids |
+|---|---|
+| **cleared** | EEF-CVE-2026-74836, -75484 (bandit) · -65624 (cowboy) · -59248 (cowlib) |
+| **newly appeared** | none |
+| **still present** | EEF-CVE-2026-43966, -43969, -43971 (cowlib) |
+
+Seven entries before, three after. The pair is its own positive control: the
+BEFORE run named bandit, cowboy and cowlib, so the tool was demonstrably
+looking, and a shrunken list means something.
+
+### The #149 derogation survives, and the three that keep it alive
+
+The three cowlib entries that remain have **no fixed release at any version** —
+OSV records an `introduced` event and no `fixed` one for a release. Response
+splitting in `cow_http_struct_hd:escape_string/2` (-43966, MEDIUM), cookie
+request-header injection in `cow_cookie:cookie/1` (-43969, LOW), Link header
+directive smuggling in `cow_link:link/1` (-43971, MEDIUM; a fix commit exists,
+no release carries it). 2.19.0 does not clear them and no bump can. They stay
+under the #149 derogation for the reason written there and not a new one:
+cowboy and cowlib enter ONLY through `bypass` (`only: :test`), and production
+serves on Bandit and ships neither.
+
+🔴 **What changes is that the derogation's own weakest point is now gone.** It
+rests on unreachability, and bandit — which IS reachable, being the production
+server — had been sitting in the same `hex.audit` output since its advisories
+landed. An exemption argued from "these cannot be reached" reads very
+differently when the list it appears in also contains the listener. After this
+bump the residue is exactly the set the argument covers.
+
+### The gate did not ask for this, and must not be said to have
+
+🔴 `mix deps.audit` — the hard, blocking gate — exits **0 before this change
+and 0 after it**. The pair is VACUOUS as evidence and is recorded as vacuous.
+Its advisory database (the mirego mirror, see the #1938 entry for how it is
+fetched and how far it lags) carries none of these seven. The step that does
+list them is `mix hex.audit`, which is `continue-on-error: true` by the #149
+decision and is therefore not a gate at all.
+
+**So this bump unblocks nothing. It closes four real advisories, one of them
+HIGH on the production listener.** A future reader looking for the CI failure
+that motivated it will not find one, and should not go looking: the motivation
+is the listener, not the pipeline.
+
+_Deploy: **COLD** on every substrate. Measured, not reasoned:
+`Preflight.classify_paths(["mix.lock", "docs/DESIGN_NOTES.md"], s)` returns
+`{:cold, [mix_deps: ["mix.lock"]]}` for `:jail`, `:linux` and `:docker` alike
+(positive control: a `lib/` path returns `{:hot, []}`). Same class as #1938,
+and for the same reason — a dep's beams live outside the app ebin that
+`HotReload.reload_modified/0` walks._

@@ -373,9 +373,9 @@ describe("the credits END (#1931)", () => {
   });
 
   it("ships the manifesto's attribution with it, never bare", () => {
-    // The text is a placeholder pending vjt's written clearance, but the
-    // credit is a condition of ever showing it — so it is wired now, and this
-    // is what stops the slot being filled in later without one.
+    // The credit is the condition on which the text is here at all, so it is
+    // asserted at the RENDER and not only at the constant: a slot that shows
+    // the words without the credit is the failure, and only this level sees it.
     render(() => <CreditsModal />);
     openCreditsModal();
     turnTheRollOver(CREDITS_PROSE.length + 1);

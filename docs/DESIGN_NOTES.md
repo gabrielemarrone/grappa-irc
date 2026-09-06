@@ -46272,18 +46272,41 @@ defect #1916 was filed for.
   nobody's property. A test pins the contour rather than the pitches, so the
   tune can be rewritten without touching it, and forbids the trademarked
   string by name.
-* 🔴 **The manifesto's TEXT is not here.** "The Conscience of a Hacker" (The
-  Mentor — Loyd Blankenship, *Phrack* Vol. 1 Issue 7 Phile 3, 8 January 1986)
-  is from 1986, was never dedicated to the public domain and was never put
-  under a free licence. Forty years of universal reproduction is custom, not
-  permission, and grappa ships a public PWA and a `.deb`. vjt's instruction is
-  verbatim: *do not include it until vjt confirms in writing*. So the BLOCK is
-  built and the text is a placeholder behind one named constant, with a test
-  that fails if the manifesto's own opening lines appear. Its ATTRIBUTION
-  renders now, beside the empty slot, because a credit left to a follow-up is
-  a credit that never ships.
-* 🔴 **The closing line is a placeholder too**, for a smaller reason: the
-  wording is vjt's call, not the implementer's.
+* **The manifesto's TEXT ships, on vjt's own clearance.** "The Conscience of a
+  Hacker" (The Mentor — Loyd Blankenship, *Phrack* Vol. 1 Issue 7 Phile 3, 8
+  January 1986) is from 1986, was never dedicated to the public domain and was
+  never put under a free licence; forty years of universal reproduction is
+  CUSTOM, not permission, and grappa ships a public PWA and a `.deb`. So the
+  slot was built empty first, behind one named constant, with a tripwire test
+  that failed if the manifesto's own opening lines appeared — the standing
+  instruction being *do not include it until vjt confirms in writing*. **He
+  confirmed on 2026-09-06**, as the repository's owner, on the stated grounds
+  that the project is open source and that he will comply with a takedown if
+  one is ever asked for. The tripwire is therefore gone and its tests now pin
+  what SHIPS: the words, the credit beside them, and the two ways the paste
+  can be corrupted silently (below). **The decision is recorded with whose it
+  was on purpose** — the block is still in this file's history, and a reader
+  who finds it must be able to see what lifted it rather than re-derive it.
+* **The attribution is not decoration, it is the term.** It was written before
+  the words arrived, and the render-level test asserts the credit is inside
+  the same block as the text — the constant-level pin cannot see a markup edit
+  that drops one and keeps the other.
+* 🔴 **Two silent corruptions of the pasted text, both pinned.** (1) The Phrack
+  header art is `\/\The Conscience of a Hacker/\/`, and in a plain template
+  literal `\/` is an escape for `/` — the backslashes vanish with no error and
+  nothing in a diff to catch the eye. `String.raw` is why they survive. (2)
+  What was pasted in carried a monotonically growing indent (0, 8, 16, … past
+  100 columns), an editor auto-indent artifact rather than Phrack's layout,
+  and the slot renders `white-space: pre-wrap` in a 64ch column where that
+  wraps into noise on a phone. Every line is flush left — ONE rule applied
+  uniformly, rather than a reconstruction of the original two-level shape,
+  which the mangled indent no longer contains enough information to recover.
+  The words are untouched; the paragraph breaks do the structuring.
+* **The closing line was a placeholder for a smaller reason** — the wording was
+  vjt's call, not the implementer's. It resolved the other way round: vjt
+  approved the implementer's line on 2026-09-06 and changed one word,
+  `friends` → `folks`, which is the Looney Tunes cadence landing in the one
+  place it can land without quoting the mark.
 * **The manifesto is its own block and not a seventeenth prose set.** It is
   ~570 words against a cap of 300, and the cheap way to fit it is to raise the
   cap — which silently un-bounds all sixteen sets the cap exists to keep

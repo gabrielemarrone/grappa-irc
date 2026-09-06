@@ -478,14 +478,14 @@ const CreditsModal: Component = () => {
 
             {/* #1931 — the manifesto, between the last set and the ending.
                 Its own block rather than a seventeenth prose set: it is ~570
-                words against a 150-word cap, and the cheap way to fit it would
+                words against a 300-word cap, and the cheap way to fit it would
                 be to raise the cap, which would silently un-bound all sixteen
                 sets the cap exists to keep readable.
 
-                🔴 The TEXT is a placeholder pending vjt's written licence
-                clearance — see `creditsFinale.ts`. The attribution renders
-                beside it now rather than later, because a credit added in a
-                follow-up is a credit that never ships. */}
+                The text ships on vjt's own clearance (2026-09-06) — see
+                `creditsFinale.ts` for the decision and whose it was. The
+                attribution renders beside it, not after it, because a credit
+                added in a follow-up is a credit that never ships. */}
             <Show when={stage() === "manifesto"}>
               <div class="credits-manifesto" data-testid="credits-manifesto">
                 <p class="credits-manifesto-text">{CREDITS_MANIFESTO}</p>

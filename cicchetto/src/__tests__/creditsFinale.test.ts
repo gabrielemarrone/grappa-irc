@@ -5,18 +5,18 @@ import {
   CREDITS_HEART,
   CREDITS_MANIFESTO,
   CREDITS_MANIFESTO_ATTRIBUTION,
-  manifestoAwaitingClearance,
 } from "../lib/creditsFinale";
 import { CREDITS_PROSE, PROSE_SET_MAX_WORDS } from "../lib/creditsProse";
 
-// #1931 — the finale's content, and the two pieces of it that are NOT ours.
+// #1931 — the finale's content.
 //
-// Two constants here are PLACEHOLDERS awaiting vjt, and that is the whole
-// reason this file exists as a test rather than as a comment: a placeholder
-// nobody can find is a placeholder that ships. Each one is pinned to a single
-// named constant, and the tests below assert the shape a replacement has to
-// keep rather than the words, so filling one in is a one-line edit that stays
-// green — and forgetting to fill it in is visible from here.
+// Two constants here were PLACEHOLDERS awaiting vjt, and that is why this file
+// exists as a test rather than as a comment: a placeholder nobody can find is
+// a placeholder that ships. Both were settled on 2026-09-06 — the closing line
+// approved as written (with `folks` for `friends`), the manifesto cleared for
+// inclusion by the repository's owner. The tests below no longer guard an
+// empty slot; they pin what ships, and the one thing that has not changed is
+// that the words live behind ONE named constant each.
 
 describe("the heart (#1931)", () => {
   it("is the ASCII <3 and not an emoji", () => {
@@ -30,11 +30,12 @@ describe("the heart (#1931)", () => {
   });
 });
 
-describe("the closing line (#1931 — vjt's words, not ours)", () => {
+describe("the closing line (#1931 — approved by vjt, 2026-09-06)", () => {
   it("is one line, behind one named constant", () => {
-    // The wording is dictated and has not arrived. What IS pinned is that it
-    // stays a single line: the finale lays it out under the heart, and a
-    // paragraph there would push the close button off a phone.
+    // The words are settled; what is pinned here is the SHAPE, which is what
+    // a later reword can still break. It stays a single line: the finale lays
+    // it out under the heart, and a paragraph there would push the close
+    // button off a phone.
     expect(CREDITS_FINALE_LINE).not.toContain("\n");
     expect(CREDITS_FINALE_LINE.trim()).toBe(CREDITS_FINALE_LINE);
     expect(CREDITS_FINALE_LINE.length).toBeGreaterThan(0);
@@ -57,43 +58,44 @@ describe("the close button (#1931)", () => {
   });
 });
 
-describe("the manifesto slot (#1931 — BLOCKED on written clearance)", () => {
-  // "The Conscience of a Hacker", The Mentor, Phrack 7:3 (1986). vjt's
-  // instruction is verbatim: *do not include it until vjt confirms in writing
-  // on #grappa*. It is 1986, never dedicated to the public domain and never
-  // put under a free licence; forty years of universal reproduction is custom,
-  // not permission.
+describe("the manifesto (#1931 — cleared by vjt, 2026-09-06)", () => {
+  // "The Conscience of a Hacker", The Mentor (Loyd Blankenship), Phrack 7:3,
+  // 8 January 1986.
   //
-  // So the BLOCK is built and the TEXT is not. These tests are the tripwire.
+  // These tests were a TRIPWIRE while the text was blocked: they asserted the
+  // slot was still empty and failed if the real lines appeared. vjt cleared it
+  // as the repository's owner, so the tripwire is gone and what remains pins
+  // what SHIPS. The three properties below are the ones a careless edit
+  // actually breaks.
 
-  it("is still a placeholder, and says so out loud", () => {
-    expect(manifestoAwaitingClearance()).toBe(true);
-  });
-
-  it("carries none of the manifesto's actual words", () => {
-    // The opening and the two most-quoted lines. If any of these appear, the
-    // text has been pasted in and this test is the thing that says so before
-    // a licence question ships in a `.deb`.
-    const forbidden = [
-      "another one got caught today",
-      "this is our world now",
-      "the world of the electron and the switch",
-      "my crime is that of curiosity",
-      "you may stop this individual",
-    ];
-    const haystack = CREDITS_MANIFESTO.toLowerCase();
-    for (const line of forbidden) {
-      expect(haystack, `the manifesto text is in the tree: "${line}"`).not.toContain(line);
-    }
-  });
-
-  it("already names the author and the source it would ship with", () => {
-    // Prepared NOW rather than when the text lands: the attribution is a
-    // condition of shipping it at all, and a slot that arrives without one is
-    // how it ends up shipping without one.
+  it("carries the text, and the credit that is a condition of carrying it", () => {
+    // Together, deliberately: the attribution is not decoration, it is the
+    // term on which the text is here. A future edit that drops the credit
+    // while keeping the words is the failure this pairing exists to catch.
+    expect(CREDITS_MANIFESTO.toLowerCase()).toContain("another one got caught today");
+    expect(CREDITS_MANIFESTO.toLowerCase()).toContain("i am a hacker, and this is my manifesto");
     expect(CREDITS_MANIFESTO_ATTRIBUTION).toContain("Loyd Blankenship");
     expect(CREDITS_MANIFESTO_ATTRIBUTION).toContain("Phrack");
     expect(CREDITS_MANIFESTO_ATTRIBUTION).toContain("1986");
+  });
+
+  it("keeps the Phrack header art, backslashes and all", () => {
+    // `String.raw`, not a plain template literal. In a plain one `\/` is an
+    // escape for `/`, so the header would silently arrive as `//The
+    // Conscience of a Hacker///` — a corruption with no error anywhere and
+    // nothing in a diff to catch the eye.
+    expect(CREDITS_MANIFESTO).toContain(String.raw`\/\The Conscience of a Hacker/\/`);
+  });
+
+  it("has no leading whitespace on any line", () => {
+    // vjt asked for the indent to go, and the slot renders `white-space:
+    // pre-wrap` in a 64ch column: what was pasted in carried a runaway
+    // auto-indent (past 100 columns) that wraps into noise on a phone. One
+    // rule, applied to every line, so there is no second level to drift.
+    const indented = CREDITS_MANIFESTO.split("\n").filter((line) => /^\s+/.test(line));
+    expect(indented, "lines still carrying an indent").toEqual([]);
+    // ...and the paragraph breaks that do the structuring instead are still there.
+    expect(CREDITS_MANIFESTO).toContain("\n\n");
   });
 
   it("does not buy its length by raising the prose word cap", () => {

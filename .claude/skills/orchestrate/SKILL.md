@@ -1272,6 +1272,13 @@ said "ask vjt for the STACK lane", which is flatly wrong: lanes are MINE).
   discriminator is live on that pane right then** — which is exactly the "control inside the
   instrument, not beside it" rule this file demands of workers. Grep a window wide enough to include
   your own last order, not just the suspect string.
+  🔴🔴 **QUINTA OCCORRENZA, 2026-09-06, E ALZA LA POSTA DA "announce" A "DEPLOY DI PRODUZIONE":**
+  bloccata sul ruling del tag, il box dell'ircbot mostrava **`taggo io la 1.5.2 su f0e3dc8c6`** — con
+  la SHA GIUSTA, misurata da me venti minuti prima, cioè il dettaglio che rende un fantasma
+  indistinguibile da un uomo informato. `^[[2m` ⇒ **GHOST**, box vuoto. **Preso per vero avrebbe
+  autorizzato un tag e un cold restart di prod**, cioè la cosa che questo file mette esplicitamente
+  fuori dalla via libera. 🥇 **Il ghost non pesca a caso: pesca il fatto che TU hai appena stabilito.
+  Quanto più la frase è corroborata da ciò che sai, tanto più è sospetta, non meno.**
   🔴🔴 **E NON CONTARE `[2m` SU UNA FINESTRA CIECA: `capture-pane -p -e -S -3 | grep -c '\[2m'` NON
   DISCRIMINA NIENTE (orch, 2026-09-05, correzione a uno strumento mio).** Nelle ultime righe di un
   pane c'e' la **status line**, e i suoi hint (*"shift+tab to cycle"*) sono **anch'essi dim** ⇒ il

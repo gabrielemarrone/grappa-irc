@@ -1183,7 +1183,7 @@ export const S_SessionWirePresenceChangedPayload = {
     nick: "s",
     presence: { e: ["online", "offline"] },
     initial: "b",
-    source: { e: ["monitor", "watch"] },
+    source: { e: ["monitor", "watch", "ison"] },
     ts: "s",
   },
 } as const;

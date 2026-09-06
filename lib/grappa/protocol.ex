@@ -256,7 +256,24 @@ defmodule Grappa.Protocol do
   # @min_protocol_version stays at 1: purely additive, and the client treats a
   # failed read as the server's own default (`false`), so every v1..v10 bundle
   # is served unchanged.
-  @protocol_version 11
+  # v12 (#1946) — the `/notify` presence fallback for ircds with neither
+  # MONITOR nor WATCH (IRCnet). `presence_changed.source` gains a third value,
+  # `"ison"`.
+  #
+  # ⚠️ Unlike v10 and v11, `mix grappa.wire_pin` DOES demand this one: `source`
+  # is a closed set in a `Grappa.Session.Wire` typespec, so it lands in the
+  # generated artefacts and moves the digest. And the break is not theoretical
+  # — it was MEASURED on the running dev stack before the bump: an old bundle
+  # against the new server logged "This client could not read a
+  # presence_changed update from the server and discarded it", because
+  # `wireSchema.ts` drops a payload whose enum value is outside the set it
+  # knows. New-server-to-old-client, which is the additive direction, and it
+  # still breaks — a closed set gaining a member is a wire-shape change.
+  #
+  # @min_protocol_version stays at 1: an old client drops presence_changed
+  # frames it cannot read and keeps every other pane, so it is degraded rather
+  # than unserviceable — and only on the one network that needs ISON at all.
+  @protocol_version 12
   @min_protocol_version 1
 
   @doc "The protocol version the server currently speaks."
@@ -267,7 +284,7 @@ defmodule Grappa.Protocol do
   # alongside `@protocol_version`; the spec doubles as the bump tripwire,
   # and now that the bump is routine the tripwire is what keeps it from
   # being done half-way.
-  @spec version() :: 11
+  @spec version() :: 12
   def version, do: @protocol_version
 
   @doc """

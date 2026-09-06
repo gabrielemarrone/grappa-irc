@@ -46703,3 +46703,92 @@ _Deploy: **COLD** on every substrate. Measured, not reasoned:
 `:linux` and `:docker` alike (positive control: the `lib/` comment-only paths
 alone return `{:hot, []}`). The release image also has to be REBUILT for the
 baked ENV to move — the config change alone does not reach it._
+<!-- entry #1946 -->
+
+---
+
+## 2026-09-06 — #1946: ISON presence fallback, and two seam bugs only live testing found
+
+**`/notify` was inert on IRCnet.** Its ircd (2.11.2, RFC 2810–2813 lineage)
+implements neither MONITOR nor WATCH — confirmed in `common/parse.c`'s message
+table and in a live 005 that carries neither token. So the 005-independent arm
+probed WATCH, took a `421`, downgraded to MONITOR, took a second `421`, and
+resolved `:none`, where `arm_commands/2` returns `[]` and every watched nick
+stays `:unknown` until reconnect.
+
+#247 had already named this exact condition: *"ISON fallback can be phase 2 if a
+network without MONITOR/WATCH ever matters."* It now matters.
+
+### ISON is the terminal fallback, NOT a fourth probe rung
+
+MONITOR and WATCH are optional extensions, so probing them is meaningful — a
+`421` is a real answer. ISON is RFC 1459/2812 mandatory: there is nothing to
+discover, so it is *used* rather than probed. `:none` survives only for the
+ircd that refuses even ISON, because no-silent-drops says the impossible case
+still needs a name.
+
+The 005 hint keeps winning when present, and the optimistic WATCH probe stays —
+its reason (bahamut forks that support WATCH without advertising it) is
+untouched.
+
+### The reply budget is the correctness problem, not the request budget
+
+IRCnet's `m_ison` fills its reply buffer and then `break`s
+(`if (len + i > sizeof(buf) - 4) break;`), dropping the tail with no error and
+no marker. The reply carries only the **online** nicks, so a chunk sized
+against the REQUEST can still overflow the reply — and every dropped nick then
+reads as offline, fabricating "X went offline" pushes.
+
+Hence `@ison_reply_budget 360` (below the 400 used for MONITOR/WATCH), sized so
+the reply fits even if every queried nick is online. And hence the sweep rule:
+**N chunks must yield N × 303, or the sweep is discarded and nothing is
+diffed.** Absence of evidence must never become an offline transition.
+
+### Cadence is budgeted against a measured penalty
+
+In this ircd a handler's return value IS its penalty in seconds
+(`cptr->since += ret`); `m_ison` returns **1**, the cheapest tier (`m_whois` 2,
+`m_who` up to MAXPENALTY), plus a pre-dispatch base of `1 + len/100`. So a full
+ISON line costs ~2 penalty-seconds and the interval scales with chunk count:
+30 s floor, +10 s per chunk. An empty watch list arms **no timer at all** —
+most sessions watch nobody and must pay nothing.
+
+### Deviation from the issue's design, and why
+
+The issue said `:ison` should get no `arm_commands/2` clause, so nobody could
+"arm" a poll and wait forever for a push. Built that way it crashes: the live
+`/notify add` path calls `arm_commands/2` with whatever mechanism the session
+resolved, and a `FunctionClauseError` there takes down a working session over a
+nick the next sweep would have picked up anyway. It returns `[]` instead, and
+`sync_presence/3` re-schedules the timer — which it must regardless, since
+0 → N has to create the timer `poll_interval_ms(0)` refused.
+
+### 🔴 Two bugs that unit tests could not have caught
+
+Both live at the server↔client seam, and both were found by running the thing
+against real IRCnet:
+
+1. **`Wire.presence_changed/6` had no `:ison` clause** — guarded
+   `source in [:monitor, :watch]`. Thirty seconds after the downgrade the first
+   sweep produced `source: :ison` and the session crashed with a
+   `FunctionClauseError`, then `:transient`-restarted into the same wall.
+2. **`source` is a CLOSED SET on the wire**, and widening it server-side while
+   an old bundle was live made cic drop every presence frame with *"This client
+   could not read a presence_changed update from the server and discarded it"*.
+   That is the validator working: `wireSchema.ts` carried
+   `{ e: ["monitor", "watch"] }`.
+
+So a closed set gaining a member IS a wire-shape change, in the
+new-server-to-old-client direction, and it is **measured** here rather than
+argued. Protocol went **11 → 12** and — unlike v10 and v11 — `mix
+grappa.wire_pin` *demanded* it: `source` lives in a `Session.Wire` typespec, so
+it reaches the generated artefacts and the digest actually moved
+(`9c97bd9b…` → `4e6ee9e6…`). `@min_protocol_version` stays 1: an old client
+drops presence frames and keeps every other pane, and only on the one network
+that needs ISON at all.
+
+Regenerating the artefacts was not sufficient on its own — `src/lib/api.ts`
+carries a hand-written copy of the payload that `wireTypesAssert.ts` pins equal
+to codegen, so `tsc` stayed red until that was widened too.
+
+_Deploy: **COLD** — server behaviour + wire version. cic rides with it._

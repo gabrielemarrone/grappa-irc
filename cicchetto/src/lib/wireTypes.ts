@@ -1066,7 +1066,7 @@ export type SessionWirePresenceChangedPayload = {
   nick: string;
   presence: "online" | "offline";
   initial: boolean;
-  source: "monitor" | "watch";
+  source: "monitor" | "watch" | "ison";
   ts: string;
 };
 

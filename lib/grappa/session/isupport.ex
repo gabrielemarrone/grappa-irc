@@ -72,13 +72,26 @@ defmodule Grappa.Session.ISupport do
   @type presence_limit :: pos_integer() | :unlimited
 
   @typedoc """
-  The presence-watch mechanism this network advertises for `/notify`
-  (#247): IRCv3 `MONITOR` (solanum/Libera, OFTC), legacy `WATCH`
-  (bahamut/Azzurra), or `:none`. MONITOR wins when both are advertised.
-  ISON polling (the no-mechanism fallback) is out of v1 scope — a
-  `:none` network simply gets no live presence.
+  What 005 can ADVERTISE for `/notify` (#247): IRCv3 `MONITOR`
+  (solanum/Libera, OFTC), legacy `WATCH` (bahamut/Azzurra), or `:none`.
+  MONITOR wins when both are advertised.
+
+  `:ison` is deliberately absent — no ircd advertises ISON, because RFC
+  1459/2812 makes it mandatory, so it can never be the answer to "what did
+  005 say?". (This typedoc previously said ISON polling was out of scope and
+  that a `:none` network "simply gets no live presence"; #1946 made that
+  false.)
   """
-  @type presence_mechanism :: {:monitor, presence_limit()} | {:watch, presence_limit()} | :none
+  @type advertised_mechanism ::
+          {:monitor, presence_limit()} | {:watch, presence_limit()} | :none
+
+  @typedoc """
+  What a SESSION can resolve to — the advertised set plus `:ison`, which is
+  reached only through the 421 fallback chain (#1946). Two types rather than
+  one because they answer different questions, and collapsing them would let
+  `presence_mechanism/1` claim a return value it can never produce.
+  """
+  @type presence_mechanism :: advertised_mechanism() | :ison
 
   @typedoc """
   How the upstream ircd folds identifiers (nicks AND channels), from the
@@ -378,13 +391,18 @@ defmodule Grappa.Session.ISupport do
   NOT "don't arm": per review 2026-07-19 the arm must work
   005-independently, so `Session.Server.arm_presence/1` treats `:none`
   as "probe WATCH optimistically" and downgrades via the 421 fallback
-  chain (WATCH → MONITOR → `:none`). ISON polling stays out of v1.
+  chain (WATCH → MONITOR → `:ison`, #1946).
+
+  `:ison` is NEVER returned from here — no ircd advertises ISON in 005,
+  because RFC 1459/2812 makes it mandatory. It is reached only through
+  that chain, and it is a FALLBACK rather than a probe rung for the same
+  reason: there is nothing to discover.
 
   Reads via `Map.get` (not pattern match on the keys) for the same
   hot-reload safety as `statusmsg/1`: a live isupport table seeded
   before #247 has no `:monitor`/`:watch` keys and must not KeyError.
   """
-  @spec presence_mechanism(t()) :: presence_mechanism()
+  @spec presence_mechanism(t()) :: advertised_mechanism()
   def presence_mechanism(isupport) when is_map(isupport) do
     cond do
       limit = Map.get(isupport, :monitor) -> {:monitor, limit}

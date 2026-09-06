@@ -800,6 +800,7 @@ defmodule Grappa.Session.NumericRouter do
                         # 602 RPL_WATCHOFF    (WATCH removal ack)
                         # 604 RPL_NOWON       (WATCH baseline: online)
                         # 605 RPL_NOWOFF      (WATCH baseline: offline)
+                        # 303 RPL_ISON        (ISON poll — #1946)
                         730,
                         731,
                         600,
@@ -807,6 +808,19 @@ defmodule Grappa.Session.NumericRouter do
                         602,
                         604,
                         605,
+                        # #1946 — 303 joins the presence family. Previously
+                        # unrouted and left to the catch-all, which was
+                        # defensible while nothing polled: the moduledoc note
+                        # above reasoned it was only `/quote`-reachable and
+                        # that its trailing (`"nick "`, with the space every
+                        # ircd appends) fails `valid_nick?/1` so it could not
+                        # misroute to a query window. Both stay true; what
+                        # changed is that the ISON fallback now SENDS it on a
+                        # timer, so an undelegated 303 would persist a
+                        # `$server` :notice row every sweep — the presence
+                        # equivalent of the 333 unix-timestamp leak this list
+                        # exists to stop.
+                        303,
                         # #992 — ADMIN (256 RPL_ADMINME, 257 RPL_ADMINLOC1,
                         # 258 RPL_ADMINLOC2, 259 RPL_ADMINEMAIL) plus its two
                         # OWN error terminators. /admin became a native verb,

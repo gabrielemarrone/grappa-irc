@@ -46577,3 +46577,129 @@ _Deploy: **COLD** on every substrate. Measured, not reasoned:
 (positive control: a `lib/` path returns `{:hot, []}`). Same class as #1938,
 and for the same reason — a dep's beams live outside the app ebin that
 `HotReload.reload_modified/0` walks._
+<!-- entry #1945 -->
+
+---
+
+## 2026-09-06 — #1945: storage roots stop being resolved against a CWD nobody chose
+
+The v1.5.0 cold deploy on the production jail did not start. `rc.d/grappa`
+launches the release with `su -m grappa -c '.../bin/grappa daemon'` and sets no
+WorkingDirectory, so the CWD is `/`; `PEER_AVATARS_STORAGE_ROOT` was unset, its
+default was the relative `runtime/peer_avatars`, and
+`Grappa.Avatars.Reaper.init/1`'s `File.mkdir_p!` therefore tried `/runtime/peer_avatars`
+and died of `eacces` inside the supervision tree. A boot crash, not a degraded
+feature. The host was unblocked by setting the variable by hand, which is a
+per-host workaround: any operator upgrading without it hits the same wall.
+
+### The defect is the CWD dependency, not the missing variable
+
+Three roots had the same shape — `:cic_dist_root`, `:uploads_storage_root`,
+`:peer_avatars_storage_root` — and `Grappa.Uploads.Reaper.init/1` carries the
+same bang as the avatar one. Uploads escaped only because the jail's env file
+happens to set its variable.
+
+The CWD is not a value an operator sets or sees: it is whatever the init system
+left the process in. So a default that reads it is a default nobody chose, and
+the three regimes it produces have nothing to do with each other — repo root
+under Docker's `WORKDIR /app` and native systemd's `WorkingDirectory=`, `/`
+under the jail, and the container's ephemeral layer under the release image.
+
+**The second failure mode is quieter and strictly worse.** Measured on
+`ghcr.io/vjt/grappa:latest`: the release image boots CLEAN, no `eacces`,
+`/healthz` 200 — because `/app` is owned by the `grappa` user, so `mkdir_p!`
+SUCCEEDS and the peer-avatar cache lands in `/app/runtime/peer_avatars`, inside
+the container layer and outside the only volume the image declares
+(`compose.release.yaml` mounts `grappa-data:/data`, and the image baked
+`DATABASE_PATH`, `UPLOADS_STORAGE_ROOT`, `CIC_DIST_ROOT` but not the fourth).
+The documented upgrade — `pull` then `up -d` — threw the cache away every
+release, silently. A crash at least tells you.
+
+### Two anchors, because the roots have two meanings
+
+One rule (nothing resolves against the CWD), two ways to honour it, and the
+split is the domain boundary rather than a compromise:
+
+* **DATA** — uploads and peer avatars now default to
+  `Path.join(Path.dirname(DATABASE_PATH), name)`. This is not a new convention:
+  `runtime/uploads` was already DOCUMENTED as "the sibling of the sqlite DB".
+  The old default only approximated that sentence by borrowing the CWD; the new
+  one computes it. `DATABASE_PATH` is the one absolute path prod already
+  mandates, which is what makes it the anchor.
+* **CODE** — the built SPA dist gets no data anchor (a packaged install puts it
+  in `/usr/share/grappa` while the DB is in `/var/lib/grappa`), and needs none:
+  `config/config.exs` already expands an ABSOLUTE build anchor, and the actual
+  defect there was `runtime.exs` **clobbering** it with a relative literal in
+  every env except `:test` — runtime config runs LAST. Unset now derives
+  nothing. On the jail, where `mix release --overwrite` runs in
+  `/home/grappa/grappa`, that build anchor expands to exactly the path #526
+  tells the operator to write by hand.
+
+**An operator-supplied value is kept verbatim, deliberately.** Re-anchoring a
+relative one would silently move an existing uploads directory
+(`/app/runtime/uploads` → `/app/runtime/runtime/uploads`), and a relative root
+under Docker is a WORKING configuration that `.env.example` shipped for a year.
+What changes is that prod now logs a warning naming the directory the value
+will be read against, so the resolution stops being invisible. Same
+belt-and-braces posture as the captcha warning in the same file.
+
+A relative `DATABASE_PATH` is refused outright, because the anchor cannot
+deliver an absolute root from one and such a deployment is CWD-bound end to end
+anyway (`Grappa.Repo.init/2` mkdir_p's the same dirname). That is a fourth key,
+touched knowingly: it is the anchor's precondition, and no shipped template
+writes a relative one.
+
+### What the measurement says that the issue text did not
+
+**The derived default equals the value already in force wherever the old one
+worked, and differs only where it was broken.** Not argued — pinned, in
+`test/grappa/config/storage_roots_config_test.exs`, by reading what each
+substrate declares and requiring the derivation to reproduce it:
+`compose.yaml`'s `${UPLOADS_STORAGE_ROOT:-/app/runtime/uploads}` and
+`${PEER_AVATARS_STORAGE_ROOT:-/app/runtime/peer_avatars}` against its own
+`/app/runtime/grappa_<env>.db`, and `Dockerfile.release`'s baked `/data/uploads`
+against `/data/grappa.db`. The compose half of that pin was GREEN before a line
+of the cure existed, which is the evidence for the claim. `base/deployment.yaml`
+is the third witness: it sets `/data/peer_avatars` BY HAND to dodge the
+ephemeral relative default, and that hand-written value is character-for-
+character what the derivation computes. Three hosts independently wrote the
+anchor the default should always have had.
+
+**Two corrections to the report this entry closes out.** (1) The issue proposes
+the DATABASE_PATH anchor "and apply the same treatment to all three roots" — the
+third root cannot take it, for the reason above, so the class is closed by two
+anchors rather than one. (2) The measured follow-up states that "the
+absolute-default fix alone is not enough" for the Docker path and that
+`PEER_AVATARS_STORAGE_ROOT` must be set in the image env AND in
+`compose.release.yaml` "next to the other two roots". Measured: the image bakes
+an absolute `DATABASE_PATH=/data/grappa.db`, so the derived default IS
+`/data/peer_avatars`, inside the volume — the anchor alone does close that path.
+And `compose.release.yaml` names no storage root at all; the other two are baked
+in the image, not composed. The image ENV line was added anyway, for parity and
+so `docker image inspect` shows the third root without the reader having to know
+the derivation; `compose.release.yaml` was deliberately left alone, since adding
+the only storage-root override to a file whose stated design is "the image
+bootstraps itself" would be the inconsistency, not the cure.
+
+An empty value now counts as unset. It did not before: `System.get_env(x) || default`
+keeps `""` because the empty string is truthy, so an empty variable configured an
+empty root and `File.mkdir_p!("")` is not a directory. The file's own comment
+claimed "Empty / unset = the CWD default"; only half of that was ever true.
+
+### What this does NOT claim
+
+Nothing here was measured on the jail — that host is unreachable from the
+worker, so the crash chain is read from the issue and from `rc.d/grappa`, never
+observed. The release-image behaviour is likewise the reporter's measurement,
+re-derived here only from the files (`Dockerfile.release`, `compose.release.yaml`,
+`infra/docker/release-entrypoint.sh`), not from a container that was run. And
+the warning path is pinned as "a warning naming the variable is emitted", not as
+"an operator will see it in a release boot log", which depends on the handler
+state at `runtime.exs` evaluation time and was not tested.
+
+_Deploy: **COLD** on every substrate. Measured, not reasoned:
+`Preflight.classify_paths(<the changed set>, s)` returns
+`{:cold, [config: ["config/runtime.exs", "config/config.exs"]]}` for `:jail`,
+`:linux` and `:docker` alike (positive control: the `lib/` comment-only paths
+alone return `{:hot, []}`). The release image also has to be REBUILT for the
+baked ENV to move — the config change alone does not reach it._

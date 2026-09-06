@@ -257,6 +257,13 @@ It is deliberately short (image, a `/data` volume, a published port,
 directories and migrates on first boot. It is **not** `compose.yaml`, which is
 the from-source development stack above and builds from the checkout.
 
+It is also a **different box** from the one-liner above, not another way to
+drive it — nothing is shared, the update command least of all. Compose brings
+it up as project `grappa-release`: container `grappa-release-grappa-1`, data on
+volume `grappa-release_grappa-data`, secrets generated inside `/data`. The
+script path runs a container named `grappa` on volume `grappa-data`, with its
+secrets in `$GRAPPA_HOME/grappa.env`.
+
 #### Updating an image box is always COLD
 
 The release image ships no `CodeReloader`, so there is nothing to hot-swap: an
@@ -265,12 +272,42 @@ the few seconds of the recreate; the DB + uploads on the volume are untouched).
 `deploy.sh`'s banner always reads *cold* on this path — hot-on-image is a
 future increment (#503 unit E).
 
+**Update the way you installed.** The two paths above are two boxes, and each
+has its own command.
+
+Installed with the one-liner (container `grappa`):
+
 ```sh
 # from anywhere, via the same bootstrap:
 curl -fsSL https://raw.githubusercontent.com/vjt/grappa-irc/main/infra/docker/get.sh | bash -s -- update
 # or, on a box already bootstrapped (deploy.sh lives under $GRAPPA_HOME):
 ~/.grappa/infra/docker/deploy.sh update
 ```
+
+Installed with `compose.release.yaml` (project `grappa-release`):
+
+```sh
+docker compose -f compose.release.yaml pull
+docker compose -f compose.release.yaml up -d
+```
+
+The `pull` is the update; `up -d` only applies it. Without the `pull`, compose
+finds the tag already on the host, sees nothing to change, and leaves the
+container it is already running exactly where it is.
+
+**Crossing them is the trap, and it does not announce itself.** `deploy.sh`
+finds its box through `$GRAPPA_HOME/grappa.env`, which a compose install never
+writes — so `update` aborts with *"this box was never installed. Run 'install'
+first"*. That message is wrong, and taking its advice is the damaging step:
+`install` guards only against a container named `grappa`, never sees
+`grappa-release-grappa-1`, and builds a second box on the **other** volume —
+fresh secrets, empty database. It stops at the port bind while the compose box
+is up (both publish `127.0.0.1:4000` by default), and it *completes* when that
+port is free: a compose box that happens to be down, or either side published
+somewhere else. What you then reach is an empty grappa asking you to create the
+first user. **The data is not gone**: it is on `grappa-release_grappa-data`,
+untouched. Take the stray box down with `~/.grappa/infra/docker/deploy.sh stop`
+(that keeps its volume) and bring your own back with the two commands above.
 
 `stop` removes the container but keeps the volume; `stop --volumes` also drops
 the data volume (destroys the DB). See `docs/OPERATIONS.md` for the full

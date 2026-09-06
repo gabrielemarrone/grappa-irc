@@ -46428,3 +46428,73 @@ _Deploy: **COLD** on every substrate. Measured, not reasoned:
 `{:cold, [mix_deps: ["mix.lock"]]}` for `:jail`, `:linux` and `:docker` alike,
 and a dep's beams live outside the app ebin that `HotReload.reload_modified/0`
 walks._
+<!-- entry #1939 -->
+
+---
+
+## 2026-09-06 — #1939: the sidebar was the only place that title-cased a window label
+
+A user on #grappa reported that the desktop sidebar spells the home window
+`Home` while everything around it is lowercase. Measured in `cicchetto/src`
+before the change: `Sidebar.tsx` renders `Home`, `admin`, `channels` and
+`mentions`; `RailActions.tsx` renders `home`, `admin`, `rooms`, `mentions`,
+`player`, `radio`, `themes`, `archive`, `settings`, `refresh`, `denoise`,
+`mute`, `switch account`, `quit`, `actions`. So `Home` was not one convention
+among two — it was a single literal disagreeing with every sibling in its own
+component AND with the rail's spelling of the very same window.
+
+**The rule this settles: a window label rendered in cic chrome is lowercase,
+and when a window is reachable from more than one surface the surfaces spell
+it identically.** irssi's own window list is lowercase; the rail was already
+right; the sidebar was the outlier and moved.
+
+### `ScrollbackPane.tsx` keeps its `"Home"`, and it is not an exception
+
+The reported string appears a second time, in `ScrollbackPane.tsx`. It is
+NOT a label: it is a member of `SCROLL_KEYS`, the set matched against
+`KeyboardEvent.key` in the pane's keydown handler to decide whether a key
+press counts as an operator scroll for the settle-arm gate. `Home` there is
+the DOM key name of the Home key, next to `PageUp`, `End` and `ArrowUp`.
+Lowercasing it would silently stop the Home key from arming the gate. The
+general shape worth keeping: a capitalised string in a UI file is a label
+only if something renders it — follow it to its consumer before treating a
+casing convention as applying to it.
+
+### The four e2e assertions that moved with the label
+
+`cursor-forward-only`, `issue160-virtual-tab-no-cursor`,
+`issue356-notify-highlight-feedback` and `ux-5-b-home-emoji` each pin the
+rendered text, and all four matchers are case-sensitive
+(`getByRole(..., { exact: true })`, `hasText: /^Home$/`, `toContainText`), so
+they had to move in the same commit or go red on a label they themselves
+document. The two `getByRole("button", { name: "home", exact: true })` calls
+stay page-wide and stay unambiguous: the rail's home button also contains the
+text `home`, but it carries `aria-label="open home"`, and an `aria-label`
+takes precedence over element contents when the accessible name is computed,
+so it is not a second match. `gotoHome()` in `issue496-home-restyle` and
+`registration-wizard` was never affected — both click `.sidebar-home-btn`.
+
+### What was declined
+
+A test asserting "every static sidebar label is lowercase". It cannot be
+written without a hand-maintained enumeration of the static rows
+(`.sidebar-home-btn`, `.sidebar-admin-btn`, `.sidebar-list-row`,
+`.sidebar-mentions-row`), because the `.sidebar-channel-name` class that
+carries the labels ALSO carries data the convention does not govern —
+network slugs, channel names, query nicks. That enumeration is exactly the
+parallel structure that needs housekeeping and drifts, and it is heavier
+than the one-literal defect it would guard. The convention is recorded here
+instead; the existing per-row assertions are case-sensitive and each reddens
+on its own row.
+
+### What is NOT established here
+
+* **Nothing was seen and no e2e ran.** This slice had no browser and no e2e
+  lane. The four spec edits are typechecked (`tsc -p e2e/tsconfig.json`) and
+  argued from Playwright's documented matching semantics; they are not
+  executed here.
+* **Only the sidebar literal moved.** Prose in comments and test titles that
+  calls the window "Home" was left alone — it names the window, not the
+  label, and rewriting it across the tree buys nothing the reader needs.
+
+_Deploy: **HOT — `--cic` only.** Client-side; no server change._

@@ -42,7 +42,7 @@ import { bindMessageContextMenu } from "./lib/messageContextMenu";
 import { bindMessageGestures } from "./lib/messageGestures";
 import { closeMessageMenu, openMessageMenu } from "./lib/messageMenu";
 import { networkIdBySlug, networks, user } from "./lib/networks";
-import { senderPrefix, snapshotSenderPrefix } from "./lib/nickColor";
+import { snapshotSenderPrefix } from "./lib/nickColor";
 import { nickEquals } from "./lib/nickEquals";
 import { isOperatorActionEcho } from "./lib/operatorActionEcho";
 import { overlayCount } from "./lib/overlayScrollLock";
@@ -718,29 +718,45 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
   // a row persisted before #25 landed) renders no glyph — never a
   // live-derived guess, which would reintroduce the bug.
   //
-  // #1950 narrowed what is left. The live members join used to cover every
+  // #1950 removed the rest of it. The live members join used to cover every
   // non-content row on the rationale that those describe a "now" event — but
   // a scrollback row is never "now", it is a RECORD, and re-deriving the
   // glyph at render time re-prefixed a nick's own history the moment they
   // were opped. `join` was the plainest case (JOIN carries no grade on the
   // wire at all, so `@nick has joined` cannot ever have been true) and the
   // field report `* @ULIAK [...] has quit (...)` was the same defect on a
-  // `quit`. Those rows now go through `recordSenderSpan` and take no glyph;
-  // see its comment for the set and for what stays live.
+  // `quit`.
   //
-  // What still reads live here: `mode` (its subject IS the grade), the
-  // `server_event` / `renderRawEvent` senders (WALLOPS/GLOBOPS/KILL/CHGHOST/
-  // INVITE — server-scoped rows whose sender is usually not a channel member
-  // at all, left untouched by #1950), and `action`, which is a CONTENT kind
-  // and so takes the snapshot branch above.
-  const prefixFor = (nick: string): "@" | "%" | "+" | "" => {
+  // `mode` was argued as the one honest survivor and it fell to a repro that
+  // refutes itself: `* @Mezmerize sets mode +o Mezmerize on #grappa`. The `@`
+  // is GRANTED by that line, so the setter demonstrably did not hold it when
+  // the event happened. Nothing about a `mode` row is exempt — it records who
+  // set the mode THEN, so a setter deopped since reads plain on the line where
+  // they were opping people, and one opped since reads `@` on a line from when
+  // they were not.
+  //
+  // So this is now total, and the totality is what makes it a rule rather than
+  // a list: **the only glyph a scrollback row may carry is the #25 snapshot on
+  // a CONTENT row.** There is no live members read left in this module. Two
+  // arms used to be safe by ACCIDENT rather than by rule and are now safe by
+  // rule — measured, both were red before this change:
+  //
+  //   * the #154(b) user-MODE row on the synthetic `$server` window: no member
+  //     list exists for that key, so the live read happened to return "";
+  //   * `renderRawEvent` / `server_event` (WALLOPS/GLOBOPS/KILL/CHGHOST/
+  //     INVITE), which land on `$server` for the same reason — except an
+  //     INVITE into a channel we are ALREADY in, which is keyed on that real
+  //     channel and did paint the inviter's live grade.
+  //
+  // The members list keeps the live reading, because it is the one surface
+  // where "now" is genuinely the subject.
+  const prefixFor = (nick: string): PrefixGlyph => {
     if (!msg.channel) return "";
     const casemapping = casemappingForSlug(handlers.networkSlug);
     if (isContentKind(msg.kind) && nickEquals(nick, msg.sender, casemapping)) {
       return snapshotSenderPrefix(msg.meta);
     }
-    const key = channelKey(handlers.networkSlug, msg.channel);
-    return senderPrefix(membersByChannel()[key], nick, casemapping);
+    return "";
   };
 
   // C7.6: sender button for content kinds — left-click (→ query) or
@@ -784,29 +800,30 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
     </button>
   );
 
-  // LIVE reading — the sender's grade as of this render. Used by
-  // `renderRawEvent` (WALLOPS/GLOBOPS/KILL/CHGHOST/INVITE), `server_event`
-  // and `mode`; `action` routes here too and lands on the #25 snapshot
-  // branch inside `prefixFor` because it is a CONTENT kind.
-  const bareSenderSpan = (nick: string): JSX.Element => bareSpanWithPrefix(nick, prefixFor(nick));
+  // CONTENT reading, bracket-less — the #25 send-time snapshot, for the one
+  // kind that renders without brackets: `action`. Routes through `prefixFor`,
+  // whose content branch is the only glyph source left in this module.
+  const contentSenderSpan = (nick: string): JSX.Element =>
+    bareSpanWithPrefix(nick, prefixFor(nick));
 
   // #1950 — RECORD reading: no glyph at all.
   //
-  // A record row (join / part / quit / nick_change / topic / kick, sender
-  // AND kick victim) reports an event at an instant that has passed. Reading
-  // the members store there answers "what grade does this nick hold NOW",
-  // which is a different question and re-prefixes the row retroactively the
-  // moment the nick is opped — the bug #25 removed from content rows.
+  // A record row reports an event at an instant that has passed. Reading the
+  // members store there answers "what grade does this nick hold NOW", which is
+  // a different question, and re-prefixes the row retroactively the moment the
+  // nick is opped — the bug #25 removed from content rows.
   //
   // And the answer is NOT a snapshot: for a `join` there is nothing to
-  // snapshot, since JOIN carries no grade on the wire (the `@` always
-  // arrives afterwards in a separate MODE, from a human op or ChanServ
-  // auto-op), and a kick victim is out of the channel by definition. Where
-  // the event has no grade, the correct glyph is none.
+  // snapshot, since JOIN carries no grade on the wire (the `@` always arrives
+  // afterwards in a separate MODE, from a human op or ChanServ auto-op), and a
+  // kick victim is out of the channel by definition. Where the event has no
+  // grade, the correct glyph is none.
   //
-  // `mode` deliberately keeps the live reading: a mode row's whole subject
-  // is the grade, so the sender's current status is the honest thing to show
-  // and there is no retroactivity to remove.
+  // The set is EVERY non-content row: join / part / quit / nick_change /
+  // topic / kick (sender AND victim) / mode — including the #154(b) user-MODE
+  // on `$server` — plus every `renderRawEvent` and `server_event` sender. That
+  // is the whole switch below except `action`, which is why the rule is stated
+  // here once instead of enumerated at each arm.
   const recordSenderSpan = (nick: string): JSX.Element => bareSpanWithPrefix(nick, "");
 
   switch (msg.kind) {
@@ -921,7 +938,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       // render takes precedence when raw_verb is present.
       const meta = msg.meta as RawEvent | undefined;
       if (meta && typeof meta.raw_verb === "string") {
-        return renderRawEvent(meta, msg, bareSenderSpan, handlers);
+        return renderRawEvent(meta, msg, recordSenderSpan, handlers);
       }
       // #569 — numeric rows carry meta.numeric + meta.raw_params (no
       // raw_verb). Render the whole param list (own-nick dropped) so
@@ -952,7 +969,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
     case "action":
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)}{" "}
+          * {contentSenderSpan(msg.sender)}{" "}
           <MircBody body={stripCtcpAction(msg.body)} emphasis onChannelClick={onChannelClick} />
         </span>
       );
@@ -1004,14 +1021,14 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       if (msg.channel === SERVER_WINDOW_NAME) {
         return (
           <span class="scrollback-body">
-            * {bareSenderSpan(msg.sender)} sets user mode {modes}
+            * {recordSenderSpan(msg.sender)} sets user mode {modes}
             {args}
           </span>
         );
       }
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)} sets mode {modes}
+          * {recordSenderSpan(msg.sender)} sets mode {modes}
           {args} on {msg.channel}
         </span>
       );
@@ -1057,7 +1074,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       // keeps its raw_verb fallback for cold-deploy backfill misses.
       const meta = msg.meta as RawEvent | undefined;
       if (meta && typeof meta.raw_verb === "string") {
-        return renderRawEvent(meta, msg, bareSenderSpan, handlers);
+        return renderRawEvent(meta, msg, recordSenderSpan, handlers);
       }
       // No raw_verb. This used to be described here as a server bug
       // rendered defensively; since issue 1832 it is also the ORDINARY
@@ -1073,7 +1090,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       // banner keeps its colours).
       return (
         <span class="scrollback-body">
-          *** {bareSenderSpan(msg.sender)} <MircBody body={msg.body ?? ""} />
+          *** {recordSenderSpan(msg.sender)} <MircBody body={msg.body ?? ""} />
         </span>
       );
     }

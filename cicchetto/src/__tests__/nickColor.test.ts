@@ -1,11 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ChannelMembers } from "../lib/memberTypes";
 import {
   NICK_PALETTE_SIZE,
   nickColorIndex,
   nickColorVar,
-  senderPrefix,
   snapshotSenderPrefix,
 } from "../lib/nickColor";
 
@@ -148,46 +146,6 @@ describe("nickColorVar", () => {
   it("agrees with nickColorIndex for the embedded index", () => {
     const idx = nickColorIndex("vjt");
     expect(nickColorVar("vjt")).toBe(`var(--nick-color-${idx})`);
-  });
-});
-
-describe("senderPrefix", () => {
-  const m = (entries: Record<string, string[]>): ChannelMembers =>
-    Object.entries(entries).map(([nick, modes]) => ({ nick, modes }));
-
-  it("returns @ for an op", () => {
-    expect(senderPrefix(m({ alice: ["@"] }), "alice", "ascii")).toBe("@");
-  });
-
-  it("returns % for a halfop", () => {
-    expect(senderPrefix(m({ bob: ["%"] }), "bob", "ascii")).toBe("%");
-  });
-
-  it("returns + for a voiced member", () => {
-    expect(senderPrefix(m({ carol: ["+"] }), "carol", "ascii")).toBe("+");
-  });
-
-  it("returns empty string for a plain member", () => {
-    expect(senderPrefix(m({ dave: [] }), "dave", "ascii")).toBe("");
-  });
-
-  it("returns empty string for a non-member (sender from a different channel)", () => {
-    expect(senderPrefix(m({ alice: ["@"] }), "stranger", "ascii")).toBe("");
-  });
-
-  it("returns empty string when members list is undefined (unknown channel)", () => {
-    expect(senderPrefix(undefined, "alice", "ascii")).toBe("");
-  });
-
-  it("returns the HIGHEST precedence prefix when a member has multiple modes (@ > % > +)", () => {
-    expect(senderPrefix(m({ alice: ["@", "+"] }), "alice", "ascii")).toBe("@");
-    expect(senderPrefix(m({ bob: ["%", "+"] }), "bob", "ascii")).toBe("%");
-    expect(senderPrefix(m({ carol: ["+"] }), "carol", "ascii")).toBe("+");
-  });
-
-  it("is case-insensitive for the nick lookup (Alice/alice match)", () => {
-    expect(senderPrefix(m({ Alice: ["@"] }), "alice", "ascii")).toBe("@");
-    expect(senderPrefix(m({ alice: ["@"] }), "Alice", "ascii")).toBe("@");
   });
 });
 

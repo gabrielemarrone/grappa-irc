@@ -630,6 +630,120 @@ EOF
     refute grep -q "still RUNNING" <<<"$output"
 }
 
+# --- #1851: the deploy must leave the checkout it just built CLEAN ----------
+#
+# `Grappa.Version.GitProbe` snapshots `git status --porcelain` at compile
+# time, so anything the deploy machinery leaves behind in the working tree
+# turns every release into the unreleased form `X.Y.Z-<sha>` (#391). `git
+# pull --ff-only` advances the superproject and leaves every submodule
+# working tree where it was, so ONE gitlink bump dirties the checkout
+# permanently — measured on the prod jail across three releases.
+#
+# These two cases are a pair and must be read as one: the first says the
+# cure cleans the tree, the second says it did NOT do so by blinding the
+# probe. A green on the first alone is indistinguishable from a cure that
+# silenced `git status` altogether, which would destroy the very signal
+# #391 exists for.
+
+# Give $UPSTREAM a submodule and $REPO_ROOT an in-sync populated copy, then
+# echo the submodule commit the next bump moves to. Callers must have
+# exported the file-transport allowance first (see the cases).
+seed_submodule() {
+    local suborigin="$BATS_TEST_TMPDIR/subupstream" first
+    git init -q -b main "$suborigin"
+    git -C "$suborigin" config user.email test@grappa.local
+    git -C "$suborigin" config user.name "bats"
+    echo one > "$suborigin/f"
+    git -C "$suborigin" add -A
+    git -C "$suborigin" commit -qm one
+    first="$(git -C "$suborigin" rev-parse HEAD)"
+    echo two > "$suborigin/f"
+    git -C "$suborigin" add -A
+    git -C "$suborigin" commit -qm two
+
+    git -C "$UPSTREAM" submodule add -q "$suborigin" sub
+    git -C "$UPSTREAM/sub" checkout -q "$first"
+    git -C "$UPSTREAM" add -A
+    git -C "$UPSTREAM" commit -qm "add sub pinned at its first commit"
+
+    git -C "$REPO_ROOT" pull -q --ff-only
+    git -C "$REPO_ROOT" submodule update -q --init
+
+    git -C "$suborigin" rev-parse HEAD
+}
+
+# Move the upstream's gitlink to $1 — the gesture that dirties every
+# already-deployed checkout.
+bump_submodule() {
+    git -C "$UPSTREAM/sub" fetch -q origin
+    git -C "$UPSTREAM/sub" checkout -q "$1"
+    git -C "$UPSTREAM" add sub
+    git -C "$UPSTREAM" commit -qm "bump the submodule gitlink"
+}
+
+# The deploy writes runtime/last-deployed-sha INTO the checkout, so it is a
+# THIRD would-be source of permanent dirt — already cured, by the repo's own
+# `/runtime/*` ignore rule. The throwaway upstream carries no .gitignore at
+# all, so without this it reports `?? runtime/last-deployed-sha` and the
+# fixture lies about the shape of the thing under test. Mirroring the real
+# rule is fixture FIDELITY, not a way to make the assertion pass: the general
+# lesson is that any new deploy-written path must be checked against
+# .gitignore or it poisons the version string the same way (#1851).
+mirror_runtime_ignore() {
+    printf '/runtime/*\n!/runtime/.gitkeep\n' > "$UPSTREAM/.gitignore"
+    git -C "$UPSTREAM" add .gitignore
+    git -C "$UPSTREAM" commit -qm "ignore the deploy marker, as the real repo does"
+}
+
+# The submodule remote is a filesystem path, which the CVE-2022-39253
+# mitigation blocks by default. Exported (not a per-repo config) so it
+# reaches the git the deploy runs through the `su` stub as well.
+allow_file_transport() {
+    export GIT_CONFIG_COUNT=1
+    export GIT_CONFIG_KEY_0=protocol.file.allow
+    export GIT_CONFIG_VALUE_0=always
+}
+
+@test "#1851: a deploy pull across a submodule gitlink bump leaves the checkout CLEAN" {
+    allow_file_transport
+    mirror_runtime_ignore
+    target="$(seed_submodule)"
+    # Assert the PRE-state: the tree is clean before the gesture, so a green
+    # below cannot be a tree that was never dirty in the first place.
+    [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]
+    bump_submodule "$target"
+
+    run_deploy --force-cold
+    [ "$status" -eq 0 ]
+    # THE assertion — this is exactly what GitProbe snapshots at compile
+    # time, so an empty answer here is a bare `X.Y.Z` on the next release.
+    # Printed on failure: "the tree is dirty" is useless without the entry,
+    # which is the whole lesson of the issue this case comes from.
+    porcelain="$(git -C "$REPO_ROOT" status --porcelain)"
+    [ -z "$porcelain" ] || {
+        printf 'checkout STILL dirty after the deploy:\n%s\n' "$porcelain" >&2
+        false
+    }
+}
+
+@test "#1851: the cure cleans the tree without blinding it — real dirt still shows" {
+    allow_file_transport
+    mirror_runtime_ignore
+    target="$(seed_submodule)"
+    bump_submodule "$target"
+    # A stray untracked file is the OTHER half of the prod symptom (the cic
+    # build's package-lock.json), and it is genuine dirt: the probe must go
+    # on reporting it, or the #391 suffix has been cured to death.
+    : > "$REPO_ROOT/an-operators-stray-file.json"
+
+    run_deploy --force-cold
+    [ "$status" -eq 0 ]
+    [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]
+    [[ "$(git -C "$REPO_ROOT" status --porcelain)" == *"an-operators-stray-file.json"* ]]
+    # ...and the submodule is NOT what is dirtying it any more.
+    refute grep -q ' M sub' <<<"$(git -C "$REPO_ROOT" status --porcelain)"
+}
+
 @test "#1656: a consumer with no liveness hook reports UNKNOWN, never DOWN" {
     # infra/docker/get.sh mirrors the lib and the consumer as separate files,
     # so new-lib/old-consumer is reachable on an operator's box. An undefined

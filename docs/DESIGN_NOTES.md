@@ -47927,3 +47927,84 @@ the pin is a test and reaches CI only. Ship the bundle with a server built
 from the same commit: a `--cic`-only push of this bundle onto the current
 `1.5.1` BEAM will log the mismatch, and after this change that log is telling
 the truth._
+<!-- entry #1950 -->
+
+---
+
+## 2026-09-06 — #1950: a scrollback row is a RECORD, so its nicks take no live glyph
+
+`ScrollbackPane`'s `prefixFor` had two branches: CONTENT rows
+(privmsg/notice/action) read the server's send-time `meta.sender_prefix`
+snapshot — that is #25, which stopped a MODE change from retroactively
+re-prefixing old lines — and *everything else* re-derived the glyph from the
+LIVE members store at every render, on the stated rationale that those rows
+"describe a *now* event, so the current grade is the correct glyph".
+
+That rationale is false for every row it covered except one. **A scrollback
+row is never "now": it is a RECORD.** Reading the live store answers "what
+grade does this nick hold at the moment you happen to be looking", which is a
+different question from "what was true when this happened", and the difference
+is visible the instant the nick is opped.
+
+The reporter saw both halves of it on Azzurra:
+
+```
+20:30:23 * @Mezmerize [mezmerize@staff.azzurra.chat] has joined #italia
+20:31:21 * @ULIAK [~ULIAK@5uo2.l.time4vps.cloud] has quit (Read/Dead Error: Input/output error)
+```
+
+The join line is wrong on the protocol outright — **JOIN carries no grade**;
+the `@` always arrives afterwards in a separate MODE, from a human op or from
+ChanServ auto-op a fraction of a second later — so `@nick has joined` states
+something that cannot ever have been true. It bites hardest exactly the people
+who look at it most: anyone with auto-op reads every one of their own joins as
+`@nick`. The quit line is the same defect with a later re-render as its
+trigger, and it also killed the issue's own guess that part/quit "render empty
+anyway because the sender is gone from the store".
+
+### The rule, and why the answer is not a snapshot
+
+Where the event HAS no grade — a join, a kick victim — there is nothing to
+snapshot and the correct value is always empty. So the cure is a second named
+reading of the sender button rather than a second server column:
+`bareSpanWithPrefix/2` holds the one `<button>`, `bareSenderSpan/1` passes
+`prefixFor(nick)` (live) and `recordSenderSpan/1` passes `""`. The glyph is a
+PARAMETER, never a default, so each call site states which reading it wants —
+the same no-magic-default-arg rule the bare/bracketed split already followed.
+`prefixFor` itself is untouched.
+
+`mode` is the ONE deliberate survivor, and deliberately, not by inheriting the
+default: a mode row's whole subject IS the grade, so the sender's current
+status is the honest thing to show and there is no retroactivity to remove.
+
+### Measured
+
+Seven cases on the untouched tree, `bun.sh run test -t "#1950"`: **6 red, 1
+green**. Red — `join`, `part`, `quit`, `nick_change`, `topic`, `kick`; the
+`kick` row failed with **2** glyphs, not one, because it renders the kicker
+through the sender span AND the victim through its own `NickText` (the comment
+on `prefixFor` named that target as intentionally live). Green — the `mode`
+case, which is the block's POSITIVE CONTROL: it reads `@` off the very fixture
+the six absences are asserted against, so those absences are the absence of a
+glyph the store COULD have supplied rather than of a glyph nobody had.
+
+### What this does NOT claim, and what it acquits
+
+The `server_event` / `renderRawEvent` senders (WALLOPS, GLOBOPS, KILL, ERROR,
+CHGHOST, vendor verbs) are left on the live reading, and that is an acquittal
+measured in `EventRouter`, not an omission: `route_unhandled_command/2`
+persists every one of them on the synthetic `$server` window, and
+`membersByChannel()` has no entry for `$server`, so `senderPrefix/3` returns
+`""` there by construction. The single raw verb routed to a REAL channel is
+the #78 inbound INVITE — and an `:invited` window is by definition not joined,
+so it carries no member list either. **Residual, stated so nobody rediscovers
+it as a new bug:** an INVITE to a channel we are ALREADY in, whose inviter is
+opped, would still render `*** @nick invited you to #chan`. It is one row,
+behind a re-invite, and it was left alone rather than swept in silently.
+
+Nothing here was measured on production. The Azzurra lines above are the
+reporter's, quoted from the issue; what was measured is the renderer, in jsdom
+for the seven cases and against the live stack for the two-door
+(live vs. reload) contract in `issue1950-record-row-no-live-glyph.spec.ts`.
+
+_Deploy: **cic bundle only** — no server module, no migration, no wire change._

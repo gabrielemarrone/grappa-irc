@@ -90,14 +90,18 @@ spec:
             - name: PHX_HOST
               value: ""
 
-            # Cached peer CTCP AVATAR images. Set here because the image does
-            # NOT bake it: `config/runtime.exs` defaults
-            # PEER_AVATARS_STORAGE_ROOT to the RELATIVE `runtime/peer_avatars`,
-            # which resolves against WORKDIR /app — i.e. the container's
-            # ephemeral layer, wiped on every pod recreate. It is only a cache
+            # Cached peer CTCP AVATAR images. This value is now REDUNDANT and
+            # kept for explicitness: since #1945 the image bakes
+            # PEER_AVATARS_STORAGE_ROOT=/data/peer_avatars, and even unset
+            # `config/runtime.exs` derives that same path from DATABASE_PATH
+            # (`/data/grappa.db` → `/data/peer_avatars`). It was written by
+            # hand here first, to dodge the RELATIVE `runtime/peer_avatars`
+            # default that resolved against WORKDIR /app — the container's
+            # ephemeral layer, wiped on every pod recreate. That hand-written
+            # value is literally what the derivation computes, which is how
+            # #1945 chose the anchor. It is only a cache
             # (`Grappa.Avatars.Reaper` mkdir_p's it at boot and the images
-            # re-fetch), so this is durability, not correctness; the alternative
-            # is re-downloading every peer avatar after each restart.
+            # re-fetch), so this was durability, not correctness.
             - name: PEER_AVATARS_STORAGE_ROOT
               value: /data/peer_avatars
 

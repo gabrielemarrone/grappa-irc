@@ -1622,13 +1622,19 @@ hash baked into the page the browser loaded. Server deploys never
 auto-trigger a cic refresh.
 
 **`CIC_DIST_ROOT` must be set absolute on the jail (issue #526).** The
-BEAM reads the built `index.html` from `CIC_DIST_ROOT` (default
-`runtime/cicchetto-dist`, repo-root-relative) to compute the broadcast
-hash. That relative default only works where the process CWD is the repo
-root — true under Docker (`WORKDIR /app`) and native systemd
+BEAM reads the built `index.html` from `CIC_DIST_ROOT` to compute the
+broadcast hash. Until #1945 the default was the repo-root-RELATIVE
+`runtime/cicchetto-dist`, which only works where the process CWD is the
+repo root — true under Docker (`WORKDIR /app`) and native systemd
 (`WorkingDirectory=<repo>`), but NOT the jail: `rc.d/grappa` starts the
 release with `su -m grappa -c '.../bin/grappa daemon'` and sets no
-WorkingDirectory. So `grappa.env` MUST carry
+WorkingDirectory. Since #1945 an unset `CIC_DIST_ROOT` no longer overrides
+`config/config.exs`'s ABSOLUTE build anchor, which on the jail — where
+`mix release --overwrite` runs in `/home/grappa/grappa` — expands to
+exactly the path below. Setting it explicitly is still the documented
+posture and still the only correct answer for a cross-built package, but
+it is no longer the only thing between this deployment and a silent 404.
+So `grappa.env` SHOULD carry
 `CIC_DIST_ROOT=/home/grappa/grappa/runtime/cicchetto-dist` (absolute,
 alongside `DATABASE_PATH` / `UPLOADS_STORAGE_ROOT` for the same reason);
 unset, `/admin/cic-bundle-changed` returns **204** and no banner is ever

@@ -76,6 +76,12 @@ defmodule Grappa.Avatars.Reaper do
   def init(opts) do
     interval = Keyword.get(opts, :interval_ms, @default_interval_ms)
     storage_root = Keyword.fetch!(opts, :storage_root)
+    # The bang is deliberate: an unwritable cache root is a misconfigured
+    # deployment, and this runs inside the supervision tree, so it takes the
+    # boot down rather than serve an instance that cannot cache. That is only
+    # a sound trade while the root is ABSOLUTE — `config/runtime.exs` used to
+    # hand us a CWD-relative default, and on the jail (CWD `/`) this exact
+    # line is what killed the v1.5.0 cold deploy with eacces (#1945).
     :ok = File.mkdir_p!(storage_root)
 
     schedule_tick(interval)

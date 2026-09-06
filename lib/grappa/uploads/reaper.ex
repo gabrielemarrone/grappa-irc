@@ -22,13 +22,18 @@ defmodule Grappa.Uploads.Reaper do
   ## Storage root
 
   The on-disk directory is `:storage_root` passed via start opts.
-  Production callers pass `runtime/uploads` (set in the application
-  supervisor); tests inject a per-test temp dir + clean it via
-  `on_exit/1`.
+  Production callers pass `:uploads_storage_root` (set in the application
+  supervisor), which `config/runtime.exs` resolves to an ABSOLUTE path —
+  the sibling of the sqlite database unless `UPLOADS_STORAGE_ROOT` says
+  otherwise; tests inject a per-test temp dir + clean it via `on_exit/1`.
 
-  The Reaper performs `File.mkdir_p/1` on `storage_root` in
+  The Reaper performs `File.mkdir_p!/1` on `storage_root` in
   `init/1` so a fresh deploy doesn't need a separate bootstrap
   step — same module owns both the read + write of the directory.
+  The bang is deliberate and load-bearing: an unwritable root is a
+  misconfigured deployment, not a degraded feature. It is also why a
+  CWD-relative default was a BOOT CRASH rather than a missing image
+  (#1945) — the root must be absolute for that trade to be sound.
 
   ## AdminEvents
 

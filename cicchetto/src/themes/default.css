@@ -14499,9 +14499,10 @@ audio.media-viewer-media {
 
      `overflow: clip` clips identically but does NOT create a scroll
      container: there is no `scrollTop` to reset, so the class of bug is gone
-     rather than papered over. The `hidden` above it is what engines without
-     `clip` keep. */
-  overflow: hidden;
+     rather than papered over. No `hidden` fallback under it: at our
+     browserslist targets the minifier collapses the pair to `clip` alone, so
+     the fallback never reaches a browser and only trips
+     `noDuplicateProperties`. */
   overflow: clip;
   background: #000;
   color: var(--fg);
@@ -14543,7 +14544,20 @@ audio.media-viewer-media {
   top: max(0.5rem, var(--safe-area-inset-top));
   right: max(0.5rem, var(--safe-area-inset-right));
   display: flex;
+  align-items: center;
   gap: 0.25rem;
+}
+
+/* #1934 — the playing movement's name, next to the speaker. Muted, so it does
+   not compete with the titles: it exists to be READ when someone wants to
+   report what the music just did, not to be watched. */
+.credits-movement {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  pointer-events: none;
 }
 
 /* The window the titles travel through. Masked top and bottom so they fade
@@ -14573,7 +14587,6 @@ audio.media-viewer-media {
      `.credits-viewport-ended`) re-declare `overflow-x: hidden` alongside their
      `overflow-y: auto`, because `clip` on one axis with `auto` on the other is
      not a pairing worth relying on. */
-  overflow: hidden;
   overflow: clip;
   pointer-events: none;
   /* #1934 — the fade band as ONE number, because JS reads it too.

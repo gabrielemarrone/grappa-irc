@@ -1068,6 +1068,17 @@ export function creditsBar(index: number, movement = 0): readonly CreditsEvent[]
 }
 
 /**
+ * The name of the movement at suite position `index`, which wraps like the
+ * scheduler's own read does. Shown next to the mute button while the music is
+ * on, so a listener can say WHICH movement did the thing they are reporting —
+ * the suite turns over on the roll's pass, and by the time a bug is described
+ * the music has usually moved on.
+ */
+export function creditsMovementName(index: number): string {
+  return movementAtIndex(index).name;
+}
+
+/**
  * Bar `index` of the manifesto's theme (#1931). Wraps, like the suite's: the
  * text takes as long as it takes to read, so the piece under it loops.
  */

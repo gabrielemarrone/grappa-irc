@@ -9,7 +9,12 @@ import {
 } from "solid-js";
 import { buildCredits, creditsDateLabel } from "./lib/buildCredits";
 import { bootBundleVersionAccessor } from "./lib/bundleHash";
-import { type CreditsArpeggio, type CreditsPiece, startCreditsArpeggio } from "./lib/creditsAudio";
+import {
+  type CreditsArpeggio,
+  type CreditsPiece,
+  creditsMovementName,
+  startCreditsArpeggio,
+} from "./lib/creditsAudio";
 import { CREDITS_COW, CREDITS_SPECIAL_THANKS } from "./lib/creditsBlock";
 import {
   CREDITS_CLOSE_LABEL,
@@ -195,6 +200,13 @@ const CreditsModal: Component = () => {
   // bought us. What it does NOT do is reset when we restart the element.
   let rollPass = 0;
 
+  // #1934 — the movement's name, shown next to the speaker while the music is
+  // ON. vjt, reporting a click between notes: "non so dirti quale sia la song".
+  // The suite turns over with the roll, so by the time anyone can describe what
+  // they heard it is playing something else — the label is what makes a report
+  // name a movement. A signal, unlike `rollPass`, because this one is rendered.
+  const [movementName, setMovementName] = createSignal(creditsMovementName(0));
+
   createEffect(() => {
     // #1929 — CLEARED on open, not drawn. The first pass is the block (names,
     // cow, thanks) and carries no prose at all, so a set drawn here would be
@@ -212,6 +224,7 @@ const CreditsModal: Component = () => {
     if (creditsModalOpen()) {
       setStage("block");
       setProse(null);
+      setMovementName(creditsMovementName(0));
       // With the stage: `Show` builds a fresh element on every open, so the
       // roll genuinely starts from pass zero and the suite has to as well.
       rollPass = 0;
@@ -493,6 +506,14 @@ const CreditsModal: Component = () => {
         />
 
         <div class="credits-chrome">
+          {/* Only while the music is audible: muted, the name would be naming
+              something nobody can hear. Ahead of the speaker so it reads as a
+              label ON it rather than a stray word between two buttons. */}
+          <Show when={!creditsMuted()}>
+            <span class="credits-movement" data-testid="credits-movement">
+              {movementName()}
+            </span>
+          </Show>
           <button
             type="button"
             class="modal-chrome-button credits-mute"
@@ -547,6 +568,7 @@ const CreditsModal: Component = () => {
                 // iteration count, so this is now the only thing that
                 // remembers how many turns the roll has taken.
                 rollPass += 1;
+                setMovementName(creditsMovementName(rollPass));
                 advance();
                 syncRollDistance(node);
               });

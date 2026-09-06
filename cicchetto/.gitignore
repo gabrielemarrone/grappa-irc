@@ -4,3 +4,13 @@ dist/
 *.log
 .env
 .env.local
+
+# bun.lock is the canonical lock (see docs/OPERATIONS.md § "cic_build.sh —
+# bun here, npm only on FreeBSD"). package-lock.json is a build artefact of
+# ONE substrate: FreeBSD pkg has no bun port, so infra/freebsd/jail_cic_build.sh
+# falls back to `npm install`, which regenerates this file INSIDE the prod
+# checkout. Untracked and unignored, it made `git status --porcelain` non-empty
+# forever, and Grappa.Version.GitProbe reads that at compile time — so every
+# jail release reported the unreleased `X.Y.Z-<sha>` instead of the bare tag
+# #391 promises (#1851; measured on 1.4.0, 1.4.1 and 1.5.0).
+package-lock.json

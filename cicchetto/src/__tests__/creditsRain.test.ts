@@ -385,16 +385,22 @@ describe("the first block's fade (#1929 — the stylesheet owns the seam)", () =
     expect(gone?.at).toBe(rollParksAt());
   });
 
-  it("leaves a dissolve long enough to read as a fade, not as a cut", () => {
-    // 3-6s of it. A shorter window is a cut with extra steps; a longer one
-    // eats the names.
+  it("holds the block opaque until the very end of the travel, then dissolves", () => {
+    // Asserted as a SHARE of the cycle, not in seconds: since 2026-09-06 the
+    // duration is written at runtime by `syncRollDistance` (it follows the
+    // set's height), so the seconds in the CSS are a default, not the clock.
+    //
+    // The window itself is vjt's call — "si sfuma al 90%" (2026-09-06 11:00),
+    // i.e. the last ~1% of the cycle, by which point only a sliver of the
+    // block is still on screen. What this pins is the SHAPE: fully opaque for
+    // the bulk of the travel, a non-zero dissolve, and zero on the park.
     const all = fadeStops();
     const opaqueUntil = all.filter((stop) => Number(stop.value) === 1).at(-1)?.at;
     expect(opaqueUntil, "the fade is transparent from its first stop").toBeGreaterThan(0);
-    const dissolve =
-      animationSeconds(".credits-roll", "credits-roll") * (rollParksAt() - (opaqueUntil ?? 0));
-    expect(dissolve).toBeGreaterThanOrEqual(3);
-    expect(dissolve).toBeLessThanOrEqual(6);
+    expect(opaqueUntil ?? 0).toBeGreaterThanOrEqual(0.85);
+    const dissolve = rollParksAt() - (opaqueUntil ?? 0);
+    expect(dissolve, "the block snaps off instead of dissolving").toBeGreaterThan(0);
+    expect(dissolve, "the dissolve eats the names").toBeLessThanOrEqual(0.15);
   });
 
   it("runs ONCE and holds, so the prose that follows is never faded", () => {

@@ -145,7 +145,7 @@ export function rollIsClear(roll: HTMLElement | undefined): boolean {
   if (roll === undefined) return false;
 
   const viewport = roll.parentElement;
-  if (viewport === null) return false;
+  if (viewport == null) return false;
 
   const box = viewport.getBoundingClientRect();
   if (box.height <= 0) return false;

@@ -208,7 +208,10 @@ describe("CreditsModal (#1773)", () => {
     // anything outside it would survive the dissolve and sit on the rain.
     const block = screen.getByTestId("credits-block");
     expect(block.contains(screen.getByTestId("credits-cow"))).toBe(true);
-    expect(screen.getByTestId("credits-cow").textContent).toContain("Super Cow Powers");
+    // Dictated verbatim, lowercase, on two balloon lines (vjt, 2026-09-06).
+    const cow = screen.getByTestId("credits-cow").textContent ?? "";
+    expect(cow).toContain("this grappa server");
+    expect(cow).toContain("has super cow powers");
 
     // Every line, not a sample: the list is dictated, so a render that drops
     // one is the failure mode worth catching.

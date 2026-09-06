@@ -1518,7 +1518,38 @@ defmodule Grappa.Scrollback do
 
       if count > 0 do
         # `dm_with` is the DISPLAY column → set the RAW new nick.
+        #
+        # The leading `where_dm_peer/2` is REDUNDANT BY LOGIC and there for
+        # the query planner alone: `lower(dm_with) = folded` already implies
+        # `lower(COALESCE(dm_with, channel)) = folded` (the fold can only
+        # match a NON-NULL `dm_with`, and COALESCE returns it whenever it is
+        # non-null), so the row-set is identical with or without it. What it
+        # buys is the index: the only folded index on `messages` is
+        # `messages_{visitor,user}_id_network_id_dm_coalesce_fold_id_kind_index`
+        # on `lower(COALESCE(dm_with, channel))`, and SQLite matches an
+        # expression index only against the SAME expression — `lower(dm_with)`
+        # alone is a different string, so the plan degraded to a SCAN of the
+        # subject's whole history behind the `(visitor_id, network_id)` prefix.
+        #
+        # 🔴 Measured on a raw copy of prod (2026-09-06, 2 GB db, 2.88M rows,
+        # `page_size = 65536`), one peer rename inside `BEGIN IMMEDIATE`:
+        #
+        #   subject       rows    UPDATE dm_with          plan
+        #   25k history   116     352 ms  →   2.8 ms      SCAN → SEARCH
+        #   205k history   73    1704 ms  →   1.9 ms      SCAN → SEARCH
+        #
+        # The 1704 ms was 1591 ms of `sys` — 64 KiB page reads, not CPU. This
+        # holds SQLite's single write lock, and `NickMigration.peer_renamed/5`
+        # runs it once per session per peer NICK, so a reconnect-looping peer
+        # pays it on every bounce.
+        #
+        # The `channel` arm below needs no such conjunct: its predicate rides
+        # `messages_{visitor,user}_id_network_id_channel_id_kind_index` as a
+        # COVERING index (15-55 ms, no table lookup), and the coalesce fold is
+        # NOT implied there — a row with `dm_with` set and a divergent
+        # `channel` (7740 of them in prod) would be silently skipped.
         base
+        |> where_dm_peer(folded_old)
         |> where([m], Identifier.nick_fold(m.dm_with) == ^folded_old)
         |> Repo.update_all(set: [dm_with: new_nick])
 

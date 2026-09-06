@@ -269,6 +269,11 @@ function friendlyKnown(err: ApiError, code: ErrorTokensRestErrorToken): string {
       // per-network cap (`Grappa.Notify.max_entries/0`). A bounded
       // resource, not a rate — the recourse is pruning, not waiting.
       return "Your watch list for this network is full. Remove an entry first.";
+    case "invalid_mask":
+      // #162 — `/ignore` mask rejected by `Grappa.IRC.Mask.normalize/1`
+      // (empty, whitespace, or not `nick!user@host`). A bare nick is
+      // fine — it becomes `nick!*@*` server-side — so name the shape.
+      return "That ignore mask is not valid. Use a nick or nick!user@host.";
     // #364 bucket H (cross-surface S3) — four FallbackController tokens
     // whose server comments assert cic copy exists, but KnownApiErrorCode
     // had no arm, so they leaked the raw `<status> <code>` string into

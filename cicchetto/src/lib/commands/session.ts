@@ -1,7 +1,10 @@
 import { patchNetwork, postNick, postNotifyAdd } from "../api";
+import { appendCommandOutput, type CommandOutputLine } from "../commandOutput";
 import { friendlyError } from "../friendlyError";
+import { addIgnore, delIgnore } from "../ignoreList";
 import { clearMentionsBundle } from "../mentionsWindow";
 import { quitAll } from "../quit";
+import type { SlashCommand } from "../slashCommands";
 import { pushAwaySet, pushAwayUnset, pushOper, pushRecover } from "../socket";
 import type { CommandHandler } from "./context";
 
@@ -104,6 +107,53 @@ export const recoverCommand: CommandHandler<"recover"> = async (cmd, ctx) => {
  * resolves, so reading watchByNetwork() here would race. Removal is the
  * settings × (bare /notify opens it). Per-network: the active window's network.
  */
+/**
+ * #162 — `/ignore <mask>` and `/unignore <mask>`. Both address the network
+ * by SLUG over REST; the id check keeps the "network must exist" contract
+ * the other network verbs hold and discards the value, as `notifyCommand`
+ * below does. A BARE `/ignore` never reaches here: the parser turns it into
+ * `open-settings` → the ignore-list sub-page, the door bare `/hilight`
+ * takes (the list with its per-entry × lives there).
+ *
+ * The answer is printed INTO THE WINDOW (`commandOutput.ts`), never as the
+ * transient compose notice: one row naming ITS OWN outcome on the mask the
+ * server normalised — `Unignore: removed spambot!*@*` for `/unignore
+ * spambot`, a mask the operator never typed — and nothing else; an
+ * idempotent re-add says `already ignored` rather than posing as a first
+ * add. The window keeps the rows, so what was asked and done stays readable
+ * as history (Gabriele, 2026-09-06).
+ *
+ * Every call goes through `ignoreList.ts`, the store the ignore-list
+ * settings sub-page reads, so a verb typed here updates a sub-page that is
+ * open — one state, the pattern `/hilight` + the watch-lists page set.
+ */
+export const ignoreCommand: CommandHandler<"ignore"> = async (cmd, ctx) => {
+  const net = ctx.requireNetworkId(ctx.networkSlug, "ignore");
+  if (typeof net !== "number") return net;
+
+  appendCommandOutput(ctx.key, await ignoreLines(cmd, ctx.token, ctx.networkSlug));
+  return { ok: true };
+};
+
+const ignoreLines = async (
+  cmd: Extract<SlashCommand, { kind: "ignore" }>,
+  token: string,
+  slug: string,
+): Promise<CommandOutputLine[]> => {
+  switch (cmd.action) {
+    case "add": {
+      const r = await addIgnore(token, slug, cmd.mask);
+      const text = r.outcome === "added" ? `added ${r.mask}` : `${r.mask} is already ignored`;
+      return [{ label: "Ignore:", text, indent: false }];
+    }
+    case "del": {
+      const r = await delIgnore(token, slug, cmd.mask);
+      const text = r.outcome === "removed" ? `removed ${r.mask}` : `${r.mask} was not ignored`;
+      return [{ label: "Unignore:", text, indent: false }];
+    }
+  }
+};
+
 export const notifyCommand: CommandHandler<"notify"> = async (cmd, ctx) => {
   // The id is not used — this arm addresses the network by SLUG over REST — but
   // the network must still exist, so the check is kept and the value

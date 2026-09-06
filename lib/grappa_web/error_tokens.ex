@@ -98,6 +98,9 @@ defmodule GrappaWeb.ErrorTokens do
           | :too_many_attempts
           | :theme_cap_reached
           | :list_full
+          # #162 — 422: a `/ignore` mask that `Grappa.IRC.Mask.normalize/1`
+          # rejects (empty, whitespace, CRLF, bad `nick!user@host` order).
+          | :invalid_mask
           | :not_raster
           | :too_large
           | :ssrf_blocked

@@ -48465,3 +48465,117 @@ day a generator turned that flag on.
 
 _Deploy: **test-only** — no production module, no migration, no `VERSION` bump,
 no cic bundle, no wire change._
+<!-- entry #162a -->
+
+---
+
+## 2026-09-06 — #162a: /ignore, dropped at the door
+
+**Shipped:** a per-subject, per-network `/ignore` mask list, honoured
+server-side. `Grappa.IRC.Mask` (the `nick!user@host` glob matcher grappa never
+had), an `"ignores"` key in `user_settings.data` with `get_ignores/2` +
+`add_ignore/3` + `remove_ignore/3`, `/networks/:network_id/ignores` REST, the
+list carried on `Session.Server` state and re-synced on mutation, and the
+filter itself at the head of `EventRouter.route/2`. cic gets `/ignore <mask>`,
+`/unignore <mask>`; a BARE `/ignore` opens the ignore-list settings
+sub-page, the door bare `/hilight` and `/notify` take (#356) — the list with
+its per-entry × lives there, so there is no in-window list verb. A mutation's
+answer prints INTO THE WINDOW, irssi-style, through a new plain-text sibling
+of `topicShow` / `inviteAck` (`cicchetto/src/lib/commandOutput.ts`, one row
+per line with an optional accent label and an indent flag, interleaved by
+wallclock like the other two): one row naming its own outcome on the
+NORMALISED mask (`Unignore: removed spambot!*@*`, labelled like `Topic for
+#chan:` — `/unignore spambot` acts on a mask the operator never typed, so
+the reply must name it) and nothing else. Not the transient compose notice,
+which auto-dismisses and holds one line: the rows stay, so the window reads
+as a history of what was asked and done (Gabriele's rulings, 2026-09-06:
+name what was removed; drop the trailing list; print in the window; then
+the bare verb opens settings rather than printing the list).
+
+**Settings sub-page.** The list is also editable under settings → "ignore
+list" (`cicchetto/src/IgnoresSettings.tsx`), one block per network with × to
+remove and an add-input, shaped after the watch-lists page (#356) down to
+the list classes. Backed by `lib/ignoreList.ts`, a mirror store in the
+`highlightList.ts` mould (no broadcast → refresh on open, every REST answer
+mirrored), and the `/ignore` verbs go through the SAME store, so a verb typed
+in the compose box updates a sub-page that is open — one state, never two.
+
+**A third ephemeral kind exposed an ordering bug in the first two.** `/ignore`
+then `/topic` printed the topic ABOVE the ignore rows. `ScrollbackPane`'s
+`rows()` memo wove invite-acks, `/topic` answers and now verb answers into
+the timeline in three separate passes, each anchoring only on MESSAGE rows
+(`server_time > at`): the `/topic` pass ran after the `/ignore` pass, saw no
+later message, and went to the END — past rows it never looked at. The same
+shape reverses two `/topic` answers once a message lands after both (equal
+insertion index, the second splice lands first) — latent since #1914, never
+seen because nobody asked `/topic` twice under a live channel. Fixed by ONE
+pass over all ephemeral entries sorted by `(at, ts)`, with every woven row
+carrying its `at` so a later answer anchors on an earlier one exactly as on a
+message (`rowTime/1`). Pinned by a pane test that asks `/ignore` then
+`/topic` under a message later than both.
+
+### Drop, not hide, not re-route — and why the pick was easy
+
+#162's body says drop. Lucy's variant re-routes to the server window as a flat
+silent line; the issue records the tension and that someone has to pick. Picked
+drop, on vjt's ruling that ignored is ignored — no un-hide, no back and forth —
+which also makes the second ruling on the issue free: **an ignored message must
+produce no push**, and with no persist effect there is no row, no broadcast and
+no trigger, so *"ignored mask sends a DM, subscription exists, zero pushes
+emitted"* holds by construction rather than by a second gate beside
+`muted_targets` in `should_notify?/5`. If the re-route variant wins later, the
+storage, matching, REST and commands all survive; only the delivery arm changes.
+
+### Its own structure, beside `muted_targets`, not inside it
+
+vjt's ruling, and mechanical rather than aesthetic: a mute is "this ROOM is
+noisy" and only suppresses attention; an ignore is "this PERSON is a problem"
+and stops the message existing. The read-path difference is total — mute has
+never needed a filter, ignore is nothing but one — so one shared shape would
+carry a field meaningless on half its rows. Same conventions (network in the
+key for the #1038 reason, `canonical_target/1` fold), separate key. irssi's own
+`NO_ACT` level is what `muted_targets` already is, arrived at independently,
+which is the strongest evidence these are two features and not one with a flag.
+
+### The filter's four deliberate exclusions
+
+Content only — PRIVMSG and NOTICE (ACTION rides PRIVMSG); presence verbs are
+governed by the presence filter and dropping a JOIN here would desync the
+members map. Never our own lines. Never a services or server sender
+(`Mentions.mentionable_sender?/1`, #1674): a `*!*@*` mask must not eat
+NickServ telling you your password is wrong. Never an origin with no nick.
+
+### Forward-only settled the mask question for free
+
+Scrollback stores `sender` as a NICK, never `nick!user@host`, so a mask can
+never be applied to stored history. Under #162's forward-only ruling that never
+bites: matching happens at delivery, where the prefix carries the full triple
+(`Message.sender_origin/1`). A cloaked or absent user/host satisfies only a `*`
+pattern, never a concrete one — an ignore on a host must not fire for a sender
+whose host we cannot see.
+
+### Two bugs the unit tests caught before the PR
+
+1. `normalize/1` accepted `"a b"` — `safe_line_token?/1` guards CR/LF/NUL, not
+   whitespace, and a mask is one token. Rejected explicitly.
+2. The glob's absolute anchors (`\A`/`\z`) reached the source as a bare `A`/`z`
+   through a layer that eats backslashes, so the matcher silently matched
+   nothing — every positive `matches?/4` case red at once. Replaced with
+   `^`/`$`, which need no escaping and bind to the string ends here (no part can
+   carry a newline). The comment on the regex says why.
+
+### Not in v1
+
+irssi's `<levels>` argument (`/ignore nick PUBLIC`) — content-only for now, and
+the vocabulary to grow it is `Message.kinds/0`. irssi's `-replies` — grappa
+does not track what a message replies to. A settings-drawer list — the bare
+`/ignore` prints it.
+
+_Deploy: **HOT** — no migration (a JSON key in the existing column).
+`protocol_version` 13 → 14 (13 went to #1850 while this branch was out — same mechanism, a token moving the pin), and not by judgement: the routes alone are the
+v10/v11 shape (REST endpoints sit outside the generated schema), but the 422
+`invalid_mask` token joins `rest_error_token`, a closed set
+`gen_wire_types` renders into cic's `KnownApiErrorCode` union — the pin
+moved, `ErrorTokensDriftTest` went red, and this paragraph had already
+written the bump off before either spoke. `min_protocol_version` stays 1:
+no pre-v14 bundle knows `/ignore`, so none can earn the token._

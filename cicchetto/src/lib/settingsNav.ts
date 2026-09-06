@@ -54,6 +54,7 @@ export type SettingsSubPage =
   | "themes"
   | "push"
   | "watchlists"
+  | "ignores"
   | "aliases"
   | "perform";
 

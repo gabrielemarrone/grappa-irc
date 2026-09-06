@@ -1370,6 +1370,56 @@ describe("parseSlash — /oper", () => {
 // irssi-direct: `/notify <nick> …` adds; /watch is a presence ALIAS (was a
 // keyword alias pre-#356); a BARE form opens the watch-lists settings
 // section (removal lives there, per-entry ×).
+// #162 — /ignore + /unignore, the server-honoured mask list. irssi-direct:
+// one mask per call; a bare /ignore opens the ignore-list settings sub-page
+// (like bare /hilight). Levels are deliberately NOT parsed
+// (v1 drops content only), so a second token is ignored, not a second mask.
+describe("parseSlash — /ignore + /unignore (#162)", () => {
+  it("/ignore <mask> → ignore add", () => {
+    expect(parseSlash("/ignore spambot")).toEqual({
+      kind: "ignore",
+      action: "add",
+      mask: "spambot",
+    });
+  });
+
+  it("/ignore keeps a full nick!user@host mask verbatim — normalisation is the server's", () => {
+    expect(parseSlash("/ignore *!*@Evil.Example")).toEqual({
+      kind: "ignore",
+      action: "add",
+      mask: "*!*@Evil.Example",
+    });
+  });
+
+  it("/ignore takes ONE mask; a trailing token is not a second one", () => {
+    expect(parseSlash("/ignore spambot PUBLIC")).toEqual({
+      kind: "ignore",
+      action: "add",
+      mask: "spambot",
+    });
+  });
+
+  it("bare /ignore → open the ignore-list settings sub-page", () => {
+    expect(parseSlash("/ignore")).toEqual({ kind: "open-settings", section: "ignores" });
+  });
+
+  it("/unignore <mask> → ignore del", () => {
+    expect(parseSlash("/unignore spambot")).toEqual({
+      kind: "ignore",
+      action: "del",
+      mask: "spambot",
+    });
+  });
+
+  it("bare /unignore is a parser error, not a silent list", () => {
+    expect(parseSlash("/unignore")).toEqual({
+      kind: "error",
+      verb: "unignore",
+      message: "/unignore requires a mask",
+    });
+  });
+});
+
 describe("parseSlash — /notify + /watch presence (#356: irssi-direct, bare → settings)", () => {
   it("/notify <nick> → notify add", () => {
     expect(parseSlash("/notify Foo")).toEqual({ kind: "notify", action: "add", nicks: ["Foo"] });

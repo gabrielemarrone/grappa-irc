@@ -1975,6 +1975,28 @@ defmodule Grappa.Session do
   end
 
   @doc """
+  #162 — pushes the current `/ignore` mask list to the live session for
+  `(subject, network_id)` so the delivery filter picks it up immediately.
+  No live session is a normal `:ok`: the next spawn reads the list from
+  `UserSettings` at init.
+  """
+  @spec ignores_changed(subject(), integer(), [String.t()]) :: :ok
+  def ignores_changed(subject, network_id, masks)
+      when is_subject(subject) and is_integer(network_id) and is_list(masks) do
+    case call_session(subject, network_id, {:ignores_changed, masks}) do
+      :ok ->
+        :ok
+
+      {:error, :no_session} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("ignores_changed sync failed", reason: inspect(reason))
+        :ok
+    end
+  end
+
+  @doc """
   #247 — live watch-list sync after a `Grappa.Notify` mutation while a
   session is up: sends the MONITOR/WATCH add/remove lines and updates
   the session's presence map. `added`/`removed` are display-form nick

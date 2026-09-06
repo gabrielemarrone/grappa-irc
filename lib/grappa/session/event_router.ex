@@ -95,9 +95,9 @@ defmodule Grappa.Session.EventRouter do
   in `Session.Server.handle_info` — out of this router's scope.
   """
 
-  alias Grappa.IRC.{CTCP, Identifier, JoinFailure, Message}
+  alias Grappa.IRC.{CTCP, Identifier, JoinFailure, Mask, Message}
+  alias Grappa.{Mentions, Scrollback, Session}
   alias Grappa.RateLimit.TokenBucket
-  alias Grappa.{Scrollback, Session}
 
   alias Grappa.Session.{
     IdentityState,
@@ -119,6 +119,9 @@ defmodule Grappa.Session.EventRouter do
   `optional(any()) => any()` to admit them without enforcing them.
   """
   @type state :: %{
+          # #162: optional so a bare unit-test state still routes; the filter
+          # reads it with a `[]` default. Session.Server always sets it.
+          optional(:ignores) => [String.t()],
           required(:subject) => Session.subject(),
           required(:network_id) => integer(),
           required(:nick) => String.t(),
@@ -353,15 +356,56 @@ defmodule Grappa.Session.EventRouter do
   """
   @spec route(Message.t(), state()) :: {:cont, state(), [effect()]}
   def route(%Message{} = msg, state) do
-    isupport = Map.get(state, :isupport, ISupport.default())
+    if ignored?(msg, state) do
+      # #162 — dropped at the door. No persist effect, so no row, no
+      # broadcast, and no push: the "zero pushes emitted" requirement on the
+      # issue holds by construction rather than by a second gate.
+      {:cont, state, []}
+    else
+      isupport = Map.get(state, :isupport, ISupport.default())
 
-    {msg, statusmsg_level} = strip_statusmsg_target(msg, ISupport.statusmsg(isupport))
+      {msg, statusmsg_level} = strip_statusmsg_target(msg, ISupport.statusmsg(isupport))
 
-    msg
-    |> canonicalize_channel_params(ISupport.casemapping(isupport))
-    |> do_route(state)
-    |> tag_statusmsg(statusmsg_level)
+      msg
+      |> canonicalize_channel_params(ISupport.casemapping(isupport))
+      |> do_route(state)
+      |> tag_statusmsg(statusmsg_level)
+    end
   end
+
+  # #162 — the /ignore delivery filter. Pure: reads `state.ignores`, which
+  # Session.Server loads at init and re-syncs on mutation, so nothing here
+  # touches the DB on the inbound hot path.
+  #
+  # Scope, deliberately narrow for v1:
+  #   * CONTENT only — PRIVMSG and NOTICE (ACTION rides PRIVMSG). Presence
+  #     verbs (JOIN/PART/QUIT/NICK) are not dropped: the issue lists them as
+  #     "optionally", and they are already governed by the presence filter.
+  #     Dropping a JOIN here would also desync the members map.
+  #   * Never our own lines (own_nick) — an ignore on a mask that happens to
+  #     match yourself must not silence you to yourself.
+  #   * Never a services or server sender (`Mentions.mentionable_sender?/1`,
+  #     #1674): NickServ telling you your password is wrong is not chatter,
+  #     and a mask like `*!*@*` must not eat it.
+  #   * An origin with no nick (server prefix, prefix-less line) is never a
+  #     candidate — `sender_origin/1` is nil there.
+  @spec ignored?(Message.t(), state()) :: boolean()
+  defp ignored?(%Message{command: cmd} = msg, state) when cmd in [:privmsg, :notice] do
+    case {Map.get(state, :ignores, []), Message.sender_origin(msg)} do
+      {[], _} ->
+        false
+
+      {_, nil} ->
+        false
+
+      {masks, {nick, user, host}} ->
+        not nick_eq?(nick, state.nick) and
+          Mentions.mentionable_sender?(nick) and
+          Mask.any_match?(masks, nick, user, host)
+    end
+  end
+
+  defp ignored?(_, _), do: false
 
   # Rewrites `msg.params` so every channel-shape param is canonicalised
   # to lowercase. The position of the channel param differs per command

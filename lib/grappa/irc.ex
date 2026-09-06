@@ -34,6 +34,8 @@ defmodule Grappa.IRC do
       Identity,
       JoinFailure,
       LineSplit,
+      # #162 — nick!user@host glob masks for /ignore
+      Mask,
       Message,
       MircFormat
     ]

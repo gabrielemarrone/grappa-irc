@@ -1301,6 +1301,106 @@ defmodule Grappa.UserSettingsTest do
   end
 
   # ---------------------------------------------------------------------------
+  # ignores accessors (#162 — the /ignore mask list)
+  # ---------------------------------------------------------------------------
+
+  describe "get_ignores/2" do
+    test "reads [] when no row, no key, or a malformed value" do
+      assert UserSettings.get_ignores({:user, Ecto.UUID.generate()}, "azzurra") == []
+
+      user = user_fixture()
+      {:ok, settings} = UserSettings.get_or_init({:user, user.id})
+      assert UserSettings.get_ignores({:user, user.id}, "azzurra") == []
+
+      # A malformed value must fail OPEN — never a user silently ignoring everyone.
+      Repo.update!(Settings.changeset(settings, %{data: %{"ignores" => "garbage"}}))
+      assert UserSettings.get_ignores({:user, user.id}, "azzurra") == []
+
+      Repo.update!(Settings.changeset(settings, %{data: %{"ignores" => %{"azzurra" => "nope"}}}))
+      assert UserSettings.get_ignores({:user, user.id}, "azzurra") == []
+    end
+
+    test "is keyed by network — an ignore on one network does not leak to another" do
+      user = user_fixture()
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "spambot")
+
+      assert UserSettings.get_ignores({:user, user.id}, "azzurra") == ["spambot!*@*"]
+      assert UserSettings.get_ignores({:user, user.id}, "ircnet") == []
+    end
+  end
+
+  describe "add_ignore/3" do
+    test "normalises a bare nick and returns the resulting list" do
+      user = user_fixture()
+
+      assert {:ok, :added, "spambot!*@*", ["spambot!*@*"]} =
+               UserSettings.add_ignore({:user, user.id}, "azzurra", "SpamBot")
+    end
+
+    test "is idempotent across spellings of the same mask" do
+      user = user_fixture()
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "spambot")
+
+      assert {:ok, :already_ignored, "spambot!*@*", ["spambot!*@*"]} =
+               UserSettings.add_ignore({:user, user.id}, "azzurra", "SPAMBOT!*@*")
+    end
+
+    test "rejects an unparseable mask" do
+      user = user_fixture()
+      assert {:error, :invalid_mask} = UserSettings.add_ignore({:user, user.id}, "azzurra", "a b")
+      assert UserSettings.get_ignores({:user, user.id}, "azzurra") == []
+    end
+
+    test "refuses past the per-network cap" do
+      user = user_fixture()
+
+      for i <- 1..100 do
+        {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "n#{i}")
+      end
+
+      assert {:error, :list_full} = UserSettings.add_ignore({:user, user.id}, "azzurra", "one-more")
+      # The cap is per network: another network is untouched.
+      assert {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "ircnet", "fine")
+    end
+
+    test "preserves sibling settings keys" do
+      user = user_fixture()
+      {:ok, _} = UserSettings.put_upload_ttl_seconds({:user, user.id}, 3600)
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "spambot")
+
+      assert UserSettings.get_upload_ttl_seconds({:user, user.id}) == 3600
+    end
+  end
+
+  describe "remove_ignore/3" do
+    test "removes by normalised mask and returns the resulting list" do
+      user = user_fixture()
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "spambot")
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "*!*@evil.example")
+
+      assert {:ok, :removed, "spambot!*@*", ["*!*@evil.example"]} =
+               UserSettings.remove_ignore({:user, user.id}, "azzurra", "SPAMBOT")
+    end
+
+    test "is idempotent — removing an absent mask is still ok" do
+      user = user_fixture()
+
+      assert {:ok, :not_ignored, "nobody!*@*", []} =
+               UserSettings.remove_ignore({:user, user.id}, "azzurra", "nobody")
+    end
+
+    # The put_or_delete rule: an empty list is ABSENCE, not a stored [].
+    test "an emptied network drops its key, and an emptied map drops the ignores key" do
+      user = user_fixture()
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, "azzurra", "spambot")
+      {:ok, _, _, _} = UserSettings.remove_ignore({:user, user.id}, "azzurra", "spambot")
+
+      {:ok, settings} = UserSettings.get_or_init({:user, user.id})
+      refute Map.has_key?(settings.data, "ignores")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # show_peer_profiles accessor (M2)
   # ---------------------------------------------------------------------------
 

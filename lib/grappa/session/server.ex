@@ -647,6 +647,11 @@ defmodule Grappa.Session.Server do
           # /notify must work on ircds that support WATCH but don't
           # advertise it).
           presence_mechanism: ISupport.presence_mechanism() | nil,
+          # #162: the /ignore masks for THIS network, normalised `nick!user@host`
+          # globs. Loaded from UserSettings at init and re-synced on every
+          # mutation, so EventRouter's delivery filter stays a pure read of
+          # state — no IO on the inbound hot path.
+          ignores: [String.t()],
           # #1946: the ISON polling loop. `presence_poll_ref` is the armed
           # timer (nil when the mechanism is not `:ison`, or when the watch
           # list is empty — an empty list arms nothing at all).
@@ -1189,6 +1194,10 @@ defmodule Grappa.Session.Server do
       # #216: default capability table until 005 arrives — MODES/LINELEN
       # included since #1390.
       isupport: ISupport.default(),
+      # #162: /ignore masks, read once at spawn so the very first inbound
+      # line is filtered — an ignore set while the session was parked must
+      # hold from the first message after reconnect, not from the next sync.
+      ignores: UserSettings.get_ignores(opts.subject, opts.network_slug),
       # #247: /notify presence map — seeded at the end-of-MOTD arm.
       presence: %{},
       presence_armed: false,
@@ -2490,6 +2499,13 @@ defmodule Grappa.Session.Server do
   def handle_call({:notify_changed, added, removed}, _, state)
       when is_list(added) and is_list(removed) do
     {:reply, :ok, sync_presence(state, added, removed)}
+  end
+
+  # #162 — the ignore list changed (REST add/remove). The controller hands over
+  # the whole resulting list rather than a diff: it is small, bounded, and a
+  # replace cannot drift from the DB the way an incremental patch could.
+  def handle_call({:ignores_changed, masks}, _, state) when is_list(masks) do
+    {:reply, :ok, Map.put(state, :ignores, masks)}
   end
 
   @doc """

@@ -140,7 +140,12 @@ let _socket: Socket | null = null;
 // longer do: this bundle speaks 13 and still serves a v9 server. That gap is
 // the two axes behaving as designed, not drift to be tidied away — raising
 // the floor is the #1654 question and is not answered here.
-export const CLIENT_PROTOCOL_VERSION = 13;
+//
+// 13 → 14 (#162): the first bump under the #1973 pin, and it worked as
+// designed — `protocol_test.exs` went red at the commit that moved
+// `@protocol_version` (the `invalid_mask` token) without this line, so the
+// two moved together instead of this file lagging for another three weeks.
+export const CLIENT_PROTOCOL_VERSION = 14;
 
 // #193 — force the correct WS scheme from the page origin, absolutely.
 //

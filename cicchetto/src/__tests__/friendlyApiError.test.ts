@@ -70,6 +70,7 @@ const CASES: Array<{ code: string; matches: RegExp; info?: Record<string, unknow
   { code: "too_many_attempts", matches: /too many login attempts/i },
   // #247 (review 2026-07-19 R1) — /notify watch-list cap.
   { code: "list_full", matches: /watch list.*is full/i },
+  { code: "invalid_mask", matches: /ignore mask.*not valid/i },
   // #364 bucket H (cross-surface S3) — FallbackController tokens that
   // reached operator-visible alerts as raw `<status> <code>` because
   // KnownApiErrorCode had no arm, despite the server comments promising

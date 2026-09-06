@@ -25,6 +25,7 @@ import {
   topicShowLine,
 } from "./lib/channelTopic";
 import { isChannelName } from "./lib/chantypes";
+import { type CommandOutputEntry, commandOutputByWindow } from "./lib/commandOutput";
 import { stripCtcpAction } from "./lib/ctcpAction";
 import { isDocumentVisible } from "./lib/documentVisibility";
 import { highlightPatterns } from "./lib/highlightList";
@@ -1182,7 +1183,16 @@ type MessageRow = { type: "message"; msg: ScrollbackMessage };
 // subsequent server-message arrivals (vjt prod report). Interleaving
 // by wallclock `at` (epoch ms, same unit as ScrollbackMessage's
 // server_time) puts each ack at its arrival position in the timeline.
-type InviteAckRow = { type: "invite-ack"; entry: InviteAckEntry; channel: string; id: string };
+// The three EPHEMERAL row kinds (invite-ack, `/topic` answer, verb answer)
+// carry their wallclock `at`: the weave below anchors a later one on an
+// earlier one exactly as it anchors on a message (#162 ordering fix).
+type InviteAckRow = {
+  type: "invite-ack";
+  entry: InviteAckEntry;
+  channel: string;
+  id: string;
+  at: number;
+};
 // #237: on-JOIN inline topic line — a PRESENTATIONAL row (string id, NOT a
 // ScrollbackMessage), so it never enters the unread/cursor/ring-cap math. It is
 // derived from the `topicByChannel` store and anchored after the own-JOIN row.
@@ -1196,8 +1206,45 @@ type TopicRow = { type: "topic-join"; line: TopicJoinLine; id: string };
 // this one is operator-requested, may repeat, sits at the moment it was
 // asked, and carries a FROZEN snapshot. Same look, different lifecycle —
 // collapsing them into one variant with a flag would fuse those.
-type TopicShowRow = { type: "topic-show"; line: TopicShowLine; id: string };
-type Row = SeparatorRow | UnreadMarkerRow | MessageRow | InviteAckRow | TopicRow | TopicShowRow;
+type TopicShowRow = { type: "topic-show"; line: TopicShowLine; id: string; at: number };
+// #162 — one line of a slash verb's in-window answer: an optional accent
+// label, the text, and whether it is an indented member of a list.
+type CommandOutputRow = {
+  type: "command-output";
+  label: string | null;
+  text: string;
+  indent: boolean;
+  id: string;
+  at: number;
+};
+type Row =
+  | SeparatorRow
+  | UnreadMarkerRow
+  | MessageRow
+  | InviteAckRow
+  | TopicRow
+  | TopicShowRow
+  | CommandOutputRow;
+
+/**
+ * The wallclock a row can be anchored on when weaving ephemeral rows into
+ * the timeline: a message's `server_time`, an ephemeral row's own `at`, and
+ * nothing for the rows that carry no time of their own (separators, the
+ * unread marker, the on-JOIN topic line, which sits where its JOIN row is).
+ */
+function rowTime(row: Row | undefined): number | null {
+  if (row === undefined) return null;
+  switch (row.type) {
+    case "message":
+      return row.msg.server_time;
+    case "invite-ack":
+    case "topic-show":
+    case "command-output":
+      return row.at;
+    default:
+      return null;
+  }
+}
 
 const ScrollbackPane: Component<Props> = (props) => {
   let listRef!: HTMLDivElement;
@@ -1604,7 +1651,14 @@ const ScrollbackPane: Component<Props> = (props) => {
     // operator typed it. Every window kind can carry one: `/topic #chan` is
     // legal from a query or the $server window too.
     const topicShowEntries: TopicShowEntry[] = topicShowByWindow()[key()] ?? [];
-    if (msgs.length === 0 && inviteAckEntries.length === 0 && topicShowEntries.length === 0)
+    // #162 — the plain-text verb answers for THIS window, same keying rule.
+    const commandOutputEntries: CommandOutputEntry[] = commandOutputByWindow()[key()] ?? [];
+    if (
+      msgs.length === 0 &&
+      inviteAckEntries.length === 0 &&
+      topicShowEntries.length === 0 &&
+      commandOutputEntries.length === 0
+    )
       return [];
     // Freeze contract: read the FROZEN snapshot, not live getReadCursor.
     const cursor = markerCursorId();
@@ -1710,33 +1764,6 @@ const ScrollbackPane: Component<Props> = (props) => {
       result.push({ type: "message", msg });
       prevTime = msg.server_time;
     }
-    // 2026-06-01: weave invite-ack rows into the timeline by wallclock
-    // `at` vs message `server_time`. Forward pass: insertion index is
-    // the position of the FIRST message-row whose `server_time > entry.at`,
-    // or the end of the list when no such message exists. Invite-ack
-    // rows skip the unread-marker / day-separator logic on purpose —
-    // they're ephemeral operator-action echoes, not server-persisted
-    // rows. Stable across re-renders: sorted by `(at, ts)` first so
-    // same-ms acks keep insertion order via the closure-monotonic `ts`.
-    if (inviteAckEntries.length > 0) {
-      inviteAckEntries.sort((a, b) => a.entry.at - b.entry.at || a.entry.ts - b.entry.ts);
-      for (const { entry, channel } of inviteAckEntries) {
-        let insertAt = result.length;
-        for (let i = 0; i < result.length; i += 1) {
-          const r = result[i];
-          if (r?.type === "message" && r.msg.server_time > entry.at) {
-            insertAt = i;
-            break;
-          }
-        }
-        result.splice(insertAt, 0, {
-          type: "invite-ack",
-          entry,
-          channel,
-          id: `invite-ack-${entry.ts}`,
-        });
-      }
-    }
     // #237 — inline topic-on-JOIN. irssi prints the topic to the window when
     // YOU join; we mirror it by anchoring a presentational topic row right
     // after the operator's own-JOIN row, derived from the `topicByChannel`
@@ -1793,26 +1820,71 @@ const ScrollbackPane: Component<Props> = (props) => {
         }
       }
     }
-    // #1914 — the `/topic` answers, interleaved by wallclock `at` exactly like
-    // invite-acks: an answer belongs at the moment it was asked, not pinned to
-    // the bottom where later arrivals would make it look like a reply to them.
-    // Sorted on a COPY — `topicShowEntries` is the store's own array.
-    if (topicShowEntries.length > 0) {
-      for (const entry of [...topicShowEntries].sort((a, b) => a.at - b.at || a.ts - b.ts)) {
-        let insertAt = result.length;
-        for (let i = 0; i < result.length; i += 1) {
-          const r = result[i];
-          if (r?.type === "message" && r.msg.server_time > entry.at) {
-            insertAt = i;
-            break;
-          }
-        }
-        result.splice(insertAt, 0, {
+    // Weave the EPHEMERAL rows — invite-acks (2026-06-01), `/topic` answers
+    // (#1914), verb answers (#162) — into the timeline by wallclock `at` vs
+    // message `server_time`, in ONE pass ascending by `(at, ts)`. They skip
+    // the unread-marker / day-separator logic on purpose: operator-action
+    // echoes, not server-persisted rows.
+    //
+    // ONE pass, and every spliced row carries its `at`, because three passes
+    // that each anchored only on MESSAGE rows had a measured ordering bug:
+    // `/ignore` then `/topic` printed the topic ABOVE the ignore rows. The
+    // `/topic` pass ran after the `/ignore` pass, saw no message later than
+    // itself, and went to the END — past rows it never looked at. The same
+    // shape reversed two `/topic` answers as soon as a message landed after
+    // both (equal insertion index, second splice lands first). Anchoring on
+    // any timed row — a message OR an already-woven ephemeral — closes both:
+    // a row goes before the first row whose time is LATER than its own, so
+    // an earlier-asked answer already in place stays above (#162).
+    //
+    // `ts` is each store's own monotonic counter, so it orders lines WITHIN
+    // one store (the rows of one `/ignore`, same `at`) and is only a
+    // tiebreak across stores inside a single millisecond.
+    const ephemeral: Array<{ at: number; ts: number; row: Row }> = [];
+    for (const { entry, channel } of inviteAckEntries) {
+      ephemeral.push({
+        at: entry.at,
+        ts: entry.ts,
+        row: { type: "invite-ack", entry, channel, id: `invite-ack-${entry.ts}`, at: entry.at },
+      });
+    }
+    for (const entry of topicShowEntries) {
+      ephemeral.push({
+        at: entry.at,
+        ts: entry.ts,
+        row: {
           type: "topic-show",
           line: topicShowLine(entry.channel, entry.topic),
           id: `topic-show-${entry.ts}`,
-        });
+          at: entry.at,
+        },
+      });
+    }
+    for (const entry of commandOutputEntries) {
+      ephemeral.push({
+        at: entry.at,
+        ts: entry.ts,
+        row: {
+          type: "command-output",
+          label: entry.label,
+          text: entry.text,
+          indent: entry.indent,
+          id: `command-output-${entry.ts}`,
+          at: entry.at,
+        },
+      });
+    }
+    ephemeral.sort((a, b) => a.at - b.at || a.ts - b.ts);
+    for (const { at, row } of ephemeral) {
+      let insertAt = result.length;
+      for (let i = 0; i < result.length; i += 1) {
+        const time = rowTime(result[i]);
+        if (time !== null && time > at) {
+          insertAt = i;
+          break;
+        }
       }
+      result.splice(insertAt, 0, row);
     }
     return result;
   });
@@ -4174,6 +4246,25 @@ const ScrollbackPane: Component<Props> = (props) => {
                     <Show when={row.line.meta}>
                       <span class="scrollback-topic-join-meta"> — {row.line.meta}</span>
                     </Show>
+                  </div>
+                );
+              }
+              if (row.type === "command-output") {
+                // #162 — a slash verb's answer, one line per row. Wears the
+                // join line's classes for the same reason the `/topic` answer
+                // does: an informational line the operator asked for, kept out
+                // of the unread/cursor math by its own testid.
+                return (
+                  <div
+                    class="scrollback-topic-join"
+                    classList={{ "scrollback-command-output-indent": row.indent }}
+                    data-testid="command-output-line"
+                    data-kind="command-output"
+                  >
+                    <Show when={row.label !== null}>
+                      <span class="scrollback-topic-join-label">{row.label}</span>{" "}
+                    </Show>
+                    <span class="scrollback-body">{row.text}</span>
                   </div>
                 );
               }

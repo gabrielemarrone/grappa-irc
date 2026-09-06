@@ -1666,6 +1666,7 @@ export const ERROR_TOKENS_REST_ERROR_TOKEN = [
   "too_many_attempts",
   "theme_cap_reached",
   "list_full",
+  "invalid_mask",
   "not_raster",
   "too_large",
   "ssrf_blocked",

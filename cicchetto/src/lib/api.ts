@@ -2748,6 +2748,62 @@ export async function deleteNotifyNick(
   if (!res.ok) throw await readError(res);
 }
 
+// #162 — /ignore mask-list REST surface (`GrappaWeb.IgnoresController`).
+// Every mutation answers with the RESULTING list, so the caller renders that
+// and reconciles nothing; an idempotent re-add is indistinguishable from a
+// first add on the wire.
+
+export type IgnoresResponse = { masks: string[] };
+// #162 — a mutation answers the resulting list (the session re-sync), the
+// NORMALISED mask it acted on (`/unignore spambot` removes `spambot!*@*`,
+// which the operator never typed), and what it did. The verb prints the
+// outcome on that mask and nothing else.
+export type IgnoreAddResponse = {
+  masks: string[];
+  mask: string;
+  outcome: "added" | "already_ignored";
+};
+export type IgnoreRemoveResponse = {
+  masks: string[];
+  mask: string;
+  outcome: "removed" | "not_ignored";
+};
+
+export async function getIgnores(token: string, networkSlug: string): Promise<string[]> {
+  const res = await fetch(`/networks/${encodeURIComponent(networkSlug)}/ignores`, {
+    headers: buildHeaders(token),
+  });
+  if (!res.ok) throw await readError(res);
+  return ((await res.json()) as IgnoresResponse).masks;
+}
+
+export async function postIgnore(
+  token: string,
+  networkSlug: string,
+  mask: string,
+): Promise<IgnoreAddResponse> {
+  const res = await fetch(`/networks/${encodeURIComponent(networkSlug)}/ignores`, {
+    method: "POST",
+    headers: buildHeaders(token),
+    body: JSON.stringify({ mask }),
+  });
+  if (!res.ok) throw await readError(res);
+  return (await res.json()) as IgnoreAddResponse;
+}
+
+export async function deleteIgnore(
+  token: string,
+  networkSlug: string,
+  mask: string,
+): Promise<IgnoreRemoveResponse> {
+  const res = await fetch(
+    `/networks/${encodeURIComponent(networkSlug)}/ignores/${encodeURIComponent(mask)}`,
+    { method: "DELETE", headers: buildHeaders(token) },
+  );
+  if (!res.ok) throw await readError(res);
+  return (await res.json()) as IgnoreRemoveResponse;
+}
+
 // #356 — the `clearNotify` REST client (for the dropped `/notify clear`
 // subverb) was removed: presence removal is now per-entry (the settings ×
 // → deleteNotifyNick). The server DELETE-all route stays (the e2e cleanup

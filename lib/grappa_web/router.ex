@@ -622,6 +622,14 @@ defmodule GrappaWeb.Router do
     post "/notify", NotifyController, :create
     delete "/notify/:nick", NotifyController, :remove
     delete "/notify", NotifyController, :clear
+
+    # #162 — /ignore mask list, honoured server-side. Same scope as /notify
+    # (per-network, `:resolve_network` collapses unknown/not-yours to 404) and
+    # inherits the `/networks` client-usable prefix in RouterScopeTest, so no
+    # allowlist edit — unlike a `/me` route, which is exact-listed.
+    get "/ignores", IgnoresController, :index
+    post "/ignores", IgnoresController, :create
+    delete "/ignores/:mask", IgnoresController, :remove
   end
 
   # Test-only FORCE read-cursor surface. Compile-gated to dev/test Mix

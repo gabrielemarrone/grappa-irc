@@ -289,7 +289,16 @@ defmodule Grappa.Protocol do
   # un-bumped addition makes the reading false forever after.
   #
   # @min_protocol_version stays at 1: nothing a client can reach changed.
-  @protocol_version 13
+  # v14 (#162) — `/ignore`. The REST surface gains `/networks/:id/ignores`
+  # and `FallbackController` a 422 `invalid_mask` token. The routes alone
+  # would be a v10/v11-style bump; what moves the pin is the token, because
+  # `rest_error_token` is a closed set that `gen_wire_types` renders into
+  # cic's `KnownApiErrorCode` union and its runtime literal list.
+  #
+  # @min_protocol_version stays at 1: no bundle predating v14 knows the
+  # `/ignore` verb, so none can send the request that earns the new token —
+  # the only frame an old client could fail to read is one it cannot cause.
+  @protocol_version 14
   @min_protocol_version 1
 
   @doc "The protocol version the server currently speaks."
@@ -300,7 +309,7 @@ defmodule Grappa.Protocol do
   # alongside `@protocol_version`; the spec doubles as the bump tripwire,
   # and now that the bump is routine the tripwire is what keeps it from
   # being done half-way.
-  @spec version() :: 13
+  @spec version() :: 14
   def version, do: @protocol_version
 
   @doc """

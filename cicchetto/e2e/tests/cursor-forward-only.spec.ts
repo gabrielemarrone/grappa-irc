@@ -185,7 +185,7 @@ test.describe("BUGHUNT-2 cursor — forward-only contract", () => {
     // fires programmatic scrollIntoView. The input-event gate (B1)
     // must see no preceding pointerdown/wheel/touchmove/keydown and
     // SKIP arming the 500ms settle timer.
-    await page.getByRole("button", { name: "Home", exact: true }).click();
+    await page.getByRole("button", { name: "home", exact: true }).click();
     await page.waitForTimeout(200);
     await selectChannel(page, NETWORK_SLUG, CHANNEL, { ownNick: specNick() });
     await page.waitForTimeout(SETTLE_WAIT_LONG_MS);

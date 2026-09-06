@@ -241,7 +241,7 @@ const Sidebar: Component<Props> = (props) => {
             <span class="sidebar-home-emoji" aria-hidden="true">
               🏠
             </span>
-            <span class="sidebar-channel-name">Home</span>
+            <span class="sidebar-channel-name">home</span>
           </button>
         </li>
       </ul>

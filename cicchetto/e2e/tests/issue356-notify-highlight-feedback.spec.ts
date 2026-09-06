@@ -104,7 +104,7 @@ test("#356 — bare /notify and bare /hilight open the watch-lists section; home
   // Home no longer shows the standalone watched list (moved to settings).
   await page
     .locator(".sidebar-channel-name")
-    .filter({ hasText: /^Home$/ })
+    .filter({ hasText: /^home$/ })
     .click();
   await expect(page.locator(".watched-panel")).toHaveCount(0);
   await expect(page.getByTestId(`watched-panel-${NETWORK_SLUG}`)).toHaveCount(0);

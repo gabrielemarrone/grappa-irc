@@ -1117,9 +1117,13 @@ describe("Sidebar", () => {
       render(() => <Sidebar />);
       const current = screen.getAllByRole("button", { current: true });
       expect(current).toHaveLength(1);
-      // The home row's LABEL is "Home" (the `$home` slug is the routing key,
-      // never shown) — assert what a screen reader would read out.
-      expect(current[0]).toHaveTextContent("Home");
+      // The home row's LABEL is "home" (the `$home` slug is the routing key,
+      // never shown) — assert what a screen reader would read out. Lowercase
+      // since issue 1939: every other sidebar label (`admin`, `channels`,
+      // `mentions`) and the rail's own action for THIS window
+      // (RailActions.tsx `home`) already spell it that way. Case-sensitive
+      // on purpose — a title-cased regression must redden here.
+      expect(current[0]).toHaveTextContent("home");
     });
 
     it("current-ness follows the selection onto the network's server row", () => {

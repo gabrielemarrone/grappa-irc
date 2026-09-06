@@ -82,7 +82,7 @@ test.describe("#160 virtual-tab read-cursor suppression", () => {
 
     // Select the Home tab — disposes the ScrollbackPane. Pre-fix, the
     // onCleanup POSTed a read-cursor for $home (404).
-    await page.getByRole("button", { name: "Home", exact: true }).click();
+    await page.getByRole("button", { name: "home", exact: true }).click();
     // Past the scroll-settle debounce (500ms) + POST round-trip slop.
     await page.waitForTimeout(1200);
 

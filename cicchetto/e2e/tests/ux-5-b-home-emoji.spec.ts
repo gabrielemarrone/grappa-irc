@@ -56,10 +56,12 @@ test("ux-5-b — home sidebar row renders the 🏠 emoji icon", async ({ page })
   expect(box.height).toBeGreaterThan(0);
 
   // Belt-and-suspenders: the emoji span lives INSIDE the home button
-  // (sibling of the "Home" label span), not as a stray standalone
+  // (sibling of the "home" label span), not as a stray standalone
   // element. Catches a regression that moves the emoji outside the
   // button or that drops the .sidebar-home-btn parent.
   const homeBtn = page.locator(".sidebar-home-section .sidebar-home-btn");
   await expect(homeBtn.locator(".sidebar-home-emoji")).toHaveCount(1);
-  await expect(homeBtn).toContainText("Home");
+  // Lowercase since issue 1939 — `toContainText` is case-sensitive, so this
+  // also pins the label casing the sidebar shares with the rail.
+  await expect(homeBtn).toContainText("home");
 });

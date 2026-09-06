@@ -647,6 +647,26 @@ defmodule Grappa.Session.Server do
           # /notify must work on ircds that support WATCH but don't
           # advertise it).
           presence_mechanism: ISupport.presence_mechanism() | nil,
+          # #1946: the ISON polling loop. `presence_poll_ref` is the armed
+          # timer (nil when the mechanism is not `:ison`, or when the watch
+          # list is empty — an empty list arms nothing at all).
+          # `presence_sweep` is the in-flight sweep: how many `303` replies
+          # are still expected and the union of the names seen so far. It is
+          # nil between sweeps, and a sweep still in flight when the next tick
+          # fires is DISCARDED rather than merged — an incomplete sweep must
+          # diff nothing.
+          presence_poll_ref: reference() | nil,
+          presence_sweep:
+            %{
+              expected: pos_integer(),
+              received: non_neg_integer(),
+              # A LIST, not a MapSet: MapSet is opaque, and embedding one in
+              # this map type leaks that opacity into every function that
+              # returns state (dialyzer rejects it). The set is built inside
+              # `Presence.sweep_reports/2`, where it never crosses a boundary.
+              online: [String.t()]
+            }
+            | nil,
           # #229: per-session USER-mode set (the operator's own umodes on
           # this network) — a sorted list of single-letter strings. Seeded
           # by the 221 RPL_UMODEIS reply to the bare `MODE <selfnick>` query
@@ -1173,6 +1193,9 @@ defmodule Grappa.Session.Server do
       presence: %{},
       presence_armed: false,
       presence_mechanism: nil,
+      # #1946: no ISON timer and no sweep until the 421 chain resolves `:ison`.
+      presence_poll_ref: nil,
+      presence_sweep: nil,
       # #229: empty umode set until the 221 RPL_UMODEIS reply arrives.
       umodes: [],
       # #388: no services account until an `ACCOUNT` or a self 330 says so.
@@ -2934,6 +2957,14 @@ defmodule Grappa.Session.Server do
   # session-lifecycle event. The two former clauses (notify vs bare)
   # collapsed into one path + `maybe_notify_session_phase/2` so the emit is
   # not duplicated / missed on either.
+  # #1946 — one ISON sweep. Only ever armed when the mechanism resolved to
+  # `:ison` and the watch list is non-empty (`schedule_presence_poll/1`), so a
+  # tick here always has work.
+  @impl GenServer
+  def handle_info(:presence_poll, state) do
+    {:noreply, run_presence_sweep(state)}
+  end
+
   def handle_info(:irc_connected, state) do
     state = %{state | connected_at: DateTime.utc_now()}
     SessionLog.emit(:connected, state, [])
@@ -5558,12 +5589,29 @@ defmodule Grappa.Session.Server do
           Map.put(state, :presence_mechanism, {:monitor, :unlimited})
 
         {:monitor, {:monitor, _}} ->
-          Logger.info(
-            "presence: MONITOR also unknown — no watch mechanism on this ircd; " <>
+          # #1946 — the terminal fallback is ISON, not `:none`. MONITOR and
+          # WATCH are optional extensions, so a 421 is a real answer about
+          # them; ISON is RFC 1459/2812 mandatory, so there is nothing left to
+          # discover and it is used rather than probed. This is the rung that
+          # makes /notify work on IRCnet.
+          Logger.info("presence: MONITOR also unknown — falling back to ISON polling")
+
+          state
+          |> Map.put(:presence_mechanism, :ison)
+          |> start_presence_poll()
+
+        {:ison, :ison} ->
+          # Unreachable in practice (see the ISON rung of EventRouter's 421
+          # clause); named so an ircd that refuses ISON stops polling and says
+          # so, instead of sweeping into the void forever.
+          Logger.warning(
+            "presence: ISON unknown too — no presence mechanism on this ircd; " <>
               "watched nicks stay :unknown until reconnect"
           )
 
-          Map.put(state, :presence_mechanism, :none)
+          state
+          |> cancel_presence_poll()
+          |> Map.put(:presence_mechanism, :none)
 
         _ ->
           state
@@ -7367,6 +7415,93 @@ defmodule Grappa.Session.Server do
     |> Map.put(:presence_mechanism, mechanism)
   end
 
+  # #1946 — the ISON polling loop. Three small functions rather than one, so
+  # each has exactly one reason to exist.
+  #
+  # ## Why a timer here, and not a process
+  #
+  # The presence map is already this GenServer's state and the socket is
+  # already its own, so a separate process would need both handed to it and
+  # would widen the crash boundary for nothing. `Process.send_after/3` into our
+  # own mailbox keeps per-session state in the per-session process, which is
+  # the alignment rule.
+  #
+  # ## Why the interval scales
+  #
+  # A sweep costs roughly 2 penalty-seconds per line on IRCnet (measured in its
+  # source; see `Presence.poll_interval_ms/1`), so a longer list must poll less
+  # often or it eats its own flood budget.
+  #
+  # ## Why an empty list arms nothing
+  #
+  # Most sessions watch nobody. `poll_interval_ms/1` returns `nil` there and no
+  # timer exists at all — not a timer that wakes to discover it has no work.
+  @spec start_presence_poll(t()) :: t()
+  defp start_presence_poll(state) do
+    state
+    |> cancel_presence_poll()
+    |> schedule_presence_poll()
+  end
+
+  @spec schedule_presence_poll(t()) :: t()
+  defp schedule_presence_poll(state) do
+    case state |> Map.get(:presence, %{}) |> map_size() |> Presence.poll_interval_ms() do
+      nil ->
+        Map.put(state, :presence_poll_ref, nil)
+
+      interval ->
+        ref = Process.send_after(self(), :presence_poll, interval)
+        Map.put(state, :presence_poll_ref, ref)
+    end
+  end
+
+  @spec cancel_presence_poll(t()) :: t()
+  defp cancel_presence_poll(state) do
+    case Map.get(state, :presence_poll_ref) do
+      nil ->
+        state
+
+      ref ->
+        # Discarded, not matched: `cancel_timer/1` answers `false` for a timer
+        # that already fired or was already cancelled, and that is a normal
+        # race here (a tick in the mailbox while a live /notify re-schedules),
+        # not a fault. An earlier spelling returned that `false` AS the state.
+        _ = Process.cancel_timer(ref)
+        Map.put(state, :presence_poll_ref, nil)
+    end
+  end
+
+  # One sweep: send every chunk, record how many replies to expect, re-arm.
+  #
+  # A sweep still in flight when the next tick fires is DISCARDED rather than
+  # merged — an incomplete sweep must diff nothing, because ISON's reply
+  # carries only the online nicks and IRCnet truncates the tail in silence
+  # (`Presence.poll_commands/1` documents the buffer). Deriving offline from a
+  # partial answer would invent departures, so the rule is: complete, or
+  # nothing.
+  @spec run_presence_sweep(t()) :: t()
+  defp run_presence_sweep(state) do
+    nicks = state |> Map.get(:presence, %{}) |> Map.keys()
+
+    case Presence.poll_commands(nicks) do
+      [] ->
+        state |> Map.put(:presence_sweep, nil) |> schedule_presence_poll()
+
+      commands ->
+        for line <- commands do
+          maybe_log_send_failure("presence_poll", Client.send_raw(state.client, line))
+        end
+
+        state
+        |> Map.put(:presence_sweep, %{
+          expected: length(commands),
+          received: 0,
+          online: []
+        })
+        |> schedule_presence_poll()
+    end
+  end
+
   @spec send_arm_burst(t(), ISupport.presence_mechanism(), [String.t()]) :: :ok
   defp send_arm_burst(_, _, []), do: :ok
 
@@ -7401,7 +7536,14 @@ defmodule Grappa.Session.Server do
       |> Presence.track(added)
       |> Presence.untrack(removed)
 
-    Map.put(state, :presence, next_map)
+    next_state = Map.put(state, :presence, next_map)
+
+    # #1946 — on ISON the cadence is a function of the LIST SIZE, and the
+    # empty list arms no timer at all. So a live add/del must re-schedule:
+    # going 0 → N has to create the timer `poll_interval_ms(0)` refused, and
+    # crossing a chunk boundary has to slow the sweep down before it starts
+    # eating the flood budget. Cheap and idempotent — one cancel, one arm.
+    if mechanism == :ison, do: start_presence_poll(next_state), else: next_state
   end
 
   # #378 — see the `{:peer_nick_renamed, _, _}` arm. `Map.get` with a default

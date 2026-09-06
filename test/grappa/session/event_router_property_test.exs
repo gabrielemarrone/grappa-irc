@@ -254,7 +254,11 @@ defmodule Grappa.Session.EventRouterPropertyTest do
         {:presence_changed, nick, presence, _, source} ->
           assert is_binary(nick)
           assert presence in [:online, :offline]
-          assert source in [:monitor, :watch]
+          # #1946 — the full closed set. `:ison` is unreachable from this
+          # generator (a sweep only exists when `presence_sweep` is set, which
+          # it never generates), but the assertion states what a VALID source
+          # is, not what this generator happens to produce.
+          assert source in [:monitor, :watch, :ison]
 
         {:presence_error, reason, detail} ->
           assert reason == :list_full

@@ -308,9 +308,10 @@ defmodule Grappa.Session.EventRouter do
           | {:umode_changed, modes :: [String.t()]}
           | {:supported_umodes_changed, modes :: [String.t()]}
           | {:session_identity_changed, :acquired | :lost}
-          | {:presence_changed, nick :: String.t(), :online | :offline, Presence.change_kind(), :monitor | :watch}
+          | {:presence_changed, nick :: String.t(), :online | :offline, Presence.change_kind(),
+             :monitor | :watch | :ison}
           | {:presence_error, :list_full, detail :: String.t()}
-          | {:presence_command_unknown, :monitor | :watch}
+          | {:presence_command_unknown, :monitor | :watch | :ison}
           | {:peer_nick_renamed, old_nick :: String.t(), new_nick :: String.t()}
           | {:own_nick_renamed, old_nick :: String.t(), new_nick :: String.t()}
 
@@ -1974,6 +1975,28 @@ defmodule Grappa.Session.EventRouter do
     fold_presence_reports(state, [nick], :offline, :watch)
   end
 
+  # 303 RPL_ISON (#1946): `:server 303 own_nick :nick1 nick2 `. The reply to
+  # ONE line of a polling sweep — the ISON fallback for ircds with neither
+  # MONITOR nor WATCH (IRCnet). It carries only the nicks that ARE online, and
+  # it does not echo the request, so a single reply means nothing on its own:
+  # the sweep is the unit, and it is complete only when as many 303s have
+  # arrived as lines were sent.
+  #
+  # So this clause ACCUMULATES and does not classify. It unions the names into
+  # the in-flight sweep and, on the last expected reply, derives one report per
+  # tracked nick by MEMBERSHIP and folds them through the same
+  # `Presence.apply_report/3` every mechanism uses.
+  #
+  # A 303 with no sweep in flight (an operator's `/quote ISON`, or a straggler
+  # after a discarded sweep) is dropped: deriving offline from a reply we did
+  # not size would invent departures.
+  defp do_route(%Message{command: {:numeric, 303}, params: params}, state) do
+    case Map.get(state, :presence_sweep) do
+      nil -> {:cont, state, []}
+      sweep -> absorb_ison_reply(state, sweep, List.last(params))
+    end
+  end
+
   # 602 RPL_WATCHOFF: ack of `WATCH -nick`. Content-free — the map entry
   # was already dropped when the removal was sent. Handled (vs falling
   # through) so the delegation in NumericRouter has an owner and the ack
@@ -2029,8 +2052,18 @@ defmodule Grappa.Session.EventRouter do
   # other 421 stays purely matrix-routed ($server notice; 421 is
   # deny-listed, not delegated, so that persist happens either way).
   defp do_route(%Message{command: {:numeric, 421}, params: [_, cmd | _]}, state)
-       when cmd in ["WATCH", "MONITOR"] do
-    mech = if cmd == "WATCH", do: :watch, else: :monitor
+       when cmd in ["WATCH", "MONITOR", "ISON"] do
+    mech =
+      case cmd do
+        "WATCH" -> :watch
+        "MONITOR" -> :monitor
+        # #1946 — ISON is RFC 1459/2812 mandatory, so this rung should be
+        # unreachable. It exists because no-silent-drops says the impossible
+        # case still needs a name: an ircd that refuses ISON resolves `:none`
+        # and logs it, rather than polling into the void forever.
+        "ISON" -> :ison
+      end
+
     {:cont, state, [{:presence_command_unknown, mech}]}
   end
 
@@ -5101,7 +5134,7 @@ defmodule Grappa.Session.EventRouter do
   # dedupes). `Map.get(state, :presence, %{})` — a pre-arm report (or a
   # pure unit-test state without the field) folds against the empty map
   # and emits nothing.
-  @spec fold_presence_reports(state(), [String.t()], :online | :offline, :monitor | :watch) ::
+  @spec fold_presence_reports(state(), [String.t()], :online | :offline, :monitor | :watch | :ison) ::
           {:cont, state(), [effect()]}
   defp fold_presence_reports(state, nicks, presence, source) do
     {map, effects} =
@@ -5116,6 +5149,45 @@ defmodule Grappa.Session.EventRouter do
       end)
 
     {:cont, Map.put(state, :presence, map), Enum.reverse(effects)}
+  end
+
+  # #1946 — one 303 folded into the in-flight sweep. Returns early (still
+  # accumulating) or, on the final expected reply, derives the whole map.
+  #
+  # The sweep is CLEARED either way at completion, so a late duplicate 303
+  # lands on the `nil` branch above rather than re-deriving a second time.
+  @spec absorb_ison_reply(state(), map(), String.t() | nil) :: {:cont, state(), [effect()]}
+  defp absorb_ison_reply(state, sweep, trailing) do
+    online = sweep.online ++ Presence.fold_ison_names(trailing)
+    received = sweep.received + 1
+
+    if received < sweep.expected do
+      {:cont, Map.put(state, :presence_sweep, %{sweep | online: online, received: received}), []}
+    else
+      state
+      |> Map.put(:presence_sweep, nil)
+      |> fold_sweep_reports(online)
+    end
+  end
+
+  # Derive + fold a COMPLETE sweep. One report per tracked nick, classified by
+  # the shared `apply_report/3` so baseline-vs-transition, dedupe and the
+  # never-invent-an-entry rule are identical to MONITOR and WATCH.
+  @spec fold_sweep_reports(state(), [String.t()]) :: {:cont, state(), [effect()]}
+  defp fold_sweep_reports(state, online) do
+    map = Map.get(state, :presence, %{})
+
+    {next_map, effects} =
+      map
+      |> Presence.sweep_reports(online)
+      |> Enum.reduce({map, []}, fn {nick, presence}, {acc, eff} ->
+        case Presence.apply_report(acc, nick, presence) do
+          :unchanged -> {acc, eff}
+          {:changed, kind, next} -> {next, [{:presence_changed, nick, presence, kind, :ison} | eff]}
+        end
+      end)
+
+    {:cont, Map.put(state, :presence, next_map), Enum.reverse(effects)}
   end
 
   # A 730/731 trailing target list: comma-separated, each entry a bare

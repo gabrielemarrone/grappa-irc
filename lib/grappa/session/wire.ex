@@ -257,7 +257,7 @@ defmodule Grappa.Session.Wire do
           nick: String.t(),
           presence: :online | :offline,
           initial: boolean(),
-          source: :monitor | :watch,
+          source: :monitor | :watch | :ison,
           ts: String.t()
         }
 
@@ -1068,12 +1068,12 @@ defmodule Grappa.Session.Wire do
           String.t(),
           :online | :offline,
           boolean(),
-          :monitor | :watch,
+          :monitor | :watch | :ison,
           DateTime.t()
         ) :: presence_changed_payload()
   def presence_changed(network_id, nick, presence, initial, source, %DateTime{} = ts)
       when is_integer(network_id) and is_binary(nick) and presence in [:online, :offline] and
-             is_boolean(initial) and source in [:monitor, :watch] do
+             is_boolean(initial) and source in [:monitor, :watch, :ison] do
     %{
       kind: :presence_changed,
       network_id: network_id,

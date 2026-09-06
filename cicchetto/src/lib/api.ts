@@ -1372,7 +1372,9 @@ export type WireUserEvent =
       nick: string;
       presence: "online" | "offline";
       initial: boolean;
-      source: "monitor" | "watch";
+      // #1946 — `ison` is the polling fallback for ircds with neither MONITOR
+      // nor WATCH (IRCnet). Pinned equal to codegen by wireTypesAssert.ts.
+      source: "monitor" | "watch" | "ison";
       ts: string;
     }
   | { kind: "presence_error"; network_id: number; reason: "list_full"; detail: string }

@@ -56,6 +56,30 @@ defmodule Grappa.Session.Presence do
   # arithmetic.
   @line_budget 400
 
+  # #1946 — the ISON budget, and it is SMALLER than @line_budget on purpose.
+  #
+  # For MONITOR/WATCH the 512-byte cap binds on the line WE send. For ISON it
+  # binds on the line the SERVER sends back, and IRCnet's `m_ison` fills its
+  # reply buffer and then `break`s — dropping the tail with no error and no
+  # marker (`ircd/s_user.c`: `if (len + i > sizeof(buf) - 4) break;`). The
+  # reply carries only the ONLINE nicks, so a chunk sized against the REQUEST
+  # can still overflow the reply, and every dropped nick would read as
+  # offline. That fabricates "X went offline".
+  #
+  # So the chunk must fit even if EVERY queried nick comes back online:
+  #   508 usable  −  worst-case `:<servername 63> 303 <mynick> :` prefix (~86)
+  #   ≈ 420 bytes of names, minus slack.
+  # At NICKLEN=15 that is ~24 nicks per line; short nicks pack more, because
+  # the chunker measures bytes rather than counting.
+  @ison_reply_budget 360
+
+  # Cadence constants (#1946). The estimate is only used to SCALE the interval
+  # — the actual chunking is by bytes, so a list of short nicks packs tighter
+  # and simply polls more cheaply than this predicts.
+  @nicks_per_chunk_estimate 24
+  @min_poll_interval_ms 30_000
+  @per_chunk_interval_ms 10_000
+
   # ---------------------------------------------------------------------------
   # Command building
   # ---------------------------------------------------------------------------
@@ -75,6 +99,13 @@ defmodule Grappa.Session.Presence do
   def arm_commands(_, []), do: []
   def arm_commands({:monitor, _}, nicks), do: monitor_commands("+", nicks)
   def arm_commands({:watch, _}, nicks), do: watch_commands("+", nicks)
+  # #1946 — ISON arms NOTHING: it is a poll, and the sweep is driven by
+  # `poll_commands/1` on a timer. An empty list rather than no clause at all,
+  # deliberately: the live `/notify add` path calls this with whatever
+  # mechanism the session resolved, and a FunctionClauseError there would take
+  # down a working session over a nick the next sweep picks up anyway.
+  def arm_commands(:ison, _), do: []
+
   def arm_commands(:none, _), do: []
 
   @doc """
@@ -92,7 +123,106 @@ defmodule Grappa.Session.Presence do
   def remove_commands(_, []), do: []
   def remove_commands({:monitor, _}, nicks), do: monitor_commands("-", nicks)
   def remove_commands({:watch, _}, nicks), do: watch_commands("-", nicks)
+  # #1946 — ISON arms NOTHING: it is a poll, and the sweep is driven by
+  # `poll_commands/1` on a timer. An empty list rather than no clause at all,
+  # deliberately: the live `/notify add` path calls this with whatever
+  # mechanism the session resolved, and a FunctionClauseError there would take
+  # down a working session over a nick the next sweep picks up anyway.
+  def remove_commands(:ison, _), do: []
+
   def remove_commands(:none, _), do: []
+
+  @doc """
+  The ISON lines for one polling sweep over `nicks` (#1946).
+
+  Deliberately NOT an `arm_commands/2` clause. MONITOR and WATCH are
+  arm-and-receive: you register once and the server pushes. ISON is
+  poll-and-diff — there is nothing to arm, and the caller must re-send this
+  every cycle. Folding it into `arm_commands/2` would put two different verbs
+  behind one name and let a caller "arm" ISON and then wait forever for a push
+  that never comes.
+
+  Chunked against `@ison_reply_budget` (the REPLY cap, see there), so a sweep
+  over a large list is several lines. The COUNT matters to the caller: the
+  server does not echo the request in `303`, so completeness can only be
+  established by counting replies against `length(poll_commands(nicks))`.
+
+  Empty list → no commands. A session watching nobody must send nothing.
+  """
+  @spec poll_commands([String.t()]) :: [String.t()]
+  def poll_commands([]), do: []
+
+  def poll_commands(nicks) when is_list(nicks) do
+    nicks
+    # the server appends one space after every name it returns
+    |> chunk_by_budget(1, @ison_reply_budget)
+    |> Enum.map(fn chunk -> "ISON " <> Enum.join(chunk, " ") end)
+  end
+
+  @doc """
+  Derives one presence report per tracked nick from a completed ISON sweep
+  (#1946).
+
+  `online` is the folded union of every `303` reply in the sweep, as a list. Presence is
+  derived by MEMBERSHIP: MONITOR/WATCH state what changed, ISON states only who
+  is present, so absence from the union IS the offline report — and that is
+  precisely why the caller must never call this on an incomplete sweep.
+
+  Returns `[{folded_nick, :online | :offline}]` over the WHOLE map, for the
+  caller to fold through `apply_report/3`. That keeps one classifier for all
+  three mechanisms: baseline-vs-transition, dedupe, and the "never invent an
+  entry" rule stay in `apply_report/3` rather than being re-derived here.
+  """
+  @spec sweep_reports(state_map(), [String.t()]) :: [{String.t(), :online | :offline}]
+  def sweep_reports(map, online) when is_map(map) and is_list(online) do
+    # The set is built HERE and never escapes. An earlier spelling carried a
+    # `MapSet.t()` on `Session.Server`'s state type, which dialyzer rejects:
+    # MapSet is opaque, so embedding one in a map type leaks the opacity across
+    # every module that touches the state. A plain list crosses the boundary;
+    # the set stays a local optimisation.
+    set = MapSet.new(online)
+
+    Enum.map(map, fn {key, _} ->
+      {key, if(MapSet.member?(set, key), do: :online, else: :offline)}
+    end)
+  end
+
+  @doc """
+  Folds the names from one `303 RPL_ISON` trailing into a folded LIST (#1946).
+
+  The trailing is space-separated and IRCnet appends a trailing space after
+  every name, so `trim: true` is load-bearing rather than tidy.
+  """
+  @spec fold_ison_names(String.t() | nil) :: [String.t()]
+  def fold_ison_names(nil), do: []
+
+  def fold_ison_names(trailing) when is_binary(trailing) do
+    trailing
+    |> String.split(" ", trim: true)
+    |> Enum.map(&Identifier.canonical_target/1)
+  end
+
+  @doc """
+  Sweep interval in ms for a watch list of `count` nicks (#1946), or `nil` when
+  there is nothing to watch.
+
+  Budgeted against IRCnet's penalty system, measured in its source: a handler's
+  return value IS its penalty in seconds (`cptr->since += ret`), `m_ison`
+  returns 1, and the pre-dispatch base is `1 + len/100` — so a full ISON line
+  costs roughly 2 penalty-seconds. One sweep is one line per chunk, hence the
+  scaling: a 1-chunk list at 30 s spends ~7% of its budget, a 6-chunk list at
+  30 s would spend ~40%, which is too hot to sustain.
+
+  `nil` for an empty list is the whole point — most sessions watch nobody and
+  must pay nothing, so the caller arms no timer at all.
+  """
+  @spec poll_interval_ms(non_neg_integer()) :: pos_integer() | nil
+  def poll_interval_ms(0), do: nil
+
+  def poll_interval_ms(count) when is_integer(count) and count > 0 do
+    chunks = ceil(count / @nicks_per_chunk_estimate)
+    max(@min_poll_interval_ms, chunks * @per_chunk_interval_ms)
+  end
 
   # ---------------------------------------------------------------------------
   # State map
@@ -192,7 +322,7 @@ defmodule Grappa.Session.Presence do
   defp monitor_commands(sign, nicks) do
     nicks
     # comma joiner: 1 byte of overhead per packed nick
-    |> chunk_by_budget(1)
+    |> chunk_by_budget(1, @line_budget)
     |> Enum.map(fn chunk -> "MONITOR #{sign} #{Enum.join(chunk, ",")}" end)
   end
 
@@ -201,7 +331,7 @@ defmodule Grappa.Session.Presence do
   defp watch_commands(sign, nicks) do
     nicks
     # separator " " + sign prefix per target = 2 bytes of overhead
-    |> chunk_by_budget(2)
+    |> chunk_by_budget(2, @line_budget)
     |> Enum.map(fn chunk ->
       "WATCH " <> Enum.map_join(chunk, " ", fn nick -> sign <> nick end)
     end)
@@ -211,15 +341,15 @@ defmodule Grappa.Session.Presence do
   # budget. `overhead` is the per-nick joining cost (comma vs
   # space+sign). A single nick longer than the budget still ships alone
   # — the server rejects it, we don't silently drop it.
-  @spec chunk_by_budget([String.t()], pos_integer()) :: [[String.t()]]
-  defp chunk_by_budget(nicks, overhead) do
+  @spec chunk_by_budget([String.t()], pos_integer(), pos_integer()) :: [[String.t()]]
+  defp chunk_by_budget(nicks, overhead, budget) do
     {chunks, last, _} =
       Enum.reduce(nicks, {[], [], 0}, fn nick, {chunks, current, size} ->
         cost = byte_size(nick) + overhead
 
         cond do
           current == [] -> {chunks, [nick], cost}
-          size + cost > @line_budget -> {[Enum.reverse(current) | chunks], [nick], cost}
+          size + cost > budget -> {[Enum.reverse(current) | chunks], [nick], cost}
           true -> {chunks, [nick | current], size + cost}
         end
       end)

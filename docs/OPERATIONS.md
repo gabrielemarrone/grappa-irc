@@ -3406,6 +3406,25 @@ base-select and validation, the nothing-to-do predicate, the preflight
 verdict→mode mapping, the reload `"failed":[]` honesty check, the
 healthcheck loop, and the marker write. Every one of those is a
 documented invariant that previously lived — and drifted — per script.
+**Every `substrate_pull` spells the pull `git pull --ff-only
+--recurse-submodules=on-demand`, and the flag is load-bearing (#1851).** A
+bare `--ff-only` advances the superproject and leaves every submodule
+working tree where it was, and nothing downstream syncs it back — so one
+gitlink bump leaves a deploy checkout dirty FOREVER.
+`Grappa.Version.GitProbe` reads `git status --porcelain` at compile time, so
+that stale gitlink is what made three consecutive prod releases report the
+unreleased `X.Y.Z-<sha>` instead of the bare tag #391 promises. `on-demand`
+and not the bare flag, measured: the bare form is `=yes` and fetches every
+submodule on EVERY pull, so a box that cannot reach the submodule remote
+would stop deploying entirely; `on-demand` is git's own fetch default, so
+only the CHECKOUT half of the pull is new and the flag cannot introduce a
+failure the pull does not already have. It is a no-op on a checkout that
+never initialised the submodule, which is what a plain `git clone` leaves —
+production does not get a test-only testnet dragged onto it. **The general
+rule behind it: any path a deploy WRITES into the checkout must be covered
+by `.gitignore`, or it poisons the reported version the same way** —
+`runtime/last-deployed-sha` is one, already covered by `/runtime/*`.
+
 The consumer supplies hooks (`substrate_pull`, `substrate_build`,
 `substrate_reload`, `substrate_migrate`, `substrate_restart`, …); the
 hook list in the file header is the API, because hook names are only
@@ -3723,7 +3742,7 @@ The current set:
 | `jail_db_query.sh` / `jail_db_write.sh` | sqlite3 against the prod DB as `grappa` |
 | `jail_import_db.sh` | swap a DB file in (service must be stopped) |
 | `jail_dns_check.sh` | resolve a hostname *from inside the BEAM* — the OS resolver can be fine while Erlang's `:inet_res` still holds a stale cache |
-| `jail_git_pull.sh` | `git pull --ff-only` in the jail checkout |
+| `jail_git_pull.sh` | `git pull --ff-only --recurse-submodules=on-demand` in the jail checkout |
 
 ### The rails' contract — three shapes, all deliberate
 
@@ -4270,6 +4289,13 @@ shared library's — § "The shared deploy library (infra/lib/)" and
   `package-lock.json` is a FreeBSD-only regenerated artefact.** Someone
   reading the jail script without knowing this will "fix" the npm
   fallback and break the jail build.
+  **It is gitignored, and that is not tidiness (#1851).** The fallback
+  writes it INSIDE the checkout, so while it was untracked and unignored
+  every jail deploy left `git status --porcelain` non-empty — which
+  `Grappa.Version.GitProbe` reads at compile time, so the release reported
+  `X.Y.Z-<sha>` instead of the bare tag. Do not un-ignore it and do not
+  commit it: it is generated, it is one substrate's, and nothing reads it
+  but that fallback.
 - **PATH must include `~grappa/.local/bin`.** bun lives there
   (`install_toolchain.sh` puts it there), and `sudo -u … bash -c`
   otherwise falls back to the system default PATH, which does not — the

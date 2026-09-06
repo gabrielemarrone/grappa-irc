@@ -47003,3 +47003,141 @@ reporter's measurement, not one taken here.
 
 _Deploy: **no deploy** — CI/release tooling only, nothing in the image or the
 release itself changes._
+<!-- entry #1851 -->
+
+---
+
+## 2026-09-06 — #1851: the jail's tree is dirty BY CONSTRUCTION, so every release reports `X.Y.Z-<sha>`
+
+Production reported a suffixed version on three releases running —
+`1.4.0-596d5ea0`, `1.4.1-997711ac`, `1.5.0-35e9fca6`. **`Grappa.Version` is
+not the defect and was not touched.** An unclean tree at compile time IS an
+unreleased build, and the suffix saying so is #391 working exactly as
+designed. The defect is one layer up: the deploy machinery MANUFACTURES the
+uncleanliness, so the signal is on permanently and discriminates nothing — a
+genuinely unreleased build looks identical to a released one, and the tag the
+operator just cut disagrees with `CTCP VERSION`.
+
+`git status --short` in the jail, both entries written by the deploy and
+never by a human:
+
+     M cicchetto/e2e/infra
+    ?? cicchetto/package-lock.json
+
+### Two entries, two causes — and the issue's "option A" splits in half
+
+The issue framed A as one cure ("stop the build from dirtying the
+checkout"). It is two, at two different layers, and forcing one mechanism
+onto both would have been wrong in one of them.
+
+**`cicchetto/package-lock.json` is a build artefact of one substrate's
+toolchain.** FreeBSD pkg has no bun port, so `jail_cic_build.sh` falls back
+to `npm install`, which regenerates the file inside the checkout. `bun.lock`
+is canonical and OPERATIONS.md already said so; nothing else reads the npm
+lock. A generated path that lands in the tree belongs in `.gitignore`, next
+to `dist/` and `.vite/`. That is the cause removed at the layer that owns
+it — git is told what the file IS; nothing stopped looking.
+
+**`cicchetto/e2e/infra` is the pull failing to finish.** `git pull
+--ff-only` advances the SUPERPROJECT and leaves every submodule working tree
+exactly where it was, and nothing downstream ever syncs it back — so ONE
+gitlink bump dirties a deploy checkout permanently. The pin last moved on
+2026-08-23 (`f2b93f2bf`), which is when the jail's tree went dirty and
+stayed. The cure is `--recurse-submodules=on-demand` on every deploy pull:
+three `substrate_pull` hooks (jail, linux, docker) and the two standalone
+jail rails.
+
+### Why `on-demand` and not the bare flag — measured, on a throwaway bench
+
+| pull spelling | gitlink moved | gitlink still | tree after |
+|---|---|---|---|
+| `--ff-only` (before) | rc 0 | rc 0 | **DIRTY** |
+| `--recurse-submodules` (`=yes`) | rc 0 | **rc 1** w/ remote down | clean |
+| `--recurse-submodules=on-demand` | rc 0 | rc 0 | clean |
+
+The bare flag means `=yes`, which fetches every submodule on EVERY pull. A
+box that cannot reach the submodule remote would go from "deploys fine until
+the gitlink moves" to "never deploys" — and the submodule here is behind a
+`git@` SSH URL that production has no reason to hold a key for.
+
+`on-demand` IS git's own fetch default, so the FETCH half of the pull is
+byte-for-byte what it already does and only the CHECKOUT half is new. **The
+flag therefore cannot introduce a failure the current pull does not already
+have** — measured directly: with the remote unreachable AND the new
+submodule objects absent, the old pull and the new one fail identically
+(rc 1, the same `Errors during submodule fetch`, superproject un-advanced).
+It is also a no-op where the submodule was never initialised, which is what
+a plain `git clone` leaves behind, so it does not drag a test-only testnet
+onto a production box that does not have one.
+
+### The two cures that were measured and REJECTED
+
+**`ignore = all` in `.gitmodules`** cleans `git status` — and also makes
+`git add cicchetto/e2e/infra` stage *nothing*. Measured: `git diff --cached
+--name-only` comes back empty after the add, so a deliberate bump like
+`f2b93f2bf` becomes uncommittable through the normal gesture. Not "a bump
+you might not notice": one you cannot make. `ignore = dirty` does not apply
+at all — the dirt is `(new commits)`, which `dirty` deliberately still
+reports.
+
+**Teaching `GitProbe` an allowlist of deploy-noise paths** (the issue's
+option B) turns "clean" from a fact into a policy that rots, and leaves the
+checkout genuinely diverged from the commit it claims to be. The version
+string would read `X.Y.Z` while the tree was not `X.Y.Z`. That is a worse
+lie than the one being fixed.
+
+### The THIRD source, already cured — and the rule it leaves
+
+The deploy writes `runtime/last-deployed-sha` INTO the checkout on every
+run. It is not dirt today only because the repo's root `.gitignore` already
+carries `/runtime/*`. It surfaced as a red in the new bats case, whose
+throwaway upstream carried no `.gitignore` at all — the fixture was lying by
+omission, and mirroring the real rule was fidelity, not accommodation.
+
+**The general rule this leaves: any path a deploy WRITES into the checkout
+must be checked against `.gitignore`, or it poisons the version string the
+same way.** Three such paths exist today; two were covered, one was not.
+
+### What the tests pin, and what killed them
+
+`test/infra/deploy_checkout_dirt_test.bats` is new and owns the CLASS: the
+ignore rule (with both controls — `package.json` must NOT be ignored,
+`bun.lock` must stay tracked) and a census of every non-comment `git pull
+--ff-only` in `infra/`, gated on a minimum hit count so an empty census
+cannot report a green. `deploy_jail_test.bats` owns the BEHAVIOUR, because
+it already has a throwaway upstream and clone and can pull across a real
+gitlink bump; its two cases are a pair, the second planting genuine dirt and
+demanding it still shows, because "the tree is clean" alone is
+indistinguishable from a cure that blinded `git status`.
+
+Three mutants, three kills, one assertion each: dropping the flag from the
+jail pull kills both behavioural cases naming ` M sub`; dropping the ignore
+line kills exactly one census case; dropping the flag from
+`jail_git_pull.sh` — a door the behavioural test cannot reach — kills only
+the census, naming the door.
+
+### What this does NOT claim
+
+**Nothing was run on the jail. Production is not ours to touch and the box
+was not reachable from here.** Every measurement above is local: a throwaway
+git bench for the pull semantics, the repo's own bats set for the cures.
+
+Two consequences are stated rather than hidden. The exact SHAPE of the jail's
+submodule dirt was never measured — `git status --short` prints ` M` for
+`(new commits)`, `(modified content)` and `(untracked content)` alike, and
+the issue records only the short form. The cure addresses `(new commits)`,
+which is *structurally guaranteed* to be present (the pin moved, nothing on
+that box moves the submodule worktree), but if content dirt is ALSO there it
+survives — correctly, since that would be real dirt somebody made. And the
+claim that the jail already holds the objects the checkout needs is an
+INFERENCE, not a measurement: a pull whose on-demand submodule fetch fails
+exits 1 and aborts `substrate_pull` under `set -e`, and v1.5.0 is live, so
+the jail's pull across `f2b93f2bf` must have fetched successfully. Sound, but
+inferred.
+
+_Deploy: **classification NOT measured** — the `Preflight.classify_paths`
+oneshot needs the compile lane, which this slice did not hold. Read from the
+source rather than run: the slice touches `infra/**`, `test/**`, `docs/**`
+and `cicchetto/.gitignore`, and no `compose.*` path and no `VERSION`, which
+are the two literals that force COLD. Treat it as unverified until the
+oneshot is run._

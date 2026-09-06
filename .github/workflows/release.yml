@@ -1406,19 +1406,29 @@ jobs:
         with:
           # Same reasoning as the docker job: the pushed TAG on a release, the
           # DISPATCHED BRANCH on a dry-run, the REPAIRED TAG on a repair.
-          # submodules:false + fetch-depth 1 — the driver is shell over infra/
-          # and reads no git history.
+          # submodules:false — the driver is shell over infra/.
+          #
+          # fetch-tags, not fetch-depth 0 (#1952): the upgrade probe needs the
+          # TAG LIST to derive the release below this one, and nothing here
+          # needs the commits behind them. `git tag -l` on a depth-1 checkout
+          # answers nothing at all, and `previous_release_tag.sh` refuses that
+          # state by name rather than resolving it to "there is no previous
+          # release".
           submodules: false
           ref: ${{ env.REPAIR_TAG }}
+          fetch-tags: true
 
       - name: Resolve version (repo-root VERSION file = SSOT)
         id: ver
         run: echo "version=$(infra/packaging/version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to ghcr.io
-        # The two publishing paths pull from the registry; the dry-run builds
-        # locally and never authenticates.
-        if: ${{ github.event_name == 'push' || env.IMAGE_REPAIR == 'true' }}
+        # EVERY path, since #1952 — the dry-run used to build its candidate
+        # locally and never touch the registry, but the upgrade probe's fixture
+        # is the PREVIOUS RELEASE and that only exists on ghcr. Anonymous pulls
+        # of a public package would mostly work and would fail on the day the
+        # package turns private or the unauthenticated rate limit bites, which
+        # is a failure with nothing to do with the release under test.
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -1475,11 +1485,45 @@ jobs:
           cache-from: type=gha,scope=release
           provenance: false
 
+      - name: Resolve the release BELOW this one and pull its image
+        id: prev
+        # #1952 — the upgrade probe's fixture. Derived, never pinned: a
+        # hardcoded previous makes this gate cross the wrong seam one release
+        # after it is written.
+        #
+        # The guard reads the DRIVER, not the event. On a repair the checked-out
+        # tree is the OLD TAG's, and a tag that predates the upgrade probe ships
+        # a driver with no fixture to feed — fetching one for it would fail on
+        # ghcr for a release whose predecessor was never published as an image,
+        # turning an unrelated repair red. "Does the tree under test ask for a
+        # fixture" is the exact question, and the driver is where the answer is
+        # written; the same reading is why this step needs none of the #1686
+        # scaffolding dance the docker job performs, since a tree carrying the
+        # driver carries the resolver too.
+        run: |
+          if ! grep -q GRAPPA_PREVIOUS_IMAGE scripts/smoke-release-image.sh; then
+            echo "::notice::this tree's smoke driver predates the upgrade probe (#1952) — there is no previous-release fixture to fetch"
+            exit 0
+          fi
+          prev_tag="$(infra/packaging/previous_release_tag.sh "v${{ steps.ver.outputs.version }}")"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/grappa:${prev_tag}"
+          # The same honest subject as the candidate pull above: the exact ref
+          # a box running the previous release resolved when it was installed.
+          docker pull "$image"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "version=${prev_tag#v}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy the image for real and probe it
         env:
           # Whichever path ran; the other's output is empty.
           GRAPPA_IMAGE: ${{ steps.pull.outputs.image || 'grappa-release:smoke' }}
           GRAPPA_SMOKE_VERSION: ${{ steps.ver.outputs.version }}
+          # Empty ONLY on a repair of a tag whose driver predates the probe —
+          # that driver reads neither, and the current one refuses to run
+          # without both.
+          GRAPPA_PREVIOUS_IMAGE: ${{ steps.prev.outputs.image }}
+          GRAPPA_SMOKE_PREVIOUS_VERSION: ${{ steps.prev.outputs.version }}
         run: scripts/smoke-release-image.sh
 
   publish:

@@ -304,6 +304,52 @@ is DELETE-then-write, never append-only:
   'refs/remotes/origin/main', but not yet merged to HEAD"*. **Il paletto vale solo per un ramo SENZA upstream o che ne
   traccia un altro.** 🥇 *E lei ha dichiarato il limite da sola — un solo caso misurato, la variante senza upstream
   NON provata: è così che si consegna una correzione.*
+  ✅ **VARIANTE SENZA UPSTREAM ORA MISURATA (w2, 2026-08-29): il paletto vale, ed è un FALSO ROSSO.**
+  Su `w2-1759b` (`branch.w2-1759b.*` VUOTO) `git branch -d` ha risposto **rc=1 "not fully merged"**,
+  mentre su `w2-1857`/`w2-1863` — che un upstream ce l'avevano — passava col solo warning. **Senza
+  upstream `-d` ricade su HEAD**, cioè sul `main` LOCALE di voyager, fermo centinaia di commit
+  indietro ⇒ **dice "non mergiato" di un ramo atterrato.** 🥇 *Le due domande sono diverse e le
+  risposte non si toccano:* il verdetto vero è **`git merge-base --is-ancestor <b> origin/main`** con
+  controllo negativo, e solo DOPO quello si passa a `-D`. **Mai leggere il rifiuto di `-d` come prova
+  che dentro ci sia lavoro vivo.**
+  🥇🥇 **MOSSA MIGLIORE DI QUESTA RICETTA, PORTATA DA w1 IL 2026-09-05 — NON ALZARE A `-D`: DAGLI
+  L'UPSTREAM GIUSTO E LASCIA CHE SIA `-d` A RISPONDERE.** Su `w1-1916` (nessun upstream) `-d` ha dato
+  il falso rosso previsto (`not fully merged`; ripiego su HEAD = `main` locale a `29bea21d4`, **486
+  commit indietro**). Invece di forzare, w1 ha fatto
+  `git branch --set-upstream-to=origin/main w1-1916` e **ha rigirato `-d` NUDO**: rc=0 con
+  `warning: deleting branch 'w1-1916' that has been merged to 'refs/remotes/origin/main', but not yet
+  merged to HEAD` + `Deleted branch w1-1916 (was 349145af4)`.
+  🥇 **Perché batte `-D`, e sono le sue parole: «`-D` avrebbe cancellato in silenzio, senza prova di
+  atterraggio».** `--is-ancestor` accerta il fatto ma poi la cancellazione la fai comunque alla cieca;
+  qui **lo strumento che cancella è lo stesso che stampa l'evidenza**, cioè la forma che questo file
+  pretende ovunque (il controllo DENTRO lo strumento, non accanto). ⇒ **Ordine giusto: `-d` nudo →
+  se rc=1, misura l'upstream → puntalo a `origin/main` → `-d` NUDO di nuovo. `-D` resta l'ultima
+  spiaggia, e chi lo usa deve portare l'`--is-ancestor` a parte.**
+  ⚠️ **E `git worktree remove` senza `--force` rifiuta (rc=128, *"contains modified or untracked
+  files"*) su una worktree sporca**: lì `--force` è **necessario**, non un'abitudine — ma solo dopo
+  che lo sporco è stato misurato e preservato fuori.
+  🥇🥇 **UN `rc=0` DA UN `remove` **NUDO** È DI PER SÉ LA PROVA CHE LA WORKTREE ERA PULITA (orch,
+  2026-08-30, misurato su repo usa-e-getta con pos ctrl 1 riga / neg ctrl 0 righe):** su una sporca
+  git rifiuta e la worktree RESTA; su una pulita `rc=0`, output vuoto, rimossa. **Quella prova non
+  richiede di fidarsi di nessuna misura precedente** — perciò l'ordine alla worker dice sempre
+  **"remove NUDO, e riportami rc e output testuale"**: con `--force` la prova sparisce e resta solo
+  la tua parola contro una status line. **Se la status line del pane e la tua misura si
+  contraddicono, quell'`rc` è l'arbitro: chiedilo PRIMA di dichiarare che non si è perso niente.**
+  🔴🔴 **MA NON LEGGERE L'INVERSO: `rc=128` NON VUOL DIRE "SPORCA". CI SONO ALMENO DUE CAUSE, E LA
+  SECONDA È LA NORMA IN QUESTO REPO** — falsificata da w2 **40 minuti** dopo che avevo scritto la
+  regola: `fatal: working trees containing submodules cannot be moved or removed`, su una worktree
+  **PULITA** (`porcelain` vuoto anche con `--ignore-submodules=none`, con controllo positivo che
+  stampa ` M cicchetto/e2e/infra` sul repo principale). ⇒ **`rc=128` obbliga a LEGGERE IL TESTO**:
+  *"contains modified or untracked files"* = sporca, **fermati**; *"containing submodules"* = il trip
+  già documentato in CLAUDE.md, dove `--force` è lecito **solo dopo** aver provato pulizia E
+  atterraggio. 🪞 **Perché la mia prova non l'aveva vista: il repo usa-e-getta NON AVEVA
+  SOTTOMODULI**, cioè non somigliava a quello vero. **Un meccanismo provato su un modello che manca
+  della feature decisiva è provato per metà** — e la metà mancante è esattamente quella che si
+  incontra sul campo.
+  🥇 **E la worker che incontra il caso NON previsto dal tuo ordine, ragiona, agisce e lo DICHIARA
+  con le misure, ha fatto la cosa giusta: dillo.** (Aveva verificato pulizia *e* `--is-ancestor`
+  contro `origin/main`, con lo strumento reso discriminante — contro il main LOCALE stantio risponde
+  `rc=1`.)
   🔧 **Il criterio "i log di gate sono stati LETTI?" può essere IGNOTO e la potatura restare lecita lo stesso**: la
   regola serve a non distruggere artefatti mai letti, quindi **se i log non stanno DENTRO la worktree** (misurato:
   quelli di `w2-1835` erano 13 file in `/tmp`, che la rimozione non tocca) **la rimozione non può perderli** e la
@@ -350,6 +396,13 @@ is DELETE-then-write, never append-only:
     milestone, which is a planning label only. So:
     **`gh issue close` + strip `status:*` both fire at the MERGE.**
     A deploy to m42 changes NO label and closes NO issue; neither does a release cut.
+  - 🔴🔴 **UNA ISSUE PARCHEGGIATA IN ATTESA DI UNA RULING NON E' `cooking` (vjt, 04-09: *"perche' e'
+    cooking? non dovrebbe esserci niente in cooking ora"* — aveva ragione).** L'handoff aveva
+    inventato la convenzione **`cooking` = "NON CHIUSA"**, e su cinque issue non c'era nessuno da ore
+    o giorni: **la board mentiva.** `cooking` significa **worker ATTIVA SOPRA ADESSO**. Se nessuna ha
+    le mani sopra, **la label va tolta** — che sia "nostra" e "non chiusa" non e' un motivo. La issue
+    resta OPEN senza `status:*`, cioe' **nel backlog, che e' dove vive una issue che nessuno lavora.**
+    🥇 **Il posto dove vive lo stato di attesa e' l'HANDOFF, non la board.**
   - A newly-filed backlog issue gets NO `status:*` label (it lives under the backlog link until
     triaged into the queue). The board is a shared artifact — keep it honest every transition.
   - **ANTI-DRIFT (vjt caught two misses 2026-07-16 — stale `cooking` on closed #268; forgotten
@@ -1177,6 +1230,16 @@ said "ask vjt for the STACK lane", which is flatly wrong: lanes are MINE).
   discriminator is live on that pane right then** — which is exactly the "control inside the
   instrument, not beside it" rule this file demands of workers. Grep a window wide enough to include
   your own last order, not just the suspect string.
+- 🥇🥇 **QUANDO UN PANE È APPESO, IL TRANSCRIPT DELLA WORKER È EVIDENZA DI PRIMA MANO E BATTE
+  L'ATTESA DELLA SUA RISPOSTA (orch, 2026-08-30).** Sta sull'host suo in
+  `~/.claude/projects/<slug>/<uuid>.jsonl`, il più recente per mtime, e contiene i comandi ESEGUITI
+  con il loro output — cioè la risposta che il pane fantasma non riesce a renderizzare. Ha chiuso in
+  un colpo una domanda di integrità (*«ha usato `--force`?»*) su cui stavo per restare bloccata.
+  ⚠️ **LEGGILO CON UN PARSER JSON, MAI CON `grep -o`**: il pattern `"command":"[^"]*"` **TRONCA al
+  primo `\"` escapato**, e su un comando che contiene un `echo "..."` prima della parte che cerchi
+  **non matcha affatto** — mi ha mostrato UN solo `worktree remove` dove ce n'erano DUE, cioè stavo
+  per concludere che l'avesse rimossa qualcun altro. **Estrai i `tool_use` di `Bash` e stampa
+  `input.command` intero**, con un controllo positivo (una stringa che DEVE esserci) e uno negativo.
 - 🔴 **A worker's redirect log / rc file can belong to a DEAD run** — `ls -lat` and match the mtime, never `cat`.
   Same for a staged `/tmp/orchestrate-next-<w>.txt`: **`stat` it before dispatching**, a stale body looks identical.
   🔴🔴 **AND DO NOT WAIT ON *EXISTENCE* AT A PATH A PRIOR RUN ALREADY CREATED — WAIT ON *FRESHNESS* (orch,
@@ -1195,6 +1258,16 @@ said "ask vjt for the STACK lane", which is flatly wrong: lanes are MINE).
   the order.*
 - 🔴 **The harness's own "background command completed (exit code 0)" is the COMPOUND's last command**, i.e. the
   trailing `echo`, NOT the gate's rc. **Only a redirected rc FILE counts.**
+- 🔴🔴 **UN WAITER CHE CERCA NEL PANE UNA PAROLA CONTENUTA NELL'ORDINE CHE HAI APPENA MANDATO ESCE
+  SUBITO E NON PROVA NIENTE (orch, 2026-09-04, misurato).** Armato
+  `until tmux capture-pane | grep -c 'HOLD\|hold\|worktree' -gt 0` per provare che una worker avesse
+  RICEVUTO un ordine — e quelle tre parole **stavano nell'ordine stesso**, ancora nel box `❯`. Uscito
+  a costo **INVARIATO** (`$8.14`), cioè affermando la consegna **prima** che la consegna esistesse; la
+  prova vera è arrivata dopo (`$8.14 → $8.30` + spinner). 🥇 **La condizione di un waiter non può
+  essere soddisfatta dal tuo stesso stimolo**: chiavala su una grandezza che solo la WORKER può
+  muovere — **costo o ctx**, campionati contro il valore PRIMA — mai su un token del testo che hai
+  appena digitato. *Gemello esatto del `test -f` su un path che una run precedente aveva già creato:
+  un check che risponde subito perché sta ponendo la domanda sbagliata.*
 - 🔴🔴 **UN WARNING PUO' AVERE LA FORMA DI UN ERRORE, E IN CODA A UN LOG SI LEGGE COME IL FALLIMENTO
   (misurato 25-08-2026).** `tail -3` del log di `check.sh` mostrava uno stack trace bats
   (`from function 'run' ... in test file ..., line 308`) **immediatamente sopra `rc=0`** — cioe' la
@@ -1226,10 +1299,25 @@ Spostata qui dall'handoff 2026-08-18: e' una regola, non uno stato.
 1. **BLOB PRE/POST** — vale **SOLO quando il file NON DEVE muoversi**; su un rebase che AGGIUNGE una entry
    il blob DEVE differire ⇒ **li' non prova niente.**
 2. **NUMSTAT A DUE LATI** su FILE e diffato: additions INVARIATE *e* deletions ZERO.
+   🔴🔴 **MA SU UN CONTRIBUTO DI SOLO APPEND QUESTO CHECK È VACUO PER METÀ, E LA METÀ CHE RESTA È
+   CIECA PROPRIO SUL MODO CHE CONTA (w2, 2026-08-30, misurato sul rebase della #1868).**
+   La metà *"deletions ZERO"* **non può discriminare**: su un append puro le deletions erano 0 PRIMA
+   e `merge=union` non ne fabbrica mai — quello zero è una tautologia, non una misura. La metà
+   *"additions invariate"* becca **solo il modo TESTA** (il separatore mangiato, 3 righe: 96→93) ed è
+   **CIECA sul modo CODA**, che è esattamente ciò per cui esiste il check (4).
+   ⇒ **Il numstat NON è la prova portante su un append: dichiaralo vacuo a metà e appoggiati al (4).**
 3. **FORMA AL CONFINE letta SUL FILE**: fine-entry / marcatore **senza vuota davanti** / vuota / `---` /
    vuota / `## `.
 4. 🥇 **ENTRY PRECEDENTE byte-identica — LA prova portante sul rebase**, l'unica che intercetta il modo di
-   coda (`merge=union`). 🔴 **`cmp -n <N>` NON si usa: su BSD stampa `EOF on <file>` e torna rc≠0 anche a
+   coda (`merge=union`).
+   🥇🥇 **E VUOLE UN CONTROLLO NEGATIVO, O IL SUO `rc=0` È UNA TAUTOLOGIA (w2, 2026-08-30 — chiedilo
+   nei brief).** Lo stesso `cmp` girato sul file **PRE-rebase** DEVE FALLIRE, e deve fallire **al
+   confine giusto**: misurato `differ: char 2575073, line 43765`, cioè esattamente dove finisce il
+   merge base e comincia l'entry dell'altro ramo. **Senza quel rosso atteso, il verde non prova che lo
+   strumento stia guardando.** ➕ **Controprova ARITMETICA, PREDETTA PRIMA del rebase**, non dopo:
+   `byte(DN di origin/main) + byte(tua entry) == byte(DN dopo il rebase)`, e idem per le righe
+   (misurato: `2580873 + 5330 = 2586203` e `43855 + 96 = 43951`, coincidenti). **Il numstat dice che i
+   numeri non sono cambiati; l'aritmetica dice che il FILE è quello che deve essere.** 🔴 **`cmp -n <N>` NON si usa: su BSD stampa `EOF on <file>` e torna rc≠0 anche a
    byte tutti coincidenti** (falso rosso, misurato da w1 2026-08-18). **Forma che regge:**
    `head -c "$(stat -c%s main-DN)" mio-DN | cmp - main-DN` (+ `sha256` come testimone indipendente).
    ⚠️ **`stat -c%s` e' GNU: sulle worker macOS e' BSD ⇒ `stat -f%z`** (w1, 2026-08-18).
@@ -1249,6 +1337,16 @@ merge-ref lato GitHub ignora i driver di `.gitattributes`, quindi la PR puo' apr
 dopo un rebase che in locale non aveva dato un solo conflitto — **e una PR CONFLICTING non fa girare NESSUNA
 CI**, cioe' si presenta come "check non ancora partiti". Cura: ri-rebasare e ri-pushare finche' `mergeable`
 lo dice. 🥇 *Il tell e' `gh pr view --json mergeable,mergeStateStatus`, non l'assenza di conflitti in locale.*
+🪞🥇 **LA RICETTA SI CHIEDE COME INTENZIONE, NON COME LISTA DI COMANDI FISSI — un mio controllo
+era VACUO e w1 me l'ha rifiutato con la misura (05-09, #1929).** Pretendevo che il `cmp` sul DN
+**PRE-rebase FALLISSE** (il controllo negativo del punto 4). **Su quella forma quel rosso non puo'
+esistere**: main non aveva toccato `DESIGN_NOTES` (`numstat <base>..origin/main -- docs/DESIGN_NOTES.md`
+= **0 righe**, `cmp` rc=0) ⇒ **e se esistesse direbbe che il ramo non e' append-only, cioe' l'OPPOSTO
+del segnale che volevo.** Sostituito con **due controlli di confine VIVI** (`head -c` a N∓1 contro il
+DN di main, **entrambi rc=1**) + l'**aritmetica PREDETTA PRIMA** (`2704015 + 5902 = 2709917`,
+misurato `2709917`). ⇒ **Nei brief chiedi «porta un controllo che DISCRIMINA su QUESTA forma»**, e
+accetta che la forma decida quale controllo e' quello vivo. *Un controllo negativo che non puo'
+fallire e' un controllo che non c'e'.*
 🔴 **`_Deploy:` NON E' UN CHECK, e' INERTE** — non citarlo, o dichiaralo inerte.
 ⚠️ Il gate "forma al confine" e' **VACUO** quando il merge non tocca `DESIGN_NOTES`: **dichiaralo vacuo.**
 🥇 **Un FF PURO (`ahead=N behind=0`, ref PATCH-ato via `gh api`) rende la ricetta vacua PER COSTRUZIONE** —
@@ -1378,6 +1476,16 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   un criterio `git cherry`/patch-id puro **li chiamerebbe vivi a torto**. Patch-id identico prova
   l'atterraggio; **patch-id diverso non prova il contrario** — incrocia sempre con la PRESENZA DEL CONTENUTO,
   e se i due discordano vince il contenuto e lo si dichiara.
+- 🔴🔴 **NUOVA COSTUME DELLO ZERO FALSO: UN `git log -S` A ZERO HIT PROVA CHE UNA COSA NON E'
+  **ATTERRATA**, NON CHE NON **ESISTA** (orch, 06-09, ritrattata davanti a vjt).** Una worker
+  cercava se `PROSE_SET_MAX_WORDS` fosse mai stato alzato a 300: `git log -S '= 300'` zero hit,
+  `= 150` un hit ⇒ ho relayato *"quel raise non e' mai esistito"* e ho **corretto vjt sul suo
+  stesso addendum**. Il raise **esisteva**: era una PR APERTA e non mergiata. La misura era
+  giusta, il **DOMINIO** era piu' stretto della tesi — la storia MERGIATA non e' l'insieme delle
+  cose che esistono. 🥇 **Prima di leggere uno zero come una negazione, chiedi: su quale INSIEME
+  ho cercato, ed e' lo stesso insieme di cui parla la tesi?** I rami aperti, le PR non mergiate e
+  il working tree altrui **non stanno in `git log`**. ⚠️ **E vale doppio quando lo zero serve a
+  correggere qualcun altro**: li' la ricompensa e' massima e il controllo salta.
 - 🔴 **UN GREP SUL NOME NON MISURA LA DUPLICAZIONE:** ritirate 19 definizioni NOMINATE di
   `passthrough_handler`, lo stesso corpo sopravvive **INLINE 14 volte su 10 file**.
 - 🔴 **`git worktree remove … | tail; echo $?` STAMPA `fatal:` E POI rc=0 — `$?` E' DI `tail`** (w2,
@@ -1607,8 +1715,20 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   MENTRE DORMIVA.** Cardinalita' **1 su 6** sui merge di quella giornata. *Un campo che da' sempre
   la stessa risposta non e' evidenza, e' una costante.* **Cerca sempre l'istanza che il campo non
   puo' spiegare: vale piu' di sei conferme.**
-  ✅ **Dove si legge DAVVERO chi ha agito** — canali che **non passano dal token**: `#grappa-live`,
-  e **il NOME DEL RAMO** (`w2-1759` dice quale worker). Altrimenti **si chiede a chi ha agito.**
+  ✅ **Dove si legge DAVVERO chi ha agito** — canali che **non passano dal token**: `#grappa-live`.
+  Altrimenti **si chiede a chi ha agito.**
+  🔴🔴 **IL NOME DEL RAMO NON IDENTIFICA IL PANE — misurato 2026-08-30, e questa riga diceva il
+  contrario.** Dispatchata la #1877 al pane **`%16`** (titolo `grappa-worker`, cioè w1 per
+  l'handoff), un minuto dopo sull'host compare la worktree **`w2-1877`**. Sembrava che il lavoro
+  fosse stato preso dall'altra worker. **Non era così**, e la falsificazione non richiede la parola
+  di nessuno: `%28` stava a **`🧠 TBD`, `🕐 0m`, nessun costo** — *non può* aver creato niente —
+  mentre `%16` spendeva (`$0.66 → $0.91`) nello stesso minuto del `stat` della directory.
+  ⇒ **La worker sceglie il prefisso da sé, e può scegliere quello dell'ALTRA.** Un `w2-` non
+  significa `%28` più di quanto `mergedBy` significhi vjt.
+  🥇 **Il discriminante che regge è lo STESSO di sempre: costo e ctx del pane, campionati nella
+  finestra in cui l'artefatto è comparso.** Il nome è un'etichetta che il portatore si dà, e questo
+  file lo dice già per un altro caso: *«"è un'etichetta" è una proprietà del SINGOLO PORTATORE, non
+  della classe»*. **Prima di attribuire un ramo a un pane, misura QUEL pane.**
   ⚠️ **Il danno non e' l'errore, e' la CREDENZA che installa in vjt**: se crede di aver mergiato
   lui, la prossima volta che dice *"non ho tempo di verificare"* puo' pensare di aver gia'
   verificato. **Ritratta DOVE si e' sparso**, non solo con chi te l'ha detto — e dillo ESPLICITO
@@ -1672,3 +1792,74 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   `Closes #99` ⇒ rc=0, verificatore VIVO) e col negativo (`addresses issue 1827` ⇒ rc=1).
   🥇 *Ennesima faccia dello ZERO FALSO E PLAUSIBILE, e la piu' insidiosa: non un comando che
   guarda la cosa sbagliata, ma un comando che **non guarda affatto** e lo dice passando.*
+
+## 🧭 REGOLE NATE IL 2026-08-29 (permanenti — migrate dall'handoff)
+- 🔴🔴 **UN MIO PALETTO SU `--force-with-lease` ERA SBAGLIATO, E CURAVA IL MODO DI FALLIRE CHE
+  PRODUCEVA (w1, con la misura).** Avevo briefato
+  `--force-with-lease=refs/remotes/origin/<b>:<sha>` per non hard-typare la sha. **NON FORZA:** il
+  lease matcha il refname **SUL REMOTO**, cioe' `refs/heads/...`; con `refs/remotes/...` **nessun
+  ref matcha** e il push muore `! [rejected] (non-fast-forward)` — **esattamente il fallimento che
+  il paletto doveva evitare.** Misurato **rc=1** contro **rc=0** con `refs/heads/<b>:<sha>`.
+  ✅ **La meta' giusta resta:** il lease NUDO usa `@{u}`, quindi su un ramo il cui upstream si e'
+  mosso l'argomento esplicito **e' obbligatorio**. Forma corretta:
+  `--force-with-lease=refs/heads/<b>:$(gh pr view N --json headRefOid -q .headRefOid)`.
+- 🥇🥇 **UN VERDE SOSPETTOSAMENTE RAPIDO SI VERIFICA, NON SI CREDE — E PUO' ESSERE VERO.** La #1727
+  e' passata **da 4/8 a 9/9 in tre minuti**: la forma di un roll-up vuoto. Non lo era — i quattro
+  shard avevano girato **12-14 minuti ciascuno** e il roll-up dura **3 s perche' e' solo
+  l'aggregatore**. 🥇 *Il punto non e' che il sospetto fosse infondato: e' che **la domanda andava
+  fatta**, e costa una chiamata ai job. Un verde creduto e un verde verificato sono lo stesso
+  osservabile — finche' non lo e' piu'.*
+- 🔴🔴 **UN JOB MORTO PER INFRA DEL RUNNER SI RICONOSCE DALLA *DIMENSIONE* DEL LOG PRIMA CHE DAL
+  CONTENUTO.** `integration` rossa su main a `322e9aba`:
+  `Get "https://ghcr.io/v2/": ... Client.Timeout exceeded`, job morto a **44 s**, log **56 KB**
+  contro i **718 KB** di uno shard completo. Rerun ⇒ 5/5 success.
+  🔴 **E nello stesso episodio il campo a livello di *run* diceva `queued` mentre TUTTI i job erano
+  `completed/success`** ⇒ **chiava sui JOB, mai sul roll-up.** (Gemello della regola gia' scritta
+  per `.conclusion`: il roll-up e' un aggregatore, non una misura.)
+- 🔴 **UNA FIRMA DI FLAKE VALE SOLO SULL'ARTEFATTO PER CUI E' STATA STABILITA.** `db lock stall`
+  identifica **#1767** nei **container-logs della e2e**; grepparla nel **job log ExUnit** da'
+  **zero, e quello zero non significa niente** — l'artefatto non contiene quella riga per
+  costruzione. 🥇 *Ennesima faccia dello zero falso e plausibile: non lo strumento sbagliato, ma
+  l'artefatto sbagliato.* **Dichiara SEMPRE su quale artefatto una firma e' valida.**
+- ℹ️ **Dependabot cancella la propria ref da sola dopo il merge** ⇒ il `gh api -X DELETE` della
+  ricetta risponde **422**. **Non e' un errore e non va curato**: e' la ref gia' sparita.
+
+## 🔬 OSSERVATO DAL VIVO IL 2026-08-29 — la ragione di `wire_pin` NON è teorica
+🥇🥇 **CLAUDE.md sostiene che `mix grappa.gen_wire_types --check` NON PUÒ fare da tripwire del
+bump «because it compares the artefact with its own SOURCE and answers `in sync.` in exactly the
+case to catch». Sulla PR #1865 è successo ESATTAMENTE questo, in CI, su due step consecutivi
+dello stesso job:**
+`gen_wire_types --check` → **VERDE**, *"wireTypes.ts is in sync"* · `wire_pin --check` → **ROSSO**,
+`pinned sha256:6e3316b8… / now sha256:9c97bd9b… / protocol pinned 8 / now 8 (unchanged)`.
+⇒ **La forma si era mossa, il generatore era d'accordo con se stesso, e solo il pin l'ha vista.**
+🥇 **Usalo quando qualcuno propone di togliere il pin perché "gen_wire_types basta": non è un
+argomento di design, è un caso misurato.** (E il digest lo si può calcolare SENZA corsia:
+`sha256(wireTypes.ts ++ "\n" ++ wireSchema.ts)` — validato riproducendo il pin di main al byte,
+con la variante senza `\n` come controllo che discrimina.)
+
+## 🧭 REGOLE NATE IL 2026-09-01 (permanenti — migrate dall'handoff)
+- 🔴🔴 **`ctx=TBD` NON SIGNIFICA `/clear`: SIGNIFICA "non ho letto il contesto", E UNA SESSIONE
+  MORTA PRODUCE LO STESSO OSSERVABILE (misurato 01-09).** Il daemon ha emesso
+  `STALL state=idle ctx=**TBD**` su entrambe le worker e l'ho letto come firma di un clear
+  appena avvenuto. Erano **MORTE**: `Connection reset by peer` → `client_loop: send disconnect:
+  Broken pipe` → **`[Exit 255]`**, `%16` alle 16:28:11 e `%28` alle 16:28:15 — **quattro secondi
+  ⇒ UNA caduta di rete**, non due eventi. Voyager era **up 34 giorni**, nessun reboot, `/tmp`
+  intatto: nulla nell'infrastruttura accusava.
+  🥇 **Il discriminante è il TESTO del pane, non il campo `ctx`** — un clear lascia una sessione
+  viva e un prompt, una morte lascia la riga di errore ssh. **Cattura prima di concludere.**
+  🥇 *Ennesima faccia della famiglia: un valore sentinella che si legge come uno stato benigno
+  perché è LO STESSO valore che quello stato benigno produce.*
+- 🛑 **NON FIRMO L'ATTESTAZIONE DI UN ALTRO.** Il rilancio delle worker passa da un gate di
+  `/usr/local/bin/claude` che chiede di digitare `I HAVE REVIEWED AND VERIFIED`: **è
+  l'attestazione di una revisione che non ho fatto, sulla macchina di vjt** — non è la deroga
+  del lock git, che è l'UNICA eccezione concessa. **Il rilancio è suo.**
+  ⚠️ Nota operativa: `~/.local/bin/claude` è **2.1.158/Opus 4.8** (degradata) e il PATH
+  interattivo preferisce QUELLA ⇒ lanciare `claude` nudo riparte degradate.
+- 🔴🔴 **IL MIO `origin/main` LOCALE RESTA INDIETRO E IO CI MISURO SOPRA — due volte in un
+  giorno, quindi non è sfortuna (orch, 01-09).** Prima ha gonfiato il conteggio commit di #1892
+  (**6** invece di 5); poi ha fatto sembrare che #1890 toccasse **sette file cic** che erano di
+  #1889 **già atterrata**. 🥇 *Un diff su merge-base stantio non perde contenuto: ne **INVENTA**,
+  che è la direzione peggiore — fa sembrare grossa una fetta piccola e sposta la classificazione
+  hot/cold.* **Cura: `git fetch origin main` NELLO STESSO BLOCCO di ogni misura che usa
+  `origin/main`** — specie **dopo un merge fatto via `gh api -X PATCH`, che NON tocca la ref
+  locale** (è la stessa trappola già scritta per il push via URL ssh esplicito, da un'altra porta).

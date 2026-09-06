@@ -14896,7 +14896,7 @@ audio.media-viewer-media {
 
    ⚠️ These two rules deliberately carry the same declarations as the media
    query above. CSS has no way to share them across a media boundary, so
-   `creditsFinale.css.test.ts` pins that the pair agrees rather than a comment
+   `creditsFinaleCss.test.ts` pins that the pair agrees rather than a comment
    asking the next reader to keep them in step. */
 .credits-viewport-ended {
   overflow-y: auto;

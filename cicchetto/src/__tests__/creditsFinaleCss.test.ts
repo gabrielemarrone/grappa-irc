@@ -15,7 +15,10 @@ import { mediaGatedBlocks, ruleBody, themeCss } from "./helpers/themeCss";
 
 /** The declarations `prefers-reduced-motion` gives one selector, if any. */
 function reducedMotionBody(selector: string): string {
-  const blocks = mediaGatedBlocks(/@media \(prefers-reduced-motion: reduce\) \{/g, "reduced-motion");
+  const blocks = mediaGatedBlocks(
+    /@media \(prefers-reduced-motion: reduce\) \{/g,
+    "reduced-motion",
+  );
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`${escaped}\\s*\\{([^}]*)\\}`);
   for (const block of blocks) {

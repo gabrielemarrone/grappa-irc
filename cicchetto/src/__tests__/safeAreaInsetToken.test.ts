@@ -137,6 +137,14 @@ const CENSUS = [
   ".credits-chrome | right: max(0.5rem, var(--safe-area-inset-right))",
   ".credits-chrome | top: max(0.5rem, var(--safe-area-inset-top))",
   ".credits-roll | padding: max(3rem, var(--safe-area-inset-top)) 1.5rem max(3rem, var(--safe-area-inset-bottom))",
+  // #1931 — the ending parks the roll, and it parks it by reusing the
+  // `prefers-reduced-motion` posture above declaration for declaration
+  // (`creditsFinaleCss.test.ts` pins the pair as a set). So this row is the
+  // deliberate SECOND copy of the row above, floor included: a static roll
+  // reaches the physical edges whichever of the two reasons stopped it, and
+  // giving the ending a different floor would inset the same column by a
+  // different amount depending on how the reader got there.
+  ".credits-roll-ended | padding: max(3rem, var(--safe-area-inset-top)) 1.5rem max(3rem, var(--safe-area-inset-bottom))",
   ".delete-account-modal | padding: max(0.75rem, var(--safe-area-inset-top)) 1rem max(1.5rem, var(--safe-area-inset-bottom))",
   ".diag-float | top: max(0.5rem, var(--safe-area-inset-top))",
   ".error-banners | padding-top: var(--safe-area-inset-top)",

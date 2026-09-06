@@ -335,7 +335,12 @@ describe("the first block's fade (#1929 — the stylesheet owns the seam)", () =
     // Two animations, one cycle. If they ever declared different durations the
     // dissolve would slide against the travel a little more on every pass, and
     // nothing else in the modal would notice.
-    expect(animationSeconds(".credits-block", "credits-block-fade")).toBe(
+    //
+    // #1931 moved the declaration off `.credits-block` onto a second class the
+    // finale omits — the block comes back for the ending, and a re-mounted
+    // `1 forwards` would dissolve it as it arrives. The property pinned here is
+    // unchanged; only the selector carrying it moved.
+    expect(animationSeconds(".credits-block-fading", "credits-block-fade")).toBe(
       animationSeconds(".credits-roll", "credits-roll"),
     );
   });
@@ -364,7 +369,7 @@ describe("the first block's fade (#1929 — the stylesheet owns the seam)", () =
     // `infinite` here would dim every later pass, and `forwards` is what keeps
     // the block invisible through the parked tail rather than snapping it back
     // to opaque for the last six seconds.
-    const declared = ruleBody(".credits-block");
+    const declared = ruleBody(".credits-block-fading");
     expect(declared).toMatch(/animation:[^;]*\bcredits-block-fade\b[^;]*\b1\b/);
     expect(declared).toMatch(/animation:[^;]*\bforwards\b/);
     expect(declared).not.toMatch(/animation:[^;]*\binfinite\b/);

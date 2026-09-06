@@ -36,6 +36,8 @@ setup() {
     REPO_SRC="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     DOCKERFILE="$REPO_SRC/Dockerfile.release"
     WORKFLOW="$REPO_SRC/.github/workflows/release.yml"
+    SMOKE="$REPO_SRC/scripts/smoke-release-image.sh"
+    CREDITS="$REPO_SRC/infra/packaging/credits.sh"
 }
 
 # The `cic` stage only — an `ARG` is scoped to the stage that declares it, so
@@ -158,5 +160,136 @@ RUN GRAPPA_CREDITS="${GRAPPA_CREDITS:-$(sh infra/packaging/credits.sh)}" \
     && bun run build
 EOF
     run falls_back_to_credits_sh "$ok"
+    [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# #1951 — probe 5's ORACLE, not the image.
+#
+# The block above reads the recipe; probe 5 of `scripts/smoke-release-image.sh`
+# reads the artifact. Nothing read the PATTERN probe 5 reads the artifact WITH,
+# and that is what rotted: #1927 gave every contributor row a third key
+# (`nick`), the driver's `contributor_row` still spelled two, and probe 5 went
+# blind. It failed honestly — the anti-hollow-green branch fired rather than
+# passing quietly — but it failed on the release runs of BOTH v1.5.0 and
+# v1.5.1, which is a red check an operator has to learn to ignore. That is the
+# state the guard exists to prevent.
+#
+# So these cases pin the ORACLE against payloads the REAL `credits.sh`
+# produces. What they cannot claim is that the payload reaches a ghcr image —
+# that needs an image, and it stays probe 5's job. The seam is deliberate:
+# this half runs on every PR for free, that half runs where an image exists.
+
+# The driver's OWN definitions, read out of it rather than restated. A test
+# carrying its own copy of the regex cannot fail when the driver's copy rots,
+# which is precisely the defect that got here.
+load_probe5_patterns() {
+    eval "$(grep -E '^(degraded_roll|contributor_row|populated_roll)=' "$SMOKE")"
+    # Positive control for the EXTRACTOR itself: a reformat that puts these
+    # assignments out of grep's reach would silently leave every pattern empty,
+    # and an empty ERE matches everything — a green that proves nothing.
+    [ -n "$degraded_roll" ] && [ -n "$contributor_row" ] && [ -n "$populated_roll" ]
+}
+
+# A REAL payload, from production's own deriver. Never hand-typed: the whole
+# defect is a hand-typed copy drifting from what the deriver emits.
+real_roll_with_nicks() {
+    "$CREDITS"
+}
+
+# The same deriver, reached where its nick table is not: `credits.sh` resolves
+# the table next to itself and falls back to /dev/null when it is unreadable,
+# so every contributor comes out with the BARE `null` token. This is the other
+# half of the field, and a regex that only accepts the quoted spelling is blind
+# to it — on a tree without the table, blind to all of it.
+real_roll_without_nicks() {
+    local root="$BATS_TEST_TMPDIR/nonick"
+    mkdir -p "$root/pkg/dir"
+    # `credits.sh` takes SCRIPT_DIR from `dirname "$0"` (the symlink's own
+    # path, not its target) and REPO_ROOT from SCRIPT_DIR/../.. — so the
+    # script is production's, the history is this repo's, and only the table
+    # is missing.
+    ln -sf "$CREDITS" "$root/pkg/dir/credits.sh"
+    ln -sf "$REPO_SRC/.git" "$root/.git"
+    "$root/pkg/dir/credits.sh"
+}
+
+@test "#1951 — probe 5's row pattern matches a real credits.sh row with a QUOTED nick" {
+    load_probe5_patterns
+    local roll; roll="$(real_roll_with_nicks)"
+
+    grep -qE '"nick":"[^"]*"' <<< "$roll" || skip "this tree's nick table credits nobody — nothing to assert"
+
+    grep -qE "$populated_roll" <<< "$roll" || {
+        printf 'populated_roll does not match a healthy payload — probe 5 is blind.\n' >&2
+        printf 'pattern: %s\n' "$populated_roll" >&2
+        printf 'payload: %s\n' "$roll" >&2
+        return 1
+    }
+    # Not just "the head matched": the row pattern must FIND rows, because the
+    # driver counts them with it too.
+    [ "$(grep -oE "$contributor_row" <<< "$roll" | wc -l | tr -d ' ')" -gt 0 ]
+}
+
+@test "#1951 — and one with the BARE null nick, which is the other half of the field" {
+    load_probe5_patterns
+    local roll; roll="$(real_roll_without_nicks)"
+
+    # Guard the fixture, not the code: if this ever stops producing the null
+    # spelling the case must die loudly rather than assert on the wrong shape.
+    grep -qF '"nick":null' <<< "$roll" || {
+        printf 'the no-table run did not produce a bare `null` nick — fixture is wrong:\n' >&2
+        printf '%s\n' "$roll" >&2
+        return 1
+    }
+
+    grep -qE "$populated_roll" <<< "$roll" || {
+        printf 'populated_roll rejects a payload whose nicks are the bare null token.\n' >&2
+        printf 'A tree without infra/packaging/contributors emits ONLY this shape, so\n' >&2
+        printf 'probe 5 would be blind to all of it.\n' >&2
+        printf 'pattern: %s\n' "$populated_roll" >&2
+        printf 'payload: %s\n' "$roll" >&2
+        return 1
+    }
+    [ "$(grep -oE "$contributor_row" <<< "$roll" | wc -l | tr -d ' ')" -gt 0 ]
+}
+
+@test "#1951 — RED: the pre-#1927 two-key row and a junk row do NOT pass the populated branch" {
+    load_probe5_patterns
+
+    # The shape the driver was still spelling. Accepting it would mean the
+    # pattern went permissive instead of current.
+    local two_key='{"sha":"abc1234","date":"2026-01-01T00:00:00+00:00","contributors":[{"name":"Someone","commits":9}]}'
+    run grep -qE "$populated_roll" <<< "$two_key"
+    [ "$status" -ne 0 ]
+
+    # `commits` quoted is not `commits` numeric. A pattern loose enough to take
+    # this is loose enough to take anything, which is the hollow green the
+    # third branch of probe 5 exists to refuse.
+    local junk='{"sha":"abc1234","date":"2026-01-01T00:00:00+00:00","contributors":[{"name":"Someone","nick":"x","commits":"9"}]}'
+    run grep -qE "$populated_roll" <<< "$junk"
+    [ "$status" -ne 0 ]
+
+    # POSITIVE control: the same predicate, same invocation, on the real
+    # payload. Without it a pattern broken into always-false would report both
+    # rejections above as a pass.
+    local roll; roll="$(real_roll_with_nicks)"
+    run grep -qE "$populated_roll" <<< "$roll"
+    [ "$status" -eq 0 ]
+}
+
+@test "#1951 — the anti-hollow-green guard stays armed: a degraded roll is still not populated" {
+    load_probe5_patterns
+
+    # The exact payload credits.sh emits with no repo. Probe 5 dies on this by
+    # a DIFFERENT branch (the -F match below), and it must never reach the
+    # populated one — a fix that made the degraded roll look populated would
+    # ship an empty credit roll under a green check.
+    run grep -qE "$populated_roll" <<< "$degraded_roll"
+    [ "$status" -ne 0 ]
+
+    # POSITIVE control for the branch that DOES own this payload, so the
+    # rejection above is a rejection and not a dead detector.
+    run grep -qF "$degraded_roll" <<< "$degraded_roll"
     [ "$status" -eq 0 ]
 }

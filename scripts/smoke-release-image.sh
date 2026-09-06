@@ -260,7 +260,23 @@ degraded_roll='{"sha":null,"date":null,"contributors":[]}'
 # One contributor row. Absent from a degraded bundle and present once per
 # credited author in a populated one — measured 0 vs 9 on the two dists #1834
 # built to check exactly this.
-contributor_row='\{"name":"[^"]*","commits":[0-9]+\}'
+#
+# #1951 — the middle key is #1927's `nick`, and it is NOT always a quoted
+# string: `credits.sh`'s `nickof()` emits the BARE `null` token for an author
+# missing from `infra/packaging/contributors`, and a tree that has no table at
+# all emits `null` for every row. The alternation carries both spellings —
+# accepting only the quoted one would leave this probe blind to half the field
+# and, on a tree without the table, to all of it.
+#
+# Deliberately STRICT, not permissive: it admits exactly the two shapes the
+# deriver can emit, so the "neither shape present" branch below still fires
+# the next time the payload's spelling moves. Loosening it to match anything
+# would restore the hollow green that branch exists to refuse — which is the
+# opposite of the bug. Pinned by `test/infra/release_image_credits_test.bats`
+# against payloads `credits.sh` really produces, so the next spelling change
+# lands on a PR-time red instead of on the release run: this pattern going
+# stale is what made probe 5 the only red check on v1.5.0 and v1.5.1.
+contributor_row='\{"name":"[^"]*","nick":(null|"[^"]*"),"commits":[0-9]+\}'
 # The whole populated payload, head-anchored: a real sha, a real date, and at
 # least one contributor. All three, because each degrades on its own — a roll
 # that names the commit and credits nobody is still an empty roll.

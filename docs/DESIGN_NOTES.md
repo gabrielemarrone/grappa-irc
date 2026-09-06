@@ -46792,3 +46792,141 @@ carries a hand-written copy of the payload that `wireTypesAssert.ts` pins equal
 to codegen, so `tsc` stayed red until that was widened too.
 
 _Deploy: **COLD** — server behaviour + wire version. cic rides with it._
+<!-- entry #1949 -->
+
+---
+
+## 2026-09-06 — #1949: two image boxes, one documented update — and the refusal pointed at the wrong door
+
+`README.md` and `INSTALL.md` have offered **two** pre-built-image install paths
+since #1160 — the `get.sh` one-liner and `compose.release.yaml` — and exactly
+**one** update procedure, the one that does not drive the second. The correct
+recipe for the compose path existed only inside that file's own comment block,
+where nobody looking for an update command would think to look. Reported on
+#grappa by an operator who worked it out himself.
+
+### The two boxes share nothing, the failure included
+
+| | `get.sh` / `deploy.sh` | `compose.release.yaml` |
+|---|---|---|
+| driver | `docker run` | `docker compose` |
+| container | `grappa` | `grappa-release-grappa-1` |
+| volume | `grappa-data` | `grappa-release_grappa-data` |
+| secrets | `$GRAPPA_HOME/grappa.env` | generated inside `/data` |
+
+The right-hand column is measured from `docker compose -f compose.release.yaml
+config` (a render — it touches no daemon state): project `grappa-release`,
+volume resolving to `grappa-release_grappa-data`, and no `container_name:`
+pinned, so compose derives `grappa-release-grappa-1`.
+
+### The issue named the wrong verb, and the right one is worse
+
+Its body has the documented update "stand up a second, empty box". Read against
+`infra/docker/deploy.sh` at `c65a84073` that is not what happens, and the truth
+is less forgiving. There are three doors:
+
+- **`… get.sh | bash -s -- update`**, the documented update. Release mode is
+  auto-selected (no `compose.yaml` two levels up) and `cmd_update_release`
+  guards on `$GRAPPA_HOME/grappa.env`, which a compose install never writes, so
+  it **aborts**: *"no env file … this box was never installed. Run 'install'
+  first."* A correct refusal carrying a **false diagnosis** — the box IS
+  installed — and it names the one door that does damage.
+- **`~/.grappa/infra/docker/deploy.sh update`**: that path does not exist on a
+  host that never ran `get.sh`.
+- **`… get.sh | bash`** (bare — the documented *install* one-liner).
+  `cmd_bare_release` finds no env file and calls `cmd_install_release`, whose
+  only ownership guard is `docker inspect grappa`. That never matches
+  `grappa-release-grappa-1`, so it proceeds: fresh secrets, `docker volume
+  create grappa-data`, and a migration writing an **empty database onto the
+  second volume** — all of it before anything is started.
+
+The operator does not walk into the wreck. The abort message walks them in.
+
+### The wreck is conditional, and the condition is the port
+
+`release_start_container` publishes `${GRAPPA_PUBLISH}:4000`, defaulting to
+`127.0.0.1:4000` — byte-identical to what `compose.release.yaml` publishes.
+Under the script's `set -euo pipefail` that `docker run` dies on the bind and
+takes the install with it **while the compose box is up**. So the second box
+only *comes up* when the port is free: a compose box stopped, crashed, or
+republished elsewhere. Which is also where it hurts most — the reverse proxy
+still points at 4000 and now serves an empty grappa asking for a first user.
+Either way the empty volume, the fresh `grappa.env` and the migration have
+already happened.
+
+### The cure, and the rule it is pinned by
+
+`INSTALL.md`'s *"Updating an image box is always COLD"* now carries a command
+block **per substrate**, names the compose project and volume where the choice
+between the two paths is actually offered, and says plainly that the data is on
+`grappa-release_grappa-data` and not lost. `README.md`'s release paragraph gives
+the `pull` + `up -d` pair inline instead of only `-s -- update`.
+
+`test/infra/release_update_docs_test.bats` pins the general rule rather than the
+two files this was filed about: **any tracked file outside `test/` that tells a
+reader `docker compose -f compose.release.yaml up -d` must also tell them
+`docker compose -f compose.release.yaml pull`.** Keying the obligation to the
+INSTALL invocation means a document that starts offering the compose path
+tomorrow inherits it without anyone remembering this issue. It carries a
+negative control — a needle that appears nowhere must match nothing — because
+the whole suite is `git grep`-derived, and a grep that had started answering
+"every tracked file" would satisfy every other assertion by accident.
+
+### What was deliberately NOT done
+
+The issue's third suggestion — teach the release path of `deploy.sh` to refuse
+when a `grappa-release` compose project is already on the host — is **not in
+this slice**, and not for lack of merit. The measurement above makes it *more*
+attractive: the doc fix stops the reader, and the abort message is aimed
+squarely at the one who does not read. It is out because it is not the
+one-liner "optional but cheap" suggests. Such a guard must decide how it detects
+the other box (`docker compose ls`, versus a
+`label=com.docker.compose.project=grappa-release` filter — the only one that
+also sees a *stopped* compose box); it teaches the release-mode driver the
+compose file's project name, a new coupling that then needs its own pin because
+the two must agree; and it needs an escape hatch, or it blocks the operator
+legitimately migrating off compose onto the script path. The honest sibling
+change is smaller and is also not here: `cmd_update_release`'s abort should
+state what it OBSERVED (no env file at this path) instead of what it concluded
+("this box was never installed") — the log-honesty rule in CLAUDE.md, applied to
+a `die`.
+
+### The near miss: `compose.` is a PREFIX, and it is `:docker`-only
+
+Worth pinning for whoever edits these files next, because the natural instinct
+is to fix the docs where the right recipe was hiding — inside
+`compose.release.yaml`'s own comment block. `Preflight`'s `docker_image?/1`
+matches **any path beginning with `compose.`**, so that one extra edit
+reclassifies the whole slice. Measured:
+
+    classify_paths(~w(compose.release.yaml), :docker, f)
+      => {:cold, [image_substrate: ["compose.release.yaml"]]}
+    ...                          :jail   => {:hot, []}
+    ...                          :linux  => {:hot, []}
+
+Two properties, both measured rather than read off the source. It is a prefix
+on the FULL path and not on the basename — `docs/compose.notes.md` returns
+`{:hot, []}`. And it is scoped to `:docker` alone (`filter_on([:docker], …)`),
+the exact mirror of `VERSION`, which returns `{:cold, [version: ["VERSION"]]}`
+on `:jail` and `{:hot, []}` on `:docker`. **A docs-only slice that reaches into
+a `compose.*` file is a COLD docker deploy.** This one deliberately does not,
+which is why the compose recipe was copied INTO `INSTALL.md` rather than the
+prose being improved where it already lived.
+
+### What this does NOT claim
+
+Nothing was run against a real box. The three doors are read from
+`infra/docker/deploy.sh` and `infra/docker/get.sh` at `c65a84073`; the only
+command executed against docker was `docker compose … config`, which renders.
+The port collision is derived from two literals
+(`GRAPPA_PUBLISH=127.0.0.1:4000` and the compose `ports:` entry) plus `set -e`,
+never observed as a failed bind.
+
+_Deploy: **HOT** on every substrate. Measured, not enumerated:
+`Preflight.classify_paths(["INSTALL.md", "README.md", "docs/DESIGN_NOTES.md",
+"test/infra/release_update_docs_test.bats"], s, fn _ -> nil end)` returns
+`{:hot, []}` for `:docker`, `:jail` and `:linux` alike. The verdict was gated on
+its controls rather than printed beside them: `compose.release.yaml` on
+`:docker` and `VERSION` on `:jail` had to come back COLD, `docs/compose.notes.md`
+and `VERSION` on `:docker` HOT — all four held before any verdict was
+emitted._

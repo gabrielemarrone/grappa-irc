@@ -37,31 +37,56 @@ const COW_BODY = String.raw`        \   ^__^
                 ||     ||`;
 
 /**
- * What our cow says. bahamut's sentence with bahamut's name taken out of it —
- * the issue asks for the ASCII verbatim "with the text changed to speak for
- * grappa instead", and the smallest change that does that is the name.
+ * What our cow says, dictated by vjt on #grappa 2026-09-06 09:28 — TWO lines,
+ * verbatim and lowercase as he typed them:
+ *
+ *     this grappa server
+ *     has super cow powers
+ *
+ * It replaced the one-liner ("This grappa has Super Cow Powers !") because the
+ * single line is what made the block 38 columns wide, and 38 columns is what
+ * forced the font down to a size he could not read: "il font è troppo piccolo,
+ * specialmente quello del cowsay ... direi che il fumetto dovrebbe andare a
+ * capi". Two short lines cap the balloon at 24 columns, so the art is now as
+ * wide as the COW is (28) and the type can grow into the room that frees.
  */
-const COW_SAYS = "This grappa has Super Cow Powers !";
+const COW_SAYS: readonly string[] = ["this grappa server", "has super cow powers"];
 
 /**
- * A cowsay balloon around ONE line, in bahamut's exact geometry: a
- * space-flanked rule, the text between `< ` and ` >`, another rule.
+ * A cowsay balloon around one or more lines, in cowsay's own geometry.
  *
  * Built rather than transcribed so the rules can never disagree with the
  * sentence — the failure mode of a hand-drawn box is that someone edits the
- * words and the underscores stay the old length. Fed bahamut's own sentence
- * it reproduces bahamut's own balloon byte-for-byte, which is what
- * `creditsBlock.test.ts` checks before trusting it with ours.
+ * words and the underscores stay the old length. Fed bahamut's own single
+ * sentence it still reproduces bahamut's own balloon byte-for-byte, which is
+ * what `creditsBlock.test.ts` checks before trusting it with ours.
  *
- * ONE line only. Real cowsay wraps at 40 columns and grows the balloon into a
- * multi-line box with `/` and `\` shoulders; nothing here says a sentence
- * that long, and half a wrapping implementation is worse than none.
+ * The ONE-LINE shape is bahamut's and is kept exactly: `< text >` between two
+ * space-flanked rules. It is NOT the general case with n=1 — real cowsay uses
+ * the angle brackets only for a single line and the `/ | \` shoulders as soon
+ * as there are two, so collapsing the two shapes into one would break the
+ * reference the whole joke rests on.
  *
- * @param said the single line the cow speaks
+ * Multi-line pads every line to the widest, or the right-hand wall zigzags.
+ *
+ * @param said what the cow speaks — one line, or several
  */
-export function cowSaying(said: string): string {
-  const rule = (fill: string): string => ` ${fill.repeat(said.length + 2)} `;
-  return [rule("_"), `< ${said} >`, rule("-"), COW_BODY].join("\n");
+export function cowSaying(said: string | readonly string[]): string {
+  const spoken = typeof said === "string" ? [said] : said;
+  const first = spoken[0] ?? "";
+  if (spoken.length === 1) {
+    const rule = (fill: string): string => ` ${fill.repeat(first.length + 2)} `;
+    return [rule("_"), `< ${first} >`, rule("-"), COW_BODY].join("\n");
+  }
+
+  const width = Math.max(...spoken.map((line) => line.length));
+  const rule = (fill: string): string => ` ${fill.repeat(width + 2)} `;
+  const walls = spoken.map((line, i) => {
+    const [left, right] =
+      i === 0 ? ["/", "\\"] : i === spoken.length - 1 ? ["\\", "/"] : ["|", "|"];
+    return `${left} ${line.padEnd(width)} ${right}`;
+  });
+  return [rule("_"), ...walls, rule("-"), COW_BODY].join("\n");
 }
 
 /** The cow as it is rendered in the credits, balloon and all. */

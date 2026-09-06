@@ -80,7 +80,77 @@ export function creditsRainLook(
   roll: HTMLElement | undefined,
   block: HTMLElement | undefined,
 ): MatrixRainLook {
-  return rollIsParked(roll) || blockIsFading(block) ? CREDITS_RAIN_BURST_LOOK : CREDITS_RAIN_LOOK;
+  return rollIsParked(roll) || rollIsClear(roll) || blockIsFading(block)
+    ? CREDITS_RAIN_BURST_LOOK
+    : CREDITS_RAIN_LOOK;
+}
+
+/**
+ * How wide the viewport's fade band is as a fraction of its height, read off
+ * the `--credits-mask-fade` custom property the mask itself is built from.
+ *
+ * Cached per element: this is a `getComputedStyle` call, the look is asked for
+ * ~15 times a second, and the value is a constant of the STYLESHEET rather
+ * than of the layout — a rotation does not change a percentage.
+ *
+ * Falls back to `0` when the property is missing or is not a percentage, which
+ * makes `rollIsClear` mean "has left the box entirely" — i.e. the behaviour
+ * from before it existed, rather than a wrong burst.
+ */
+const maskFade = new WeakMap<HTMLElement, number>();
+
+function maskFadeFraction(viewport: HTMLElement): number {
+  const cached = maskFade.get(viewport);
+  if (cached !== undefined) return cached;
+
+  const raw = getComputedStyle(viewport).getPropertyValue("--credits-mask-fade").trim();
+  const percent = /^([\d.]+)%$/.exec(raw);
+  const parsed = percent === null ? Number.NaN : Number(percent[1]) / 100;
+  const fraction = Number.isFinite(parsed) && parsed >= 0 && parsed < 1 ? parsed : 0;
+
+  maskFade.set(viewport, fraction);
+  return fraction;
+}
+
+/**
+ * Have the titles left the READER's screen — i.e. is the roll's last line
+ * already inside (or above) the mask's top fade band?
+ *
+ * A THIRD route to the state the other two report, and it exists because vjt
+ * watched the real thing and timed the gap: "passa troppo tempo tra il para
+ * disappearing up e la matrix rain intensifying".
+ *
+ * That gap is arithmetic rather than a mistiming. `rollIsParked` answers off
+ * the animation's phase, and the animation is NOT finished when the text stops
+ * being visible: the roll keeps travelling until its bottom edge clears the
+ * top of the box, while the mask faded that same text to nothing a band's
+ * height earlier. On a ~800px screen the band is ~96px and the roll covers
+ * ~34px a second, so the picture is empty for about three seconds before the
+ * phase agrees — and only then does the interlude's own 3.24s begin.
+ *
+ * Measured off the BOX rather than derived from the keyframes, because the
+ * distance depends on the roll's own height, and that is whatever the current
+ * prose set happens to be. Two `getBoundingClientRect` reads per drawn frame
+ * at ~15fps, from inside a loop that is already painting a full-screen canvas.
+ *
+ * Not a second clock: it reads the state the roll is IN, it does not count
+ * time alongside it. Pause the roll and this answer freezes with it.
+ *
+ * Degrades to "not clear" when there is no box to measure — jsdom, where every
+ * rect is zero, and any state where the viewport has not been laid out.
+ *
+ * @param roll the `.credits-roll` element, or `undefined` before it mounts
+ */
+export function rollIsClear(roll: HTMLElement | undefined): boolean {
+  if (roll === undefined) return false;
+
+  const viewport = roll.parentElement;
+  if (viewport === null) return false;
+
+  const box = viewport.getBoundingClientRect();
+  if (box.height <= 0) return false;
+
+  return roll.getBoundingClientRect().bottom <= box.top + box.height * maskFadeFraction(viewport);
 }
 
 /**

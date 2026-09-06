@@ -254,7 +254,7 @@ describe("credits roll timing (#1807 — the stylesheet owns the interlude)", ()
   const cycleSeconds = (): number => animationSeconds(".credits-roll", "credits-roll");
   const stops = (): { at: number; value: string }[] => keyframeStops("credits-roll", "transform");
 
-  it("parks the roll off the top for the 5-7s of pure rain the issue asked for", () => {
+  it("parks the roll off the top for an interlude of pure rain", () => {
     const all = stops();
     const last = all.at(-1);
     expect(last?.at).toBe(1);
@@ -265,9 +265,26 @@ describe("credits roll timing (#1807 — the stylesheet owns the interlude)", ()
       1,
     );
 
-    const interlude = cycleSeconds() * (1 - (park?.at ?? 1));
-    expect(interlude).toBeGreaterThanOrEqual(5);
-    expect(interlude).toBeLessThanOrEqual(7);
+    // #1807 asked for 5-7 SECONDS, and this used to pin them. Two of vjt's
+    // orders have moved what those seconds were made of:
+    //
+    //  - 09:16, the interlude was deliberately shortened — the park went from
+    //    82% of the cycle to 91%, i.e. roughly half the rain.
+    //  - 10:52 ("si riproporziona") and 11:26: the cycle is no longer the 36s
+    //    declared below. `CreditsModal.syncRollDistance` measures each set and
+    //    writes `animationDuration` per turn, so the stylesheet's number is a
+    //    default that the first measurement replaces.
+    //
+    // A seconds assertion here would therefore be measuring the fallback. What
+    // survives both orders is the SHARE: the roll parks before its cycle ends,
+    // and what is left over is the interlude. How many seconds that comes to on
+    // a real device is the e2e's business, not the stylesheet's.
+    const share = 1 - (park?.at ?? 1);
+    expect(share).toBeGreaterThan(0);
+    expect(share).toBeLessThanOrEqual(0.15);
+    // ...and against the stylesheet's own default it is still seconds of rain
+    // rather than a blink, which is what the issue was actually about.
+    expect(cycleSeconds() * share).toBeGreaterThanOrEqual(3);
   });
 
   it("holds it OFF-SCREEN, and re-enters from the bottom EDGE", () => {
@@ -286,9 +303,17 @@ describe("credits roll timing (#1807 — the stylesheet owns the interlude)", ()
     // So the assertion is on the UNIT, not on a number: the entrance has to be
     // viewport-relative or the defect is back, and no roll height can make a
     // `%` entrance correct on every window.
+    //
+    // The exit stopped being `-100%` on 06/09: a percentage translate resolves
+    // against the roll's own border box, and the compositor keeps the endpoint
+    // it resolved BEFORE the set changed height — which is the touchdown jump
+    // vjt and void spent the morning on. The distance is now measured in px at
+    // the turn and passed in through `--credits-roll-h`, so what is asserted is
+    // that the exit is that property with a `%` FALLBACK for the first frame,
+    // before any measurement exists.
     const all = stops();
     expect(all[0]?.value).toMatch(/^translateY\(100d?vh\)$/);
-    expect(all.at(-1)?.value).toBe("translateY(-100%)");
+    expect(all.at(-1)?.value).toMatch(/var\(--credits-roll-h,\s*100%\)/);
   });
 
   it("keeps the exit self-relative, because clearing the top is about the ROLL", () => {
@@ -298,7 +323,7 @@ describe("credits roll timing (#1807 — the stylesheet owns the interlude)", ()
     // the window's bottom, which is a fact about the window. Swapping either
     // for the other's unit breaks a different size of roll.
     const all = stops();
-    const exits = all.filter((stop) => stop.value.includes("-100%"));
+    const exits = all.filter((stop) => stop.value.includes("--credits-roll-h"));
     expect(exits.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -320,10 +345,17 @@ describe("credits roll timing (#1807 — the stylesheet owns the interlude)", ()
   it("did not slow the titles down to buy the interlude", () => {
     // #1773 rolled the whole 28s cycle. The interlude is bought by a LONGER
     // cycle, so the travel — and therefore how long a reader has to read each
-    // name — is where it was.
+    // name — is not taken out of the reading.
+    //
+    // Asserted as a share for the reason the interlude is: the seconds moved
+    // when vjt shortened the intermezzo (09:16) and stopped living in this
+    // stylesheet at all when the duration became a per-set measurement (10:52,
+    // 11:26). The travel must still be the overwhelming majority of the cycle,
+    // and it must not be the whole of it or there is no interlude left.
     const all = stops();
     const park = all.find((stop) => stop.value === all.at(-1)?.value);
-    expect(cycleSeconds() * (park?.at ?? 1)).toBeCloseTo(28, 0);
+    expect(park?.at ?? 1).toBeGreaterThanOrEqual(0.85);
+    expect(cycleSeconds() * (park?.at ?? 1)).toBeGreaterThanOrEqual(28);
   });
 });
 

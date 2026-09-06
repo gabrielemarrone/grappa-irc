@@ -189,17 +189,15 @@ describe("CreditsModal (#1773)", () => {
   // #1929 — the roll, the cow and the special thanks are ONE block, the first
   // one, and the prose sets begin only after it has gone.
   //
-  // `getAnimations` is absent in jsdom, so `creditsRollPass` would read every
-  // pass as the first and the swap could never be observed. Stubbing it on the
-  // roll is what makes the SECOND pass reachable here at all; the fade itself
-  // is CSS and belongs to `creditsRain.test.ts`, which reads the stylesheet.
+  // The event IS the turn. It used to need a `getAnimations` stub as well,
+  // because the modal read the pass off the animation and jsdom has none; the
+  // modal now COUNTS these events instead, so dispatching one is the whole
+  // gesture. The fade itself is CSS and belongs to `creditsRain.test.ts`,
+  // which reads the stylesheet.
   const turnTheRollOver = (): void => {
-    const roll = screen.getByTestId("credits-roll");
-    Object.defineProperty(roll, "getAnimations", {
-      configurable: true,
-      value: () => [{ effect: { getComputedTiming: () => ({ currentIteration: 1 }) } }],
-    });
-    roll.dispatchEvent(new Event("animationiteration", { bubbles: true }));
+    screen
+      .getByTestId("credits-roll")
+      .dispatchEvent(new Event("animationiteration", { bubbles: true }));
   };
 
   it("shows the cow and every dictated thanks inside the first block", () => {

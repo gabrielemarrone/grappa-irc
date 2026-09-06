@@ -47284,3 +47284,165 @@ state-shape axis was measured too, not assumed: `long_lived_module_files/0` has
 34 members and the intersection with this slice is empty. **`VERSION` still
 classifies COLD on the release substrates — this slice moves no
 classification.**_
+<!-- entry #1952 -->
+
+---
+
+## 2026-09-07 — #1952: the release smoke crosses a version seam, and one flag was enough to keep the image from booting
+
+`scripts/smoke-release-image.sh` is a good gate that never changes version.
+Measured in the file before this work: every probe runs `$GRAPPA_IMAGE`
+alone, both volumes are destroyed before the run, and probe 3 — the closest
+thing to an upgrade — `docker restart`s the SAME image. So the shape that
+broke #1945 in the field, an existing box running the previous release and
+updated in place, had no coverage at all. That is the shape a self-hoster's
+automated update takes, and it is how the failure reached a user.
+
+Three things land: an upgrade probe from the previous release, an assertion
+that boot-time writes land in the volume, and a hostile-substrate matrix.
+The matrix found a real defect on its first run, which is recorded below
+along with the two shapes that were refused.
+
+### The previous release is DERIVED, and the comparison is not git's
+
+`infra/packaging/previous_release_tag.sh` answers "the highest RELEASE tag
+strictly below this one". It is the third script in that directory to read a
+tag and it reuses both rules the other two own: `prerelease_flag.sh` is the
+ONE pre-release classifier (#1636), and a repository tag it refuses is
+SKIPPED while the tag under test is refused outright — `latest_tag_gate.sh`'s
+posture (#1686), for its reason.
+
+What it does NOT reuse is `git tag --sort=-v:refname`, and the reason is a
+constraint the other two do not have: **the version under test need not be a
+tag.** On a `docker_validation` dry-run the smoke job runs from a branch
+whose `VERSION` has never been tagged, and git can only order refs it holds.
+A three-field numeric compare answers it for any version string. It is a
+comparison and not a second classifier — every string reaching it has already
+passed the shared classifier's shape floor. `test -lt`, never `$((…))`: a
+field with a leading zero shape-passes there and is an invalid octal constant
+to POSIX arithmetic.
+
+A dead end is a REFUSAL, never an empty line: the caller interpolates the
+answer into an image ref, where empty becomes `:` and fails far from the
+cause. The two dead ends are told apart because they need different fixes —
+no `v*` tag at all is a shallow clone that never fetched them (which is why
+the smoke checkout now takes `fetch-tags`), while tags with none below is the
+first release of a line.
+
+### `docker diff` is the oracle, and the bar is EMPTY because that is measured
+
+#1945's second half was silent rather than loud: the peer avatars were
+written to `/app/runtime/peer_avatars`, inside the container layer and
+outside `grappa-data`, so a cold update deleted them with no error anywhere.
+`docker diff` fits exactly — it reports the read-write layer and by
+construction never reports what is under a mount, so a root that landed in
+the volume is invisible and one that missed it is an `A` line. Nothing has to
+be enumerated in advance, which is what makes it a class gate rather than a
+second list of the three roots #1945 happened to fix.
+
+**No allowlist is written, because the measurement says there is nothing to
+allow.** A full boot of `ghcr.io/vjt/grappa:v1.5.1` — entrypoint, secret
+bootstrap, migrator, theme seeder, Phoenix up and answering — leaves the
+container layer with literally nothing in it. No `/app/tmp`, no `/tmp`, no
+cookie file. An allowlist authored ahead of the first entry it needs is a
+hole with a comment on it.
+
+The same reading on the release BEFORE it is the evidence the probe bites.
+`v1.5.0` answers three lines, two of them the defect itself:
+
+    A /app/runtime
+    A /app/runtime/peer_avatars
+    C /app
+
+An empty diff is also exactly what a BLIND oracle produces, so the probe
+plants that same path afterwards and requires docker to see it. Without that
+control the clean reading proves nothing.
+
+### One flag, and the image does not come up
+
+The matrix's cwd shape is the honest stand-in for the production jail, where
+#1945 actually happened: rc.d starts the release with `su -m grappa` and no
+`cd`, so the cwd is `/`. Docker bakes `WORKDIR /app` and makes it writable by
+the runtime user, which is exactly why the same class of defect is SILENT
+there and FATAL in the jail. Measured on stock `v1.5.1`:
+
+    docker run --workdir / ...
+    /app/release-entrypoint.sh: line 126: bin/grappa: not found
+    grappa: MIGRATION FAILED — refusing to start.
+    exited/1
+
+Three commands in the entrypoint run `bin/grappa` and all three spelled it
+RELATIVELY. `--workdir`, or a Kubernetes `workingDir:`, is set without a
+thought. **This is #1945's own rule one layer over: the cure there stopped
+deriving DATA paths from the cwd; the cure here stops deriving the release's
+OWN path from it.** `cd "$(dirname "$0")"` is a no-op wherever things already
+worked. It ships in this slice and not in a follow-up because a gate that is
+red by construction has two futures, and the second is somebody weakening the
+oracle to make it green.
+
+**Blast radius, verified rather than assumed:** the only installer of
+`infra/docker/release-entrypoint.sh` is `Dockerfile.release`. `infra/freebsd/`
+and `infra/linux/` contain zero references; `infra/packaging/`'s single hit is
+a comment. The one non-Dockerfile consumer, `infra/release/grappa.sh`, IS
+installed into every release including the jail's, and is doubly barred:
+it requires `GRAPPA_SUBSTRATE = docker` exactly, and the path it would exec is
+never created outside the image because `install_operator_cli/1` copies only
+`infra/release/grappa.sh`. Production (the m42 bastille jail) runs `mix
+release` and does not read this file.
+
+### An exit status is not a fact about the fault
+
+The second defect the measurement surfaced is a different one and got its own
+cure: the operator was told `MIGRATION FAILED`, with a paragraph about rolling
+the schema back, while nothing had opened the database. That is the
+log-honesty rule verbatim — a fast path describing work it did not do.
+
+The first spelling keyed on exit 127 and the bats case written for it is what
+killed that: **on one missing file the number is not stable.** `sh -c
+'bin/nothere'` answers 127, the image's busybox ash prints `not found`, and
+this script's own `if ! bin/grappa …` under `set -e` on bash-as-sh hands back
+**1** — indistinguishable from a migration that ran and failed. So the guard
+is a PRECONDITION, `test -x`, which answers the same on every shell, placed
+once at the top because a tree with no runnable `bin/grappa` cannot migrate,
+cannot seed and cannot boot.
+
+### Two hostile shapes refused, both by measurement
+
+**A volume over `/app`** removes the release itself, so a probe asserting that
+shape answers 200 would assert a falsehood.
+
+**An arbitrary uid (`--user 65534`) cannot be set up.** Docker re-seeds an
+EMPTY named volume from the image on every mount, ownership included:
+`chown -R 65534:65534 /data` in a helper container reads back as `65534:65534`
+inside that container and as the image's `100:101` in the next one. Only a
+pre-populated volume survives it, which is a fixture built to dodge a docker
+behaviour rather than a substrate anybody runs — and the property it would
+test (nothing outside `/data` need be writable) is what the read-only shape
+asserts directly.
+
+**The read-only recipe is one tmpfs, measured, not assumed.** Naked
+`--read-only` dies with `mktemp: : Read-only file system` before it reaches
+the secret bootstrap; `--read-only --tmpfs /tmp` boots. `/app/tmp` is not in
+it because the release never writes there — the same fact the empty container
+layer reports from the other side.
+
+### The gate the gate needs
+
+`release.yml` fires on a `v*` tag push and on `workflow_dispatch`, so nothing
+added to its `smoke` job is ever executed by a pull request: the first real
+run is the release. #1951 is that story verbatim, a rotted pattern failing the
+release runs of BOTH v1.5.0 and v1.5.1 — a red check an operator learns to
+ignore. The mitigation it landed is the one taken here: bats over the LOGIC at
+PR time (`test/infra/release_upgrade_probe_test.bats`), against real git
+repositories with real tag sets rather than a stubbed `git`, so what stays
+untested until a real tag is only the part that genuinely needs a booted
+container.
+
+Every RED case carries a positive control on the same predicate. One of them
+earned its keep immediately, catching a fixture bug in this very slice: the
+temp repositories were keyed on the test number, so a case building two of
+them to contrast had the second silently eat the first.
+
+_Deploy: **cold** — `infra/docker/release-entrypoint.sh` is baked into the
+release image, so it reaches an operator only through a new image. The m42
+jail runs `mix release` and does not read it; nothing else here leaves CI._

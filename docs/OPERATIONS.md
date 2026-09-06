@@ -1947,6 +1947,36 @@ D** — see **Running the published image** below.
   is `scripts/smoke-release-image.sh`, runnable by hand — probes, mutation
   evidence and the explicit non-coverage list are in
   `docs/TESTING.md` § "The release-image smoke".
+- **It crosses a VERSION SEAM, and boots where the cwd is hostile (#1952).**
+  Until then every probe was a FIRST boot on an empty volume of ONE image, so
+  the shape that breaks a self-hoster — an existing box on the previous
+  release, updated in place — had no coverage; that is the shape #1945 reached
+  a user through. The job now also resolves the release BELOW this one
+  (`infra/packaging/previous_release_tag.sh`, never a pinned tag), pulls it,
+  boots it on a fresh volume and starts the candidate on that same volume:
+  `/healthz`, the reported version, the exact number of migrations that had to
+  run, `/data/grappa.env` unrotated ACROSS the version change, and an account
+  written under the old release still there. It then asserts that the boot
+  wrote **nothing** into the container layer (`docker diff`, which never
+  reports what is under a mount — measured empty on a healthy release and
+  three lines on v1.5.0, two of them #1945 itself), and boots the candidate
+  under `--read-only --tmpfs /tmp` and under `--workdir /`.
+  ⚠️ **The previous image is now REQUIRED**, on the same no-skip footing as
+  the candidate: a run that quietly fell back to the same-version probes would
+  report exactly the green this closed. The one exception is a repair dispatch
+  of a tag whose driver predates the probe — the resolve step reads the
+  checked-out driver, not the event, and stands down when that tree asks for no
+  fixture.
+- **Running the image `--read-only`** needs one tmpfs and nothing else:
+
+  ```sh
+  docker run --read-only --tmpfs /tmp -v grappa-data:/data -e PHX_HOST=… ghcr.io/vjt/grappa:vX.Y.Z
+  ```
+
+  Measured (#1952): naked `--read-only` dies on `mktemp: : Read-only file
+  system` before the secret bootstrap. `/app/tmp` is deliberately NOT in the
+  recipe — the release writes nothing under `/app`, and the smoke's
+  container-layer probe is what keeps that true.
 - **Local build** (validate the Dockerfile without CI):
 
   ```sh
@@ -4856,6 +4886,38 @@ They ride in the repair scaffolding checkout for that reason; measured not to
 change the artifact, since `Dockerfile.release` COPYs only `version.sh` and
 `gen-secrets.sh` out of `infra/packaging`. Gate:
 `test/infra/release_latest_gate_test.bats`.
+
+### `previous_release_tag.sh` — the release the smoke upgrades FROM (#1952)
+
+The third tag reader in this directory, and the one the `smoke` job uses to
+find its upgrade fixture. Verdict on **stdout**, reason on **stderr**, same
+split as its two siblings:
+
+    previous_release_tag.sh v1.5.2      -> v1.5.1
+    previous_release_tag.sh v1.3.0-rc2  -> v1.2.0   (a candidate upgrades from
+                                                     the last stable)
+    previous_release_tag.sh v1.3        -> refused, exit 2
+
+**The highest release STRICTLY BELOW, which is not "the tag before this
+one".** A backport cut after a newer minor (`v0.7.5` landing after `v0.8.0`,
+the case `latest_tag_gate.sh` already reasons about) sits between them in
+creation order and below both in version order.
+
+**It reuses `prerelease_flag.sh` and does NOT reuse git's version sort.** The
+classifier is shared for the reason above — one rule, one owner. The sort is
+not, and the constraint is specific: **the version under test need not be a
+tag.** On a `docker_validation` dry-run the job runs from a branch whose
+`VERSION` has never been tagged, and git can only order refs it holds. The
+three-field numeric compare answers it for any version string; it sees only
+strings the classifier has already shape-checked, so it is a comparison and
+not a second classifier.
+
+**A dead end is a refusal, never an empty line** — the caller interpolates the
+answer into an image ref, where empty becomes `:` and fails far from the
+cause. The two dead ends carry different messages because they need different
+fixes: no `v*` tag at all is a shallow clone that never fetched them (hence
+`fetch-tags` on the smoke checkout), while tags with none below is the first
+release of a line. Gate: `test/infra/release_upgrade_probe_test.bats`.
 
 ### The packaged operator CLI and the migrate path (#419)
 

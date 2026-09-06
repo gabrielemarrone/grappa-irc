@@ -83,9 +83,14 @@ scripts/bats.sh test/bin/grappa_test.bats
 # Release image — deploy it for real and probe it (#1162).
 # Read the number from VERSION rather than hardcoding one: a literal
 # here goes stale at the next release and nothing fails when it does.
+# The PREVIOUS release is derived for the same reason (#1952) — the
+# upgrade probe needs it, and the driver refuses to run without it.
 V=$(cat VERSION)                         # 1.2.0 as of this line
+P=$(infra/packaging/previous_release_tag.sh "v$V")   # e.g. v1.5.1
 docker pull ghcr.io/vjt/grappa:v$V
+docker pull ghcr.io/vjt/grappa:$P
 GRAPPA_IMAGE=ghcr.io/vjt/grappa:v$V GRAPPA_SMOKE_VERSION=$V \
+GRAPPA_PREVIOUS_IMAGE=ghcr.io/vjt/grappa:$P GRAPPA_SMOKE_PREVIOUS_VERSION=${P#v} \
   scripts/smoke-release-image.sh
 
 # E2E (Playwright + real testnet)
@@ -365,7 +370,7 @@ The authoritative source is the comment block at the top of each
 * **`scripts/bun.sh`** → oneshot `oven/bun:1` against `cicchetto/`. `run test` = vitest. `run check` = the lock-drift stage (#1571) + biome + tsc over `src` AND `e2e`. `install`, `add`, etc. forward to bun.
 * **`scripts/bats.sh`** → host-side bats v1.9.0 (submodule at `vendor/bats-core`) against `test/bin/`, `test/infra/` and `test/scripts/`. NOT containerised — bats tests host-side bash (`bin/grappa`, the deploy scripts, the cloud installer). There is no compose involvement in the runner: the container is reached only transitively, when a test exercises a verb that shells out to docker, and those tests stub `docker` on `PATH` rather than touching a real one. So this gate needs no stack up.
 * **`scripts/release-image.sh`** → the RELEASE image (`Dockerfile.release`), not the compose dev stack. `build` buildx-loads it locally; `fresh-boot` wipes the scratch volume and bare-runs it with nothing but `PHX_HOST` (the documented one-liner — the point is that everything else must come from the image and the volume); `warm-boot` does the same on the EXISTING volume; `oneshot <args…>` runs a throwaway container against that volume; `logs` / `down [--volume]` clean up. This is the reproduction for #862 and #867, both of which were found by hand-typing docker commands because no wrapper reached this artifact.
-* **`scripts/smoke-release-image.sh`** → brings a box up from `$GRAPPA_IMAGE` through the real `infra/docker/get.sh` → `deploy.sh` release path (`GRAPPA_RAW_BASE=file://<checkout>`, so get.sh's mirror list is under test too), then probes it over HTTP and tears everything down. Dedicated container/volume names (`grappa-smoke*`), so it cannot eat an operator box. Requires the image to be present locally — **an unavailable image fails the run, it never skips it**. See "The release-image smoke" below.
+* **`scripts/smoke-release-image.sh`** → brings a box up from `$GRAPPA_IMAGE` through the real `infra/docker/get.sh` → `deploy.sh` release path (`GRAPPA_RAW_BASE=file://<checkout>`, so get.sh's mirror list is under test too), then probes it over HTTP and tears everything down. Since #1952 it also upgrades `$GRAPPA_PREVIOUS_IMAGE` in place to the candidate and boots the candidate on hostile substrates. Dedicated container/volume names (`grappa-smoke*`), so it cannot eat an operator box. Requires BOTH images to be present locally — **an unavailable image fails the run, it never skips it**, and that now includes the upgrade fixture: a run that quietly fell back to five same-version probes is the state #1952 closed. See "The release-image smoke" below.
 * **`scripts/integration.sh`** → `scripts/testnet.sh up` → `docker compose run --rm playwright-runner npx playwright test "$@"` → trap-on-exit `scripts/testnet.sh down`. `KEEP_STACK=1` opts out of tear-down.
 * **`scripts/testnet.sh`** → manages the stack standalone. `up` boots hub + leaves + services + grappa-test + nginx-test + seeder. `down` tears down + wipes `runtime/e2e/`. `probe` connects an oper-up client to leaf4 for `/links` + `/stats l`.
 
@@ -417,6 +422,10 @@ rotted once, and the script is the roster):
 | a restart keeps `/data/grappa.env` | drop the `[ ! -f "$secrets_file" ]` guard from the entrypoint | hash changes |
 | the shipped bundle carries a populated credit roll (#1834) | build the image with no `--build-arg GRAPPA_CREDITS`, i.e. the pre-#1834 recipe | the degraded `{"sha":null,"date":null,"contributors":[]}`, quoted in the failure |
 | …and the probe can still SEE one | rename the payload's `"sha"` key in a shipped chunk | "neither shape present" — it fails blind rather than passing quietly |
+| the boot writes nothing outside `/data` (#1952) | point `GRAPPA_IMAGE` at `v1.5.0`, the last release with the #1945 default | `A /app/runtime`, `A /app/runtime/peer_avatars`, `C /app` |
+| …and `docker diff` can still SEE a layer write | none needed — the probe plants `/app/runtime` itself and re-reads | an empty diff is what a blind oracle gives, so this control is not optional |
+| the image boots with a cwd it did not choose (#1952) | `--workdir /` on any image predating this slice | `bin/grappa: not found`, `MIGRATION FAILED`, `exited/1` |
+| the upgrade fixture really is the OLDER release | point `GRAPPA_PREVIOUS_IMAGE` at the candidate's own ref | refused before any container starts |
 
 Two of those are worth knowing on their own. **A missing hashed chunk is
 served as the SPA shell with 200 and `content-type: text/html`** —
@@ -443,12 +452,45 @@ passing that arg too — see § "The published release image" in
 `docs/OPERATIONS.md`. The asymmetry is the point: the naked build must
 keep degrading honestly, the shipped image must not.
 
+**The version seam, and the two hostile shapes that are NOT run (#1952).**
+The upgrade probe boots the previous release on a fresh volume, writes
+state through it, stops it and starts the candidate on that same volume —
+previous → candidate only, since a downgrade is a different question with
+a different answer. How many migrations must run is DERIVED from the two
+images (the previous booted on an empty volume, so what is applied there
+is exactly its own set) rather than naming a migration that would go
+stale. Refused, and each for a measured reason rather than a preference:
+
+* **a volume over `/app`** removes the release itself, so asserting that
+  it answers 200 would assert a falsehood;
+* **an arbitrary uid (`--user 65534`)** cannot be set up. Docker re-seeds
+  an EMPTY named volume from the image on every mount, ownership
+  included, so `chown -R 65534 /data` in a helper container reads back as
+  `65534` inside it and as the image's `100:101` in the next one. The
+  property it would test is what the read-only shape asserts directly.
+
+**The read-only recipe is `--read-only --tmpfs /tmp`, and nothing more.**
+Naked, the boot dies on `mktemp: : Read-only file system` before it
+reaches the secret bootstrap. `/app/tmp` is deliberately absent: the
+release writes nothing under `/app`, which is the same fact the
+empty-container-layer probe reports from the other side.
+
 What it deliberately does NOT cover: one architecture (whatever the host
 runs — the arm64 leg of the manifest is proven by the build, not here);
 no IRC at all (no upstream connect, SASL or scrollback — that is
 `scripts/integration.sh`'s job, against the SOURCE image); no TLS front
 door or real `PHX_HOST`; and the `update` verb (only `install` plus a
 bare-run restart).
+
+⚠️ **Nothing in this job runs on a pull request.** `release.yml` fires on
+a `v*` tag push and on `workflow_dispatch`, so a probe added here is
+first executed by the release itself — which is how #1951's rotted
+pattern came to fail the release runs of both v1.5.0 and v1.5.1. The
+standing mitigation is bats over the LOGIC at PR time:
+`test/infra/release_upgrade_probe_test.bats` (the previous-tag resolver
+and the wiring that feeds it) and `test/infra/release_image_credits_test.bats`
+(probe 5's oracle). Adding a probe here means adding its PR-time half
+there.
 
 ## The e2e stack
 

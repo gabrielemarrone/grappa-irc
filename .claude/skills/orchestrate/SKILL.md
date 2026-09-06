@@ -1249,6 +1249,13 @@ said "ask vjt for the STACK lane", which is flatly wrong: lanes are MINE).
   discriminator is live on that pane right then** — which is exactly the "control inside the
   instrument, not beside it" rule this file demands of workers. Grep a window wide enough to include
   your own last order, not just the suspect string.
+  🔴🔴 **E NON CONTARE `[2m` SU UNA FINESTRA CIECA: `capture-pane -p -e -S -3 | grep -c '\[2m'` NON
+  DISCRIMINA NIENTE (orch, 2026-09-05, correzione a uno strumento mio).** Nelle ultime righe di un
+  pane c'e' la **status line**, e i suoi hint (*"shift+tab to cycle"*) sono **anch'essi dim** ⇒ il
+  conteggio da' **2 su un pane sanissimo**, cioe' un ghost dove non c'e' nessuno. **La forma che regge
+  e' il grep sul TESTO** (`capture-pane -p -e | grep -a '<token dell ordine>' | cat -v`): guarda la
+  riga giusta **e** porta nella stessa cattura il controllo positivo di sopra. 🥇 *Un conteggio di
+  attributi su una finestra scelta a caso misura l'arredamento del terminale, non la tua domanda.*
 - 🥇🥇 **QUANDO UN PANE È APPESO, IL TRANSCRIPT DELLA WORKER È EVIDENZA DI PRIMA MANO E BATTE
   L'ATTESA DELLA SUA RISPOSTA (orch, 2026-08-30).** Sta sull'host suo in
   `~/.claude/projects/<slug>/<uuid>.jsonl`, il più recente per mtime, e contiene i comandi ESEGUITI

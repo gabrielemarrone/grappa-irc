@@ -30,13 +30,20 @@
 // with no touch, viewport or engine dependency, so desktop chromium IS the
 // defect's own platform rather than a proxy for it.
 //
-// Shape:
+// Two tests, one contract, because the rows reach the glyph by two different
+// arguments and each needs its own fixture.
+//
+// Shape (presence rows):
 //   1. an op peer founds a fresh per-run channel → the founder auto-ops (@)
 //   2. the operator (vjt-grappa) joins it, so cic witnesses what follows
 //   3. the subject peer joins  → a JOIN row, subject plain at that instant
 //   4. the subject peer parts  → a PART row, subject plain at that instant
 //   5. the subject peer rejoins and the op peer ops it → subject is @ NOW
 //   6. neither historical row may carry a glyph — live, and after a reload
+//
+// Shape (the `mode` row — see the second test's own header for WHY it needed
+// /OPER to build): a plain member self-ops, and the row that GRANTS the `@`
+// must not be painted with it.
 //
 // Parity matrix: UI shape contract, subject-shape-agnostic. Registered seed
 // (vjt + autojoin) suffices.
@@ -54,6 +61,14 @@ import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
 test.setTimeout(120_000);
+
+// Testnet O: line — `conf.leaf*.tmpl` interpolates OPER_NICK / OPER_PASS,
+// whose compose defaults are these. Local constants, matching the two specs
+// that already need them (issue367, issue554); they are triplicated now and
+// belong in `seedData`, but hoisting them would edit two specs this change
+// has no business touching.
+const OPER_NAME = "testoper";
+const OPER_PASS = "testoperpass";
 
 test("issue 1950 — a historical join/part row keeps no glyph after the nick is opped", async ({
   page,
@@ -131,6 +146,88 @@ test("issue 1950 — a historical join/part row keeps no glyph after the nick is
     await opPeer.disconnect("issue1950 done");
     // `/join` persists the channel into vjt's autojoin set; PART restores
     // pre-test state. Idempotent — swallow 404 if the test bailed early.
+    await partChannel(vjt.token, NETWORK_SLUG, channel).catch(() => {});
+  }
+});
+
+// The `mode` row was the last carve-out, argued as honest because "its subject
+// IS the grade change". The reporter closed it with a line that refutes itself
+// without any knowledge of the channel's history:
+//
+//     20:58:09 * @Mezmerize sets mode +o Mezmerize on #grappa
+//
+// Setter and target are the same nick, so the `@` the setter is painted with
+// is the one THIS LINE grants — it provably was not held when the event
+// happened. Every other `mode` row has the same defect, just without the
+// self-evidence: a setter deopped since reads plain on the line where they
+// were opping people.
+//
+// Why this reproduces here and not on a plain channel op: setting `+o` needs
+// chanop, so a setter who lacks the grade cannot normally produce the row at
+// all. The reporter could because he is Azzurra staff — the earlier field
+// line shows `mezmerize@staff.azzurra.chat`. The testnet is the SAME ircd
+// (bahamut), so the spec buys the same standing the same way, with /OPER.
+test("issue 1950 — the mode row that grants an op renders its setter bare", async ({ page }) => {
+  const suffix = crypto.randomUUID().slice(0, 5);
+  const channel = `#m1950-${suffix}`;
+  const founderNick = `m1950f${suffix}`;
+  const staffNick = `m1950s${suffix}`;
+
+  const vjt = specUser();
+  await loginAs(page, vjt);
+  await selectChannel(page, NETWORK_SLUG, AUTOJOIN_CHANNELS[0], { ownNick: specNick() });
+
+  // Someone has to hold the channel open while cic joins; the founding JOINer
+  // auto-ops on the testnet leaf (the image drops `NO_CHANOPS_WHEN_SPLIT`).
+  // This peer never sets a mode — it exists so the channel is not empty.
+  const founder = await IrcPeer.connect({ nick: founderNick });
+  let staff: IrcPeer | null = null;
+  try {
+    await founder.join(channel);
+
+    await composeSend(page, `/join ${channel}`);
+    await expect(sidebarWindow(page, NETWORK_SLUG, channel)).toBeVisible({ timeout: 15_000 });
+    await selectChannel(page, NETWORK_SLUG, channel, { ownNick: specNick() });
+
+    // Joins SECOND, so it is a PLAIN member — the whole premise of the repro.
+    staff = await IrcPeer.connect({ nick: staffNick });
+    await staff.join(channel);
+    await expect(scrollbackLine(page, "join", staffNick)).toHaveCount(1, { timeout: 15_000 });
+
+    // The self-op. `IrcPeer.mode` awaits this peer's OWN echo, so a refused
+    // override fails as a named MODE timeout rather than a silent skip.
+    await staff.oper(OPER_NAME, OPER_PASS);
+    await staff.mode(channel, "+o", staffNick);
+
+    // POSITIVE CONTROL — the members store really did take the `@`. Without
+    // it the absence below would be the absence of nothing. The members pane
+    // is the store's other consumer, and the one surface where a CURRENT
+    // grade is the right thing to show.
+    const memberGlyph = page
+      .locator(".members-pane .member-name", { hasText: staffNick })
+      .locator(".nick-prefix");
+    await expect(memberGlyph).toHaveText("@", { timeout: 15_000 });
+
+    // The row this very MODE produced. Matching on the mode text as well as
+    // the nick keeps it off the founder's own join-time channel modes.
+    const modeRow = scrollbackLine(page, "mode", new RegExp(`sets mode \\+o ${staffNick}\\b`));
+    await expect(modeRow).toHaveCount(1, { timeout: 15_000 });
+    await expect(modeRow.locator(".nick-prefix")).toHaveCount(0);
+
+    // RELOADED: the row now arrives from persisted scrollback over REST and
+    // the members store from a fresh NAMES. Different doors, same contract —
+    // and the control has to hold on the far side too, or the reloaded
+    // absence is once again an absence of nothing.
+    await page.reload();
+    await expect(page.locator(".sidebar-network-header").first()).toBeVisible({ timeout: 10_000 });
+    await selectChannel(page, NETWORK_SLUG, channel, { ownNick: specNick() });
+
+    await expect(memberGlyph).toHaveText("@", { timeout: 15_000 });
+    await expect(modeRow).toHaveCount(1, { timeout: 15_000 });
+    await expect(modeRow.locator(".nick-prefix")).toHaveCount(0);
+  } finally {
+    if (staff) await staff.disconnect("issue1950 mode done");
+    await founder.disconnect("issue1950 mode done");
     await partChannel(vjt.token, NETWORK_SLUG, channel).catch(() => {});
   }
 });

@@ -46285,16 +46285,33 @@ defect #1916 was filed for.
 * 🔴 **The closing line is a placeholder too**, for a smaller reason: the
   wording is vjt's call, not the implementer's.
 * **The manifesto is its own block and not a seventeenth prose set.** It is
-  ~570 words against a cap of 150, and the cheap way to fit it is to raise the
+  ~570 words against a cap of 300, and the cheap way to fit it is to raise the
   cap — which silently un-bounds all sixteen sets the cap exists to keep
   readable. `PROSE_SET_MAX_WORDS` is therefore pinned BY NUMBER, so raising it
-  is a red test rather than a quiet edit.
+  is a red test rather than a quiet edit. The pin cannot read intent and does
+  not try to: it makes ANY move an argued diff.
 
-⚠️ **Measured, correcting the issue:** the issue states the cap is "300 after
-the raise". There was no raise. `git log -S 'PROSE_SET_MAX_WORDS = 300'` on
-`creditsProse.ts` returns nothing, while the same search for `= 150` returns
-`31fa3bd92`, the commit that introduced it. The manifesto is ~3.8× the cap
-rather than ~1.9×, which strengthens the case for a separate block.
+⚠️ **A retraction, and the rule it cost.** This entry first carried a
+"measured correction to the issue": the issue calls the cap "300 after the
+raise", and `git log -S 'PROSE_SET_MAX_WORDS = 300'` on `creditsProse.ts`
+returned nothing while `= 150` returned `31fa3bd92`, so the raise was declared
+never to have happened. **The search was right and the inference was wrong.**
+The raise existed as an OPEN PR, not as a commit — it landed a few hours later
+as the copy rewrite, and the cap is 300. The manifesto is ~1.9× the cap, the
+ratio the issue always claimed.
+
+**The rule: `git log -S` answers "is this in the history of THIS ref", never
+"does this exist".** Those are the same question only when nothing is in
+flight, which is exactly the condition a concurrent worktree cannot assume.
+The failure is silent and reads as rigour — an empty search result looks like
+evidence of absence and is quoted as one. When a search over history is about
+to contradict a written spec, the missing half is the open PRs; the honest
+form of the claim names the ref it was measured against and its date.
+
+The pin itself was not the mistake and did not change shape: it moved from
+`toBe(150)` to `toBe(300)` and still forbids the one move the block exists to
+prevent. What changed is that its comment no longer accuses the issue of
+inventing a number.
 
 ### What is NOT established here
 

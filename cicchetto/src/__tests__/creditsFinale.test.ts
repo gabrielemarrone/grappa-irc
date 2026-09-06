@@ -104,15 +104,23 @@ describe("the manifesto slot (#1931 — BLOCKED on written clearance)", () => {
     // cap exists to keep readable.
     //
     // Pinned as a NUMBER rather than as "the sets still pass": every set could
-    // still pass a cap raised to 600. This is the move being forbidden.
+    // still pass a cap raised to 600. This is the move being forbidden. The
+    // pin does not care WHY the number moves — it cannot read intent — so it
+    // makes any move an argued diff instead of a quiet edit.
     //
-    // ⚠️ The number is 150, MEASURED. The issue says "PROSE_SET_MAX_WORDS
-    // (300 after the raise)" and no such raise exists: `git log -S
-    // 'PROSE_SET_MAX_WORDS = 300'` on this file returns nothing, while the
-    // same search for `= 150` returns the commit that introduced it
-    // (31fa3bd92). The manifesto is therefore ~3.8x the cap rather than ~1.9x,
-    // which makes the case for a separate block stronger, not weaker.
-    expect(PROSE_SET_MAX_WORDS).toBe(150);
+    // ⚠️ RETRACTION. This assertion read 150 and the comment said the issue's
+    // "PROSE_SET_MAX_WORDS (300 after the raise)" described a raise that never
+    // happened. The measurement was right and the conclusion was wrong: the
+    // raise existed as an unlanded PR, not as a commit, so searching history
+    // could not see it. It landed while this branch waited (the copy rewrite),
+    // and the cap is 300. The manifesto is ~1.9x the cap, not ~3.8x — the
+    // margin the issue always claimed, and still ample enough that fitting the
+    // manifesto in would take a raise nobody could make silently.
+    //
+    // The general lesson, since this is the second thing here to be caught by
+    // it: `git log -S` answers "is it in the history of THIS ref", never "does
+    // it exist". Against work in flight those are different questions.
+    expect(PROSE_SET_MAX_WORDS).toBe(300);
     // ...and the manifesto is not in the pool it bounds. A set added there
     // would be capped; this block deliberately is not, so it must not be one.
     expect(CREDITS_PROSE.some((set) => set.paragraphs.includes(CREDITS_MANIFESTO))).toBe(false);

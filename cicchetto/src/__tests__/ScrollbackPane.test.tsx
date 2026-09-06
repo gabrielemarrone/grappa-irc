@@ -1623,6 +1623,99 @@ describe("ScrollbackPane", () => {
     });
   });
 
+  // #1950 — a scrollback row is a RECORD of a past event, never a view of
+  // "now", so no nick on one may take its glyph from the LIVE members store.
+  //
+  // `prefixFor`'s live branch re-derived the glyph at every render, so a nick
+  // opped AFTER the event retroactively re-prefixed their own history. On a
+  // `join` it states something that cannot ever have been true — JOIN carries
+  // no grade on the wire; the `@` arrives later in a separate MODE — and
+  // anyone with ChanServ auto-op reads every one of their own joins as
+  // `@nick`. On a `part`/`quit`/`kick` the row was reported in the field as
+  // `* @ULIAK [...] has quit (...)`, which is the same defect wearing the
+  // "they were still in the store" mask: any later re-render of that row,
+  // after the nick rejoined and was re-opped, re-prefixes it.
+  //
+  // This is exactly the class #25 removed from CONTENT rows (which read the
+  // server's send-time `meta.sender_prefix` snapshot), left standing on the
+  // record rows. There is nothing to snapshot here: a record row's correct
+  // glyph is always none.
+  //
+  // `mode` is the one deliberate survivor — its subject IS the grade change,
+  // so the live read is the honest one — and its case below doubles as the
+  // POSITIVE CONTROL for the whole block: it proves this fixture really does
+  // carry `@`, so every absence asserted above is the absence of a glyph the
+  // store could have supplied, not of a glyph nobody had.
+  describe("#1950 record rows carry no live-derived mode glyph", () => {
+    // channelKey is mocked to `${slug} ${name}`.
+    const RECORD_KEY = "freenode #glyph" as ChannelKey;
+
+    // Three members — far below LARGE_CHANNEL_THRESHOLD, so the #222 presence
+    // filter leaves join/part/quit/nick_change rendered with the pref unset.
+    // `alice` and `carol` hold @ RIGHT NOW; that is the whole premise.
+    const oppedMembers = () => ({
+      [RECORD_KEY]: [
+        { nick: "alice", modes: ["@"] },
+        { nick: "carol", modes: ["@"] },
+        { nick: "dave", modes: [] },
+      ],
+    });
+
+    const recordRow = (
+      kind: ScrollbackMessage["kind"],
+      extra: Partial<ScrollbackMessage>,
+    ): ScrollbackMessage => ({
+      id: 1,
+      network: "freenode",
+      channel: "#glyph",
+      server_time: 1_700_000_000_000,
+      kind,
+      sender: "alice",
+      body: null,
+      meta: {},
+      ...extra,
+    });
+
+    const renderRow = (msg: ScrollbackMessage): HTMLElement => {
+      mockMembersByChannel.mockReturnValue(oppedMembers());
+      setScrollback({ [RECORD_KEY]: [msg] });
+      render(() => <ScrollbackPane networkSlug="freenode" channelName="#glyph" kind="channel" />);
+      return screen.getByTestId("scrollback-line");
+    };
+
+    afterEach(() => {
+      clearChannelPresencePref(RECORD_KEY);
+      setScrollback({});
+    });
+
+    const cases: { name: string; msg: ScrollbackMessage }[] = [
+      { name: "join", msg: recordRow("join", {}) },
+      { name: "part", msg: recordRow("part", { body: "brb" }) },
+      { name: "quit", msg: recordRow("quit", { body: "Read/Dead Error: Input/output error" }) },
+      { name: "nick_change", msg: recordRow("nick_change", { meta: { new_nick: "alice2" } }) },
+      { name: "topic", msg: recordRow("topic", { body: "the new topic" }) },
+      // `kick` carries TWO live glyphs — the kicker through the sender span
+      // and the VICTIM through its own NickText. A victim is out of the
+      // channel the instant the event lands, so an `@` on them can only have
+      // come from a later rejoin-and-reop. Both must be gone.
+      { name: "kick", msg: recordRow("kick", { sender: "carol", meta: { target: "alice" } }) },
+    ];
+
+    for (const { name, msg } of cases) {
+      it(`renders a ${name} row with no mode glyph although the nick holds @ now`, () => {
+        const line = renderRow(msg);
+        expect(line.querySelectorAll(".nick-prefix")).toHaveLength(0);
+      });
+    }
+
+    it("POSITIVE CONTROL — a mode row still takes the live glyph from that same fixture", () => {
+      const line = renderRow(recordRow("mode", { meta: { modes: "+o", args: ["dave"] } }));
+      const glyph = line.querySelector(".scrollback-sender .nick-prefix");
+      expect(glyph).not.toBeNull();
+      expect(glyph?.textContent).toBe("@");
+    });
+  });
+
   // C7.2: Muted-events rendering.
   describe("muted-event rendering (C7.2)", () => {
     it("applies .scrollback-muted class to JOIN events", () => {

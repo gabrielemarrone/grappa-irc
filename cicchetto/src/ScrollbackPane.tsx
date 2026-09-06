@@ -82,7 +82,7 @@ import { SERVER_WINDOW_NAME, type WindowKind } from "./lib/windowKinds";
 import MessageContextMenu from "./MessageContextMenu";
 import { MircBody } from "./MircText";
 import NextActiveButton from "./NextActiveButton";
-import NickText from "./NickText";
+import NickText, { type PrefixGlyph } from "./NickText";
 import PeerAwayBanner from "./PeerAwayBanner";
 import UserContextMenu from "./UserContextMenu";
 import WhoisCard from "./WhoisCard";
@@ -718,9 +718,21 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
   // a row persisted before #25 landed) renders no glyph — never a
   // live-derived guess, which would reintroduce the bug.
   //
-  // Everything else — presence-row senders (join/part/quit/mode) and the
-  // kick TARGET — keeps the live members join: those describe a "now"
-  // event, not a frozen send, so the current grade is the correct glyph.
+  // #1950 narrowed what is left. The live members join used to cover every
+  // non-content row on the rationale that those describe a "now" event — but
+  // a scrollback row is never "now", it is a RECORD, and re-deriving the
+  // glyph at render time re-prefixed a nick's own history the moment they
+  // were opped. `join` was the plainest case (JOIN carries no grade on the
+  // wire at all, so `@nick has joined` cannot ever have been true) and the
+  // field report `* @ULIAK [...] has quit (...)` was the same defect on a
+  // `quit`. Those rows now go through `recordSenderSpan` and take no glyph;
+  // see its comment for the set and for what stays live.
+  //
+  // What still reads live here: `mode` (its subject IS the grade), the
+  // `server_event` / `renderRawEvent` senders (WALLOPS/GLOBOPS/KILL/CHGHOST/
+  // INVITE — server-scoped rows whose sender is usually not a channel member
+  // at all, left untouched by #1950), and `action`, which is a CONTENT kind
+  // and so takes the snapshot branch above.
   const prefixFor = (nick: string): "@" | "%" | "+" | "" => {
     if (!msg.channel) return "";
     const casemapping = casemappingForSlug(handlers.networkSlug);
@@ -754,20 +766,48 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
     </button>
   );
 
-  // Variant used by `renderRawEvent` (WALLOPS/GLOBOPS/KILL/CHGHOST/
-  // INVITE) — no surrounding brackets, just the colored nick. Kept as
-  // a separate closure so the bracket-vs-bare distinction is explicit
-  // at the call site (no magic-default-arg).
-  const bareSenderSpan = (nick: string): JSX.Element => (
+  // Bracket-less variant of `senderSpan` — just the colored nick. Kept as a
+  // separate closure so the bracket-vs-bare distinction is explicit at the
+  // call site (no magic-default-arg).
+  //
+  // #1950 split it in two along that same rule: the glyph is a PARAMETER of
+  // the shared button, never a default, so each call site has to say which
+  // reading of the grade it wants. One button definition, two named readings.
+  const bareSpanWithPrefix = (nick: string, prefix: PrefixGlyph): JSX.Element => (
     <button
       type="button"
       class="scrollback-sender scrollback-inline-button nick-clickable"
       onClick={() => handlers.onNickClick(nick)}
       onContextMenu={(e: MouseEvent) => handlers.onNickContextMenu(nick, e)}
     >
-      <NickText nick={nick} prefix={prefixFor(nick)} />
+      <NickText nick={nick} prefix={prefix} />
     </button>
   );
+
+  // LIVE reading — the sender's grade as of this render. Used by
+  // `renderRawEvent` (WALLOPS/GLOBOPS/KILL/CHGHOST/INVITE), `server_event`
+  // and `mode`; `action` routes here too and lands on the #25 snapshot
+  // branch inside `prefixFor` because it is a CONTENT kind.
+  const bareSenderSpan = (nick: string): JSX.Element => bareSpanWithPrefix(nick, prefixFor(nick));
+
+  // #1950 — RECORD reading: no glyph at all.
+  //
+  // A record row (join / part / quit / nick_change / topic / kick, sender
+  // AND kick victim) reports an event at an instant that has passed. Reading
+  // the members store there answers "what grade does this nick hold NOW",
+  // which is a different question and re-prefixes the row retroactively the
+  // moment the nick is opped — the bug #25 removed from content rows.
+  //
+  // And the answer is NOT a snapshot: for a `join` there is nothing to
+  // snapshot, since JOIN carries no grade on the wire (the `@` always
+  // arrives afterwards in a separate MODE, from a human op or ChanServ
+  // auto-op), and a kick victim is out of the channel by definition. Where
+  // the event has no grade, the correct glyph is none.
+  //
+  // `mode` deliberately keeps the live reading: a mode row's whole subject
+  // is the grade, so the sender's current status is the honest thing to show
+  // and there is no retroactivity to remove.
+  const recordSenderSpan = (nick: string): JSX.Element => bareSpanWithPrefix(nick, "");
 
   switch (msg.kind) {
     case "privmsg": {
@@ -919,7 +959,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
     case "join":
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)}
+          * {recordSenderSpan(msg.sender)}
           {userhostSuffix(msg)} has joined {msg.channel}
         </span>
       );
@@ -927,7 +967,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       const reason = reasonOf(msg);
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)}
+          * {recordSenderSpan(msg.sender)}
           {userhostSuffix(msg)} has left {msg.channel}
           {reasonSuffix(reason)}
         </span>
@@ -937,7 +977,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       const reason = reasonOf(msg);
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)}
+          * {recordSenderSpan(msg.sender)}
           {userhostSuffix(msg)} has quit{reasonSuffix(reason)}
         </span>
       );
@@ -946,7 +986,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       const newNick = typeof msg.meta.new_nick === "string" ? msg.meta.new_nick : "?";
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)} is now known as <NickText nick={newNick} />
+          * {recordSenderSpan(msg.sender)} is now known as <NickText nick={newNick} />
         </span>
       );
     }
@@ -989,12 +1029,13 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       // reached with an "undefined" to print.
       if (hasNoTopic(msg.body)) {
         return (
-          <span class="scrollback-body">* {bareSenderSpan(msg.sender)} cleared the topic</span>
+          <span class="scrollback-body">* {recordSenderSpan(msg.sender)} cleared the topic</span>
         );
       }
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)} changed topic: <MircBody body={msg.body ?? ""} emphasis />
+          * {recordSenderSpan(msg.sender)} changed topic:{" "}
+          <MircBody body={msg.body ?? ""} emphasis />
         </span>
       );
     case "kick": {
@@ -1002,8 +1043,8 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
       const reason = reasonOf(msg);
       return (
         <span class="scrollback-body">
-          * {bareSenderSpan(msg.sender)} kicked{" "}
-          <NickText nick={target} prefix={prefixFor(target)} /> from {msg.channel}
+          * {recordSenderSpan(msg.sender)} kicked <NickText nick={target} prefix="" /> from{" "}
+          {msg.channel}
           {reasonSuffix(reason)}
         </span>
       );

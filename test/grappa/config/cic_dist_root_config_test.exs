@@ -46,10 +46,17 @@ defmodule Grappa.Config.CicDistRootConfigTest do
     assert cic_dist_root(:dev) == "/app/cicchetto-dist"
   end
 
-  test "unset CIC_DIST_ROOT falls back to the CWD default under MIX_ENV=dev" do
+  test "unset CIC_DIST_ROOT derives nothing — config/config.exs keeps the root" do
+    # This assertion used to read `== "runtime/cicchetto-dist"`, and that
+    # relative literal was the #1945 defect: runtime.exs runs LAST, so it
+    # CLOBBERED the absolute build anchor `config/config.exs` computes with
+    # a path resolved against the BEAM's CWD — whatever the init system left
+    # us in. Unset now means "no opinion here"; the base config's absolute
+    # value stands, and `Grappa.Config.StorageRootsConfigTest` pins the
+    # composed result the two files produce together.
     System.delete_env("CIC_DIST_ROOT")
 
-    assert cic_dist_root(:dev) == "runtime/cicchetto-dist"
+    assert cic_dist_root(:dev) == nil
   end
 
   test "MIX_ENV=test is left to config/test.exs — runtime.exs must NOT set it" do

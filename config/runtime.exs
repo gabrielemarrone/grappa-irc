@@ -94,24 +94,83 @@ if phx_host do
   config :grappa, :http_host_aliases, http_host_aliases
 end
 
+# #1945 — every storage root this file derives resolves ABSOLUTELY, or it
+# is the operator's own path and says so out loud. NONE of them is left to
+# the BEAM's CWD.
+#
+# The CWD is not a value any operator sets or sees: it is whatever the init
+# system left the process in. The v1.5.0 cold deploy on the production jail
+# is what that cost — `rc.d/grappa` starts the release with
+# `su -m grappa -c '.../bin/grappa daemon'` and NO WorkingDirectory, so the
+# CWD is `/`, the unset PEER_AVATARS_STORAGE_ROOT default
+# `runtime/peer_avatars` resolved to `/runtime/peer_avatars`, and
+# `Grappa.Avatars.Reaper.init/1`'s `File.mkdir_p!` died of eacces INSIDE the
+# supervision tree. A boot crash, not a degraded feature.
+# `Grappa.Uploads.Reaper.init/1` carries the same bang and escaped only
+# because the jail's env file happens to set UPLOADS_STORAGE_ROOT.
+#
+# The second failure mode is quieter and worse: on the release image
+# `WORKDIR /app` is writable by the `grappa` user, so `mkdir_p!` SUCCEEDS
+# and the peer-avatar cache lands in the container LAYER, outside the
+# `/data` volume, where the documented `pull` + `up -d` upgrade discards it.
+# A crash at least tells you.
+#
+# So an UNSET root takes an absolute default (see each site below), and an
+# empty value counts as unset — `System.get_env(x) || default` used to keep
+# `""`, because the empty string is truthy, and `File.mkdir_p!("")` is not a
+# directory. A value the operator DID set is kept verbatim: a relative one
+# under Docker's `WORKDIR /app` is a working configuration `.env.example`
+# shipped for a year, and re-anchoring it would silently relocate an
+# existing uploads directory. In prod it earns a warning naming the CWD it
+# will be read against — same belt-and-braces posture as the captcha
+# warning further down — so the resolution stops being invisible.
+storage_root = fn var, value, default ->
+  case value do
+    unset when unset in [nil, ""] ->
+      default
+
+    root ->
+      if config_env() == :prod and Path.type(root) != :absolute do
+        require Logger
+
+        Logger.warning(
+          "#{var} is set to a RELATIVE path (#{inspect(root)}) — it resolves against the " <>
+            "BEAM's current working directory (#{File.cwd!()}), which the init system chooses, " <>
+            "not the operator. Set it to an absolute path."
+        )
+      end
+
+      root
+  end
+end
+
 # #399 / #485 — the built cicchetto SPA dist the embedded web server
 # self-serves (Plug.Static + SPA history-fallback) AND re-reads to
 # broadcast the refresh-banner hash (Grappa.Cic.Bundle). Stashed into
 # `:persistent_term` via Grappa.Cic.Bundle.boot/1 at app start (boot
 # time only — a change needs a BEAM restart, not a hot reload).
-# Defaults to the `runtime/cicchetto-dist` build anchor, resolved against
-# the BEAM's CWD (like UPLOADS_STORAGE_ROOT below). That relative default
-# is ONLY correct where the CWD is the repo root: Docker (WORKDIR /app,
-# and compose sets CIC_DIST_ROOT explicitly anyway) and native systemd
-# (WorkingDirectory=<repo>). The FreeBSD jail is the exception (#526) —
-# rc.d/grappa starts the release via `su -m grappa -c '.../bin/grappa
-# daemon'` and sets NO WorkingDirectory, so the CWD is NOT the repo root;
-# the jail MUST set an absolute CIC_DIST_ROOT in grappa.env (exactly like
-# it already does for DATABASE_PATH / UPLOADS_STORAGE_ROOT for the same
-# reason). Unset on the jail, the relative default missed the dist and
-# /admin/cic-bundle-changed returned 204 with no banner broadcast —
-# issue #526. A packaged install (deb/rpm/Arch) likewise sets
-# CIC_DIST_ROOT to an absolute data path.
+#
+# UNSET, this derives NOTHING and leaves `config/config.exs`'s
+# `Path.expand("../runtime/cicchetto-dist", __DIR__)` standing (#1945).
+# That is the whole no-clobber arm: the dist is CODE, not data, so it gets
+# no DATABASE_PATH anchor like the two roots below — a packaged install
+# puts it in /usr/share/grappa while the DB is in /var/lib/grappa — and it
+# does not need one, because the base config already computes an ABSOLUTE
+# path. What this block used to do was overwrite that absolute anchor with
+# the relative literal `runtime/cicchetto-dist`, in every env except :test,
+# making the effective default strictly worse than the one it replaced.
+# The build anchor is a BUILD-TIME expansion, so it is right exactly where
+# the release is built in place (the jail's `mix release --overwrite` in
+# /home/grappa/grappa, native systemd, Docker) and irrelevant elsewhere,
+# since every cross-built package sets CIC_DIST_ROOT explicitly.
+#
+# The FreeBSD jail is what made this concrete (#526) — rc.d/grappa starts
+# the release via `su -m grappa -c '.../bin/grappa daemon'` and sets NO
+# WorkingDirectory, so the CWD is NOT the repo root; unset, the relative
+# default missed the dist and /admin/cic-bundle-changed returned 204 with
+# no banner broadcast. An absolute CIC_DIST_ROOT in grappa.env is still the
+# explicit cure and still documented; it is no longer the only thing
+# between that deployment and a silent 404.
 #
 # Broadened from prod-only (its #399 origin) to every env EXCEPT :test so
 # the e2e harness serves the SPA too: #485 made the e2e nginx a DUMB proxy,
@@ -128,10 +187,15 @@ end
 # it here would clobber the fixture and SpaServingTest would serve an empty
 # dist (the 7-failure regression this exclusion prevents).
 if config_env() != :test do
-  cic_dist_root =
-    System.get_env("CIC_DIST_ROOT") || "runtime/cicchetto-dist"
-
-  config :grappa, :cic_dist_root, cic_dist_root
+  # `nil` default = "there is no default HERE" — config/config.exs owns it.
+  # The var name is written twice on purpose: the second read is the literal
+  # `test/grappa/config/env_registry_drift_test.exs` derives the registry
+  # from, so hiding it inside the closure would drop the var out of the
+  # registry and read as a dead knob in compose.yaml.
+  case storage_root.("CIC_DIST_ROOT", System.get_env("CIC_DIST_ROOT"), nil) do
+    nil -> :ok
+    cic_dist_root -> config :grappa, :cic_dist_root, cic_dist_root
+  end
 end
 
 if config_env() == :prod do
@@ -139,12 +203,55 @@ if config_env() == :prod do
     System.get_env("DATABASE_PATH") ||
       raise "environment variable DATABASE_PATH is missing"
 
+  # #1945 — the deployment's DATA root, and the anchor every storage default
+  # below hangs off: the directory the sqlite database lives in. It is the
+  # one absolute path prod already mandates, and it is what those defaults
+  # always MEANT — `runtime/uploads` was documented as "the sibling of the
+  # sqlite DB", which is exactly this, without borrowing the CWD to say it.
+  #
+  # Measured against every substrate that ships, the derived default equals
+  # the value already in force wherever the old one worked, and differs only
+  # where it was broken: compose.yaml (`/app/runtime/grappa_<env>.db` →
+  # `/app/runtime/uploads` + `/app/runtime/peer_avatars`, both byte-identical
+  # to its own `:-` fallbacks) and the release image (`/data/grappa.db` →
+  # `/data/uploads`, byte-identical to the ENV it bakes) are unmoved;
+  # `base/deployment.yaml` sets `/data/peer_avatars` BY HAND to dodge the
+  # ephemeral relative default, and that hand-written value is what this
+  # computes. Pinned by test/grappa/config/storage_roots_config_test.exs so
+  # a future divergence is a red gate, not a surprise on someone's volume.
+  #
+  # A relative DATABASE_PATH would make the anchor relative too, so it is
+  # refused rather than propagated: such a deployment is CWD-bound end to
+  # end (`Grappa.Repo.init/2` mkdir_p's this same dirname), and no shipped
+  # template writes one. This is the explanatory error the eacces was not.
+  data_root =
+    case Path.type(database_path) do
+      :absolute ->
+        Path.dirname(database_path)
+
+      _ ->
+        raise """
+        environment variable DATABASE_PATH is set to a RELATIVE path: #{inspect(database_path)}
+
+        It is resolved against the BEAM's current working directory
+        (#{File.cwd!()}), which the init system chooses — the FreeBSD rc.d
+        script starts the release with no `cd` at all — and it anchors the
+        uploads and peer-avatar directories as well as the database itself.
+
+        Set DATABASE_PATH to an absolute path (e.g. /var/lib/grappa/grappa.db).
+        """
+    end
+
   # UX-6-B1 (2026-05-20): embedded image uploader storage dir. Read
   # at boot, stashed in :persistent_term via Grappa.Uploads.boot/1.
-  # Defaults to `runtime/uploads` (the sibling of the sqlite DB) so
-  # the existing bind-mount covers it without a compose.yaml edit.
+  # Defaults to the sibling of the sqlite DB, so the existing bind-mount
+  # (or /data volume) covers it without a compose.yaml edit.
   uploads_storage_root =
-    System.get_env("UPLOADS_STORAGE_ROOT") || "runtime/uploads"
+    storage_root.(
+      "UPLOADS_STORAGE_ROOT",
+      System.get_env("UPLOADS_STORAGE_ROOT"),
+      Path.join(data_root, "uploads")
+    )
 
   config :grappa, :uploads_storage_root, uploads_storage_root
 
@@ -174,9 +281,15 @@ if config_env() == :prod do
   # M3b — cached peer CTCP AVATAR images. Read at boot, stashed in
   # :persistent_term via Grappa.Avatars.boot/1. Sibling of the uploads
   # dir, its own subdirectory (a separate trust domain — see
-  # `Grappa.Avatars` moduledoc).
+  # `Grappa.Avatars` moduledoc). THE #1945 root: this is the one no
+  # substrate set, so it is the one that ate the jail's boot and the
+  # release image's avatar cache.
   peer_avatars_storage_root =
-    System.get_env("PEER_AVATARS_STORAGE_ROOT") || "runtime/peer_avatars"
+    storage_root.(
+      "PEER_AVATARS_STORAGE_ROOT",
+      System.get_env("PEER_AVATARS_STORAGE_ROOT"),
+      Path.join(data_root, "peer_avatars")
+    )
 
   config :grappa, :peer_avatars_storage_root, peer_avatars_storage_root
 

@@ -9,9 +9,13 @@ config :grappa,
 # hash/version live-read both resolve against this ONE root, so the
 # embedded web server self-serves the frontend (a plain
 # `bin/grappa start` works without nginx). Base default is the
-# `runtime/cicchetto-dist` build anchor (dev inherits); `config/test.exs`
-# points at a committed fixture bundle; `config/runtime.exs` (prod) reads
-# `CIC_DIST_ROOT` so a packaged install (deb/rpm/Arch) can relocate it.
+# `runtime/cicchetto-dist` build anchor, EXPANDED ABSOLUTE against this
+# file's directory (dev inherits); `config/test.exs` points at a committed
+# fixture bundle; `config/runtime.exs` reads `CIC_DIST_ROOT` so a packaged
+# install (deb/rpm/Arch) can relocate it — and since #1945 it overrides this
+# value ONLY when that variable is set, because an unset root used to be
+# clobbered with a CWD-relative literal, which is strictly worse than the
+# absolute path on this line.
 # Read ONCE at boot into `:persistent_term` via `Grappa.Cic.Bundle.boot/1`.
 config :grappa, :cic_dist_root, Path.expand("../runtime/cicchetto-dist", __DIR__)
 

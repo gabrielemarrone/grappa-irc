@@ -26,12 +26,19 @@ GRAPPA_MAX_PROCS=$((GRAPPA_MAX_USERS * 100))
 ERL_ZFLAGS="${ERL_ZFLAGS:+$ERL_ZFLAGS }+Q ${GRAPPA_MAX_PORTS} +P ${GRAPPA_MAX_PROCS} +SDcpu ${GRAPPA_DIRTY_SCHEDULERS} +SDio ${GRAPPA_DIRTY_SCHEDULERS}"
 export ERL_ZFLAGS
 
-# The sqlite DB parent + the uploads dir must exist and be writable before boot
-# — exqlite opens but does NOT create the parent dir. A root-owned bind mount
-# is the operator's to chown; failing loud here beats a cryptic "unable to open
-# database file" at first write.
+# The sqlite DB parent + the two data roots must exist and be writable before
+# boot — exqlite opens but does NOT create the parent dir. A root-owned bind
+# mount is the operator's to chown; failing loud here beats a cryptic "unable
+# to open database file" at first write.
+#
+# The peer-avatar root joined this list with #1945: its fallback mirrors the
+# one config/runtime.exs derives (the sibling of the database), so the shell
+# and the BEAM cannot disagree about where the third root is when the var is
+# unset.
 data_dir="$(dirname "${DATABASE_PATH:-/data/grappa.db}")"
-mkdir -p "$data_dir" "${UPLOADS_STORAGE_ROOT:-/data/uploads}"
+mkdir -p "$data_dir" \
+    "${UPLOADS_STORAGE_ROOT:-/data/uploads}" \
+    "${PEER_AVATARS_STORAGE_ROOT:-$data_dir/peer_avatars}"
 
 # ── First-boot secret bootstrap (#862) ──────────────────────────────────────
 #

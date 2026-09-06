@@ -205,8 +205,19 @@ RUN chmod 0755 /app/release-entrypoint.sh /app/gen-secrets.sh
 # (#862), and anything the operator supplies wins and is never overwritten.
 # PHX_HOST is the one exception: it cannot be invented, so a bare
 # `docker run` still RAISES in config/runtime.exs for that alone.
+#
+# PEER_AVATARS_STORAGE_ROOT is named here as of #1945, and it is a data
+# root like UPLOADS_STORAGE_ROOT above: unset, the cache used to land in
+# `/app/runtime/peer_avatars` — inside the container LAYER, outside this
+# image's only volume — so the documented `pull` + `up -d` upgrade threw it
+# away on every release. `config/runtime.exs` now derives exactly this path
+# from DATABASE_PATH when the var is absent, so the line is belt to that
+# braces; it is here because an operator reading `docker image inspect`
+# should see where the third root goes, next to the other two, rather than
+# having to know the derivation.
 ENV DATABASE_PATH=/data/grappa.db \
     UPLOADS_STORAGE_ROOT=/data/uploads \
+    PEER_AVATARS_STORAGE_ROOT=/data/peer_avatars \
     CIC_DIST_ROOT=/app/cicchetto-dist \
     GRAPPA_SUBSTRATE=docker \
     PORT=4000

@@ -43,6 +43,18 @@ const BAHAMUT_COW = [
   "                ||     ||",
 ].join("\n");
 
+/**
+ * What OUR cow says, dictated by vjt on #grappa (2026-09-06 09:28) verbatim
+ * and lowercase, broken across two lines where he broke it.
+ *
+ * Written out again here rather than imported from `creditsBlock.ts`: an
+ * import would compare the shipped words to themselves and pass whatever they
+ * became. This is the second copy that makes the pin a pin — and it is also
+ * what tells the geometry assertions how many lines to expect, so a third line
+ * added to the cow lands as a RED here and nowhere else.
+ */
+const SAID: readonly string[] = ["this grappa server", "has super cow powers"];
+
 const lines = (): readonly string[] => CREDITS_COW.split("\n");
 
 describe("the cowsay (#1929 — bahamut's cow, speaking for grappa)", () => {
@@ -64,35 +76,51 @@ describe("the cowsay (#1929 — bahamut's cow, speaking for grappa)", () => {
   });
 
   it("speaks for grappa, and no longer for bahamut", () => {
-    expect(CREDITS_COW).toContain("This grappa has Super Cow Powers !");
+    // vjt dictated these two lines on #grappa (2026-09-06 09:28), lowercase
+    // and broken where he broke them. Pinned as two separate `toContain`s
+    // rather than one joined string: the padding between the text and the
+    // right-hand wall is computed, so a joined literal would be pinning the
+    // BALLOON's arithmetic here as well, in the test that exists to pin the
+    // WORDS. The geometry has its own assertions below.
+    for (const line of SAID) {
+      expect(CREDITS_COW).toContain(line);
+    }
     expect(CREDITS_COW).not.toContain("bahamut");
   });
 
   it("keeps the balloon square around whatever the cow says", () => {
-    // The three balloon lines must be the same width or the box is visibly
-    // broken. This is the assertion that makes editing the text safe: change
-    // the sentence and the rules follow, because they are measured from it.
-    const [top, said, bottom] = lines();
-    expect(top).toBeDefined();
-    expect(said).toBeDefined();
-    expect(bottom).toBeDefined();
-    expect(top?.length).toBe(said?.length);
-    expect(bottom?.length).toBe(said?.length);
+    // Every balloon line must be the same width or the box is visibly broken.
+    // This is the assertion that makes editing the text safe: change the
+    // sentence and the rules follow, because they are measured from it.
+    //
+    // Counted off the RULES rather than hard-coded at three or four lines, so
+    // that it keeps holding when the cow is given a third thing to say.
+    const balloon = lines().slice(0, 1 + SAID.length + 1);
+    expect(balloon.length).toBeGreaterThanOrEqual(4);
+    for (const line of balloon) {
+      expect(line.length).toBe(balloon[0]?.length);
+    }
   });
 
-  it("draws the balloon the way cowsay does, one line and no wrap", () => {
-    const [top, said, bottom] = lines();
-    // Bahamut's own shape: a space-flanked rule of underscores, the text
-    // between `< ` and ` >`, a space-flanked rule of dashes.
+  it("draws the balloon the way cowsay does, with shoulders once it wraps", () => {
+    // Two lines or more is cowsay's BOX shape, not bahamut's `< >` one: rules
+    // top and bottom, `/ \` on the first line, `\ /` on the last. The single
+    // line keeps the angle brackets, and the test above proves it by rebuilding
+    // bahamut's own cow byte-for-byte — these two shapes are separate on
+    // purpose, and collapsing them would break that reference.
+    const [top, ...rest] = lines();
+    const walls = rest.slice(0, SAID.length);
+    const bottom = rest[SAID.length];
     expect(top).toMatch(/^ _+ $/);
     expect(bottom).toMatch(/^ -+ $/);
-    expect(said).toMatch(/^< .* >$/);
+    expect(walls[0]).toMatch(/^\/ .* \\$/);
+    expect(walls[walls.length - 1]).toMatch(/^\\ .* \/$/);
   });
 
   it("is a `pre` block's worth of lines, not a paragraph", () => {
-    // Three balloon lines plus five body lines. A cow that lost a line still
-    // renders, which is why the count is pinned and not inferred.
-    expect(lines()).toHaveLength(8);
+    // Two rules, one wall line per line spoken, five body lines. A cow that
+    // lost a line still renders, which is why the count is pinned.
+    expect(lines()).toHaveLength(2 + SAID.length + 5);
   });
 });
 

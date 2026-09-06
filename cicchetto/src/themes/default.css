@@ -14480,7 +14480,30 @@ audio.media-viewer-media {
   position: fixed;
   inset: 0;
   z-index: 1000;
-  overflow: hidden;
+  /* #1934 — `clip`, and `hidden` only as the fallback under it. vjt: "il
+     touchdown non dovrebbe toccare per niente lo scrolltop".
+
+     Measured off his second recording, frame by frame at 60fps: at t=2.750s
+     the ENTIRE frame moves down by exactly 178px in a single frame — a
+     cross-correlation of the two frames either side puts the shift at -178
+     and the residual at zero, so it is the whole overlay's content, not the
+     roll's own animation, which never steps.
+
+     `overflow: hidden` still makes this element a SCROLL CONTAINER, and
+     `.credits-roll` is absolutely positioned and translated a full viewport
+     below the fold, so there is real scrollable overflow underneath. A
+     container like that has a `scrollTop` the page never asked for and never
+     set — and a touch is exactly what makes an engine reconcile it, scrolling
+     the box back to reveal what it thinks should be visible. 178px of jump is
+     that reconciliation.
+
+     `overflow: clip` clips identically but does NOT create a scroll
+     container: there is no `scrollTop` to reset, so the class of bug is gone
+     rather than papered over. No `hidden` fallback under it: at our
+     browserslist targets the minifier collapses the pair to `clip` alone, so
+     the fallback never reaches a browser and only trips
+     `noDuplicateProperties`. */
+  overflow: clip;
   background: #000;
   color: var(--fg);
   font-family: var(--font-mono);
@@ -14521,7 +14544,20 @@ audio.media-viewer-media {
   top: max(0.5rem, var(--safe-area-inset-top));
   right: max(0.5rem, var(--safe-area-inset-right));
   display: flex;
+  align-items: center;
   gap: 0.25rem;
+}
+
+/* #1934 — the playing movement's name, next to the speaker. Muted, so it does
+   not compete with the titles: it exists to be READ when someone wants to
+   report what the music just did, not to be watched. */
+.credits-movement {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  pointer-events: none;
 }
 
 /* The window the titles travel through. Masked top and bottom so they fade
@@ -14530,16 +14566,50 @@ audio.media-viewer-media {
   position: absolute;
   inset: 0;
   z-index: 1;
-  overflow: hidden;
+  /* #1934 — `clip`, `hidden` only as the fallback under it, and THIS is the
+     element that matters for the touch-scroll bug rather than `.credits-modal`
+     one level up. `.credits-roll` is `position: absolute`, so its containing
+     block is the nearest positioned ancestor — this one — and the overflow it
+     produces belongs to THIS box's scroll container, not the modal's.
+
+     vjt after the first attempt: "il bug c'è ancora, e lo scroll aumenta con
+     il passare del tempo. facendo touchdown subito scrolla di poco, dopo un
+     po' di paragrafi scrolla di più." The growth is the tell that this is
+     still overflow and not a gesture: the amount a box can be scrolled by is
+     the amount its content sticks out, the roll's height is the height of
+     whichever prose set is loaded, and the sets get longer down the deck (the
+     manifesto, last but one, is several times any of them). Same class of bug,
+     one level down, so `overflow: clip` has to be here too — it clips
+     identically but does NOT create a scroll container, so no `scrollTop`
+     exists for a touch to reconcile.
+
+     The two rules that deliberately DO scroll (`prefers-reduced-motion` and
+     `.credits-viewport-ended`) re-declare `overflow-x: hidden` alongside their
+     `overflow-y: auto`, because `clip` on one axis with `auto` on the other is
+     not a pairing worth relying on. */
+  overflow: clip;
   pointer-events: none;
+  /* #1934 — the fade band as ONE number, because JS reads it too.
+     `creditsRain.rollIsClear` needs to know where the titles stop being
+     visible, and the answer is this band: a line inside it is already
+     transparent, so the roll is gone from the reader's point of view a good
+     couple of seconds before it finishes travelling. A literal `12%` in the
+     TypeScript would be a second copy of a number that lives here. */
+  --credits-mask-fade: 12%;
   -webkit-mask-image: linear-gradient(
     to bottom,
     transparent 0,
-    #000 12%,
-    #000 88%,
+    #000 var(--credits-mask-fade),
+    #000 calc(100% - var(--credits-mask-fade)),
     transparent 100%
   );
-  mask-image: linear-gradient(to bottom, transparent 0, #000 12%, #000 88%, transparent 100%);
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--credits-mask-fade),
+    #000 calc(100% - var(--credits-mask-fade)),
+    transparent 100%
+  );
 }
 
 .credits-roll {
@@ -14552,7 +14622,16 @@ audio.media-viewer-media {
      PARKED off the top. That tail is the interlude of pure rain the issue
      asked for.
 
-     #1920 note on SPEED: the cycle is still 34s, but the entrance now starts a
+     #1934 retimed BOTH halves at once, because they are one number: vjt read
+     the roll as "scorre troppo velocemente, mentre gli intermezzi durano
+     troppo tempo". 36s x 0.91 = 32.76s of travel over the same distance the
+     old 27.88s covered, i.e. the titles now move at 0.851 of the old speed —
+     the 85% he asked for. The remainder is 3.24s of parked rain instead of
+     6.12s, so slowing the reading down did not also double the wait. Cycle and
+     park offset must move together: keeping 34s and raising the offset would
+     have bought the slower scroll by deleting the interlude entirely.
+
+     #1920 note on SPEED: the entrance starts a
      viewport away rather than a roll-height away, so the distance covered in
      those 27.88s grew and the titles travel faster than they did. That is the
      cost of entering from the bottom on a short roll and it is accepted, not
@@ -14562,9 +14641,9 @@ audio.media-viewer-media {
 
      Lengthening the cycle rather than adding a JS pause is what keeps the
      frame budget at zero AND keeps one clock: `creditsRain.rollIsParked`
-     reads the phase of THIS animation, and takes the 0.82 off its own
+     reads the phase of THIS animation, and takes the park offset off its own
      keyframes, so retiming the roll needs no edit anywhere else. */
-  animation: credits-roll 34s linear infinite;
+  animation: credits-roll 36s linear infinite;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -14572,10 +14651,28 @@ audio.media-viewer-media {
   padding: 0 1.5rem;
   text-align: center;
   text-shadow: 0 0 0.5rem var(--accent);
+  /* #1934 — vjt: "il font è troppo piccolo". Set HERE rather than on
+     `.credits-modal` so it scales the roll and nothing else in the overlay:
+     every size inside is an `em`, so one number moves the whole column and the
+     `ch`/`vw` measures keep capping the line length as before. */
+  font-size: 1.15em;
+}
+
+/* #1934 — hold to read. vjt: "ontouchdown lo scroll si stoppa così se qualcuno
+   vuol leggere e non ha finito può farlo". `animation-play-state` and NOT a JS
+   pause: pausing the animation freezes the one clock everything else reads, so
+   `creditsRain` keeps agreeing with the roll and the paragraph turn still lands
+   on `animationiteration`. A JS timer would have to be paused in step with it,
+   which is the second clock this file keeps refusing to grow.
+   The fade rides along: pausing the roll without it would dissolve the block
+   while it sits still. */
+.credits-modal-held .credits-roll,
+.credits-modal-held .credits-block-fading {
+  animation-play-state: paused;
 }
 
 /* The last two stops carry the SAME transform on purpose: that hold is the
-   interlude, and its start (82%) is the only place the number lives. The roll
+   interlude, and its start (91%) is the only place the number lives. The roll
    re-enters from the bottom afterwards, which is the same entrance as the
    first pass rather than a resume mid-list.
 
@@ -14600,11 +14697,11 @@ audio.media-viewer-media {
   0% {
     transform: translateY(100dvh);
   }
-  82% {
-    transform: translateY(-100%);
+  91% {
+    transform: translateY(calc(-1 * var(--credits-roll-h, 100%)));
   }
   100% {
-    transform: translateY(-100%);
+    transform: translateY(calc(-1 * var(--credits-roll-h, 100%)));
   }
 }
 
@@ -14616,11 +14713,11 @@ audio.media-viewer-media {
     0% {
       transform: translateY(100vh);
     }
-    82% {
-      transform: translateY(-100%);
+    91% {
+      transform: translateY(calc(-1 * var(--credits-roll-h, 100%)));
     }
     100% {
-      transform: translateY(-100%);
+      transform: translateY(calc(-1 * var(--credits-roll-h, 100%)));
     }
   }
 }
@@ -14633,7 +14730,7 @@ audio.media-viewer-media {
    exists only to carry an animation, and a second copy of the roll's column
    metrics would be a number to keep in step for nothing.
 
-   ONE CLOCK, still. The fade is a CSS animation on the same 34s as the roll
+   ONE CLOCK, still. The fade is a CSS animation on the same 36s as the roll
    and starting with it, so it cannot drift from the travel it is timed
    against — a JS `setTimeout` at "about thirty seconds" would be a second
    clock, and it would disagree in the case that always breaks these: a
@@ -14656,29 +14753,63 @@ audio.media-viewer-media {
    said without a second box.
 
    It also keeps `creditsRain.blockIsFading` honest for free — the finale's
-   block has no animation on it at all, so the reader has nothing to misread. */
+   block carries the fade-IN below and nothing else, and that one answers
+   "not fading" by construction. */
 .credits-block-fading {
-  animation: credits-block-fade 34s linear 1 forwards;
+  animation: credits-block-fade 36s linear 1 forwards;
 }
 
-/* The fade REACHES ZERO at 82%, which is the offset `@keyframes credits-roll`
+/* The way BACK in, which is the other half of the same idea (vjt, #grappa
+   11:26: "alla chiusura i credit dovrebbero riapparire fade in e non
+   tutt'una volta"). The block is re-mounted for the finale, so without this it
+   arrives at full opacity in a single frame — a cut, against an ending that is
+   otherwise all slow motion.
+
+   Its first keyframe is TRANSPARENT, and that is load-bearing rather than
+   incidental: `creditsRain.fadeOffset` walks the keyframes for the last stop
+   that is still fully opaque and gives up at the first one that is not, so a
+   fade-IN answers `null` and `blockIsFading` stays false for its whole run.
+   The rain must not surge merely because the ending is arriving. */
+.credits-block-returning {
+  animation: credits-block-return 1.6s ease-out 1 both;
+}
+
+@keyframes credits-block-return {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* The fade REACHES ZERO at 91%, which is the offset `@keyframes credits-roll`
    parks at — the block finishes dissolving exactly as it finishes leaving, so
    the interlude that follows is pure rain with nothing half-visible in it.
    Those two numbers must agree, and `creditsRain.test.ts` reads both out of
    this stylesheet and fails if they ever stop agreeing.
 
-   The 70% start is the only number here that is its own: it buys ~4s of
-   dissolve, which is long enough to read as a fade rather than as a cut.
+   The START is 90%, and it is vjt's number (#grappa 11:00, "sfuma al 90%").
+   It was 80%, which bought ~4s of dissolve and read as a fade rather than a
+   cut — but a fade is only worth its seconds while there is something on
+   screen to dissolve, and at 80% of the travel the block's bottom edge is
+   still 0.121 × (roll height + viewport) BELOW the top, i.e. an eighth of the
+   run still visible and already dimming. That is what vjt reported at 10:56,
+   "il testo fa fadeout prima di scrollare tutto su", and no cycle length
+   fixes it: the fraction is geometry, identical on every screen. At 90% the
+   remainder is 0.011 of the run — around twenty pixels — so the list is read
+   to its last line at full opacity and the dissolve happens on its way out.
    `creditsRain` reads it back off these keyframes instead of copying it, so
    retiming the dissolve moves the rain's surge with it. */
 @keyframes credits-block-fade {
   0% {
     opacity: 1;
   }
-  70% {
+  90% {
     opacity: 1;
   }
-  82% {
+  91% {
     opacity: 0;
   }
   100% {
@@ -14712,8 +14843,16 @@ audio.media-viewer-media {
   color: var(--muted);
 }
 
+/* #1934 — the gap under the names is 3rem and not the 1.5rem the rest of the
+   roll uses. vjt, on the deployed roll: "serve piu spazio tra credits e cowsay
+   e special thanks". The three are different KINDS of thing — a table of
+   contributors, a piece of ASCII art, a list of thanks — and at 1.5rem, with
+   the roll's font now 15% bigger, they read as one column of text with an
+   accident in the middle. The cow carries the same 3rem below it, so the two
+   separations are equal and the cow reads as standing apart from both
+   neighbours rather than as belonging to one of them. */
 .credits-list {
-  margin: 0 0 1.5rem;
+  margin: 0 0 3rem;
   padding: 0;
   list-style: none;
   display: flex;
@@ -14722,13 +14861,36 @@ audio.media-viewer-media {
   min-width: min(20rem, 80vw);
 }
 
+/* #1934 — the row has to survive a handle that no longer fits on one line.
+   vjt's screenshot with the OS font scaled up has "Hypnotize (Alessio
+   Bonforti)" wrapping, and the wrap is where the row fell apart twice over:
+   the continuation was CENTRED (the roll centres everything, and nothing here
+   said otherwise), so the second line floated free of the nick above it; and
+   the count, as a stretched flex item, sat level with the top of a two-line
+   name instead of level with the name itself.
+
+   `baseline` fixes the second: the number sits on the FIRST line's baseline,
+   which is the line its handle is on. `text-align: left` on the name fixes the
+   first — a wrapped name now hangs under its own start, so the column of
+   handles stays a column. `min-width: 0` is the flexbox part people forget: a
+   flex item's floor is its content size, so without it a long name pushes the
+   row wider instead of wrapping inside it. */
 .credits-person {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 1.5rem;
 }
 
+.credits-person-name {
+  text-align: left;
+  min-width: 0;
+}
+
 .credits-person-count {
+  /* Never the item that gives way: a commit count broken across two lines is
+     unreadable, and it is the shorter of the two by far. */
+  flex: none;
   color: var(--muted);
 }
 
@@ -14759,22 +14921,60 @@ audio.media-viewer-media {
 
 /* #1929 — bahamut's Super Cow, reused verbatim (see `creditsBlock.ts`).
 
-   `pre`, not `pre-wrap`: this is 38 columns of fixed-width art, and wrapping
-   it does not degrade it, it destroys it. So the art never wraps and the FONT
-   gives way instead — `min()` caps the size at 0.8em on anything roomy and
-   scales it down by viewport below that, which is what keeps the cow whole on
-   a 320px phone where 38 columns at 0.8em would not fit.
+   `pre`, not `pre-wrap`: this is fixed-width art, and wrapping it does not
+   degrade it, it destroys it. So the art never wraps and the FONT gives way
+   instead — `min()` caps the size on anything roomy and scales it down by
+   viewport below that, which is what keeps the cow whole on a 320px phone.
 
-   ⚠️ Sized by arithmetic (38 columns x ~0.6em advance against the 88vw the
-   rest of the roll keeps for itself), NOT verified on a real handset — this
-   session has no device and no browser to launch one in. */
+   #1934 — vjt: "il font è troppo piccolo, specialmente quello del cowsay". The
+   cow was the one line in the roll that shrank instead of growing, because
+   `0.8em` of a bigger `em` is still below the body text. Both halves of the
+   `min()` moved: 1.1em on anything roomy, and the viewport cap up to 4.8vw.
+
+   4.8vw is not a taste call, it is what the SHORTER balloon bought. Breaking
+   the sentence in two (see `creditsBlock.ts`) took the widest line of the
+   block from the balloon's 38 columns down to the cow body's 28, and 28
+   columns is what the cap has to fit now: 28 x ~0.6em x 4.8vw = 80.6vw against
+   the 88vw the roll leaves, i.e. 302px of 330px at 375px wide. Held at 3.4vw
+   the art would have kept the small type after losing the reason for it.
+
+   ⚠️ Still arithmetic, not a handset: this session has no device to check it
+   on, and the ~0.6em advance is the monospace stack's nominal one. */
+/* #1934 — THE HEAD BUG, and it is not the art. vjt: "la testa della mucca è
+   ancora rotta", with a screenshot in which `(__)` sits two columns left of
+   the `(oo)` it has to sit under.
+
+   Measured off that screenshot rather than guessed. Taking the character
+   advance from the one row whose columns are known-good (33.3px, from the
+   `\`-to-`(` span on the muzzle row) and solving for each row's left edge:
+   every row is offset by exactly (28 - its own length) / 2 columns. That is
+   not a drift, it is CENTRING, per line.
+
+   `.credits-roll` sets `text-align: center` and it INHERITS in here. Under
+   `white-space: pre` the lines do not wrap, so nothing collapses and the art
+   looks almost right — but each line is still centred inside the block, and a
+   block of ASCII whose rows are 16, 24, 28, 25 and 25 columns wide gets five
+   different indents. The cow is line drawing: its rows mean something only in
+   the columns they were drawn in, so the ONE thing this element must not
+   inherit is a horizontal alignment.
+
+   The block stays centred on the page — that is `align-items: center` on the
+   roll, acting on this element's box, which is a different mechanism and the
+   one actually wanted. */
 .credits-cow {
-  margin: 0 0 1.5rem;
+  margin: 0 0 3rem;
   font-family: var(--font-mono);
-  font-size: min(0.8em, 3vw);
+  font-size: min(1.1em, 4.8vw);
   line-height: 1.15;
   white-space: pre;
-  color: var(--muted);
+  text-align: left;
+  /* #1934 — `--fg`, not `--muted`. vjt's screenshot has the cow dissolving into
+     the rain: 38 columns of thin strokes at `--muted` against a 0.85-opacity
+     screen-blended canvas is the one block in the roll with no glow to hold it
+     off the background. Brightness is the fix that does not cost the art —
+     `text-shadow` STAYS off, because a glow on fixed-width line drawing fills
+     the gaps between the strokes and turns the cow into a smudge. */
+  color: var(--fg);
   text-shadow: none;
 }
 
@@ -14857,6 +15057,7 @@ audio.media-viewer-media {
    that reads top to bottom, and the mask goes with the animation it framed. */
 @media (prefers-reduced-motion: reduce) {
   .credits-viewport {
+    overflow-x: hidden;
     overflow-y: auto;
     pointer-events: auto;
     -webkit-mask-image: none;
@@ -14899,6 +15100,7 @@ audio.media-viewer-media {
    `creditsFinaleCss.test.ts` pins that the pair agrees rather than a comment
    asking the next reader to keep them in step. */
 .credits-viewport-ended {
+  overflow-x: hidden;
   overflow-y: auto;
   pointer-events: auto;
   -webkit-mask-image: none;

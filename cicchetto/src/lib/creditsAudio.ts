@@ -44,10 +44,13 @@
 //    its own pulse WIDTH, its own drum pattern, and its own second-channel
 //    duty (a harmony line, an arpeggio, or nothing). Adding a movement is
 //    adding an entry to that array.
-//  - The movement is chosen by `movementAt()`, which the modal wires to the
-//    roll's own animation (`creditsRoll.creditsRollPass`) — ONE CLOCK, the
-//    same doctrine `creditsRain.rollIsParked` follows. The switch lands on a
-//    BAR boundary because the pump only ever arms whole bars.
+//  - The movement is chosen by `movementAt()`, which the modal wires to its
+//    count of the roll's `animationiteration` events — the roll's own clock,
+//    the same doctrine `creditsRain.rollIsParked` follows. It USED to read
+//    `currentIteration` off the animation; that broke once the roll had to be
+//    restarted every turn to re-resolve its keyframes, which zeroes the count
+//    (see `CreditsModal.rollPass`). The switch lands on a BAR boundary
+//    because the pump only ever arms whole bars.
 //  - The channel model is now the four an NES actually has: two pulses, one
 //    triangle, one noise. That constraint is the reason `harmony` and `arp`
 //    are mutually exclusive per movement rather than both playing — they are
@@ -84,16 +87,31 @@
 // this slot. Those two are what buy syncopation and sustain, and neither can
 // be spelled in a row of eight notes that all have to sound.
 //
-// The result, and it is deliberately four different kinds of music:
+// The result, and it is deliberately six different kinds of music:
 //
 //   opening   eighths, straight, no rests — #1916's phrase, untouched. It is
 //             the pass everybody sees, nobody complained about it, and it is
-//             now also the RULER the other three are heard against.
+//             now also the RULER the other five are heard against.
 //   swing     eighths with ties and rests: the lead breathes, the bass pumps.
 //   descent   half-time — quarter-note lead over a bass that holds three
 //             beats, with the sixteenth arpeggio doing the moving.
 //   finale    sixteenths, an octave-alternating bass on eighths, hats all the
 //             way down. The one that is allowed to be busy.
+//   vigil     half-notes. Two lead notes a bar over a bass that changes once,
+//             the sparsest thing in the suite.
+//   pursuit   TWELVE slots — triplets, the one felt tempo none of the others
+//             can spell on a grid that divides by two.
+//
+// The last two, and the second half of every movement, are the answer to vjt's
+// "ci siamo persi il cambio di musichette": a phrase that turned over every
+// 7.68 s against a 35 s set was heard four and a half times per set, which is
+// what makes a suite sound like a loop. Eight bars puts the phrase at 15.36 s
+// — twice per set, and six movements mean the SUITE only comes round after
+// six sets rather than four.
+//
+// Bars 1-4 of the four original movements are byte-for-byte what shipped: the
+// second half is an ANSWER to the first, same grid and same timbre, which is
+// how a phrase gets longer without becoming a different tune.
 //
 // The gain budget is again unmoved: no movement sounds two leads at once (a
 // held note ends where the next begins) and the voice peaks are untouched, so
@@ -289,9 +307,14 @@ type Movement = {
   readonly drums: readonly [Drum | null, ...(Drum | null)[]];
 };
 
-// The suite. Four movements of four bars, all in A minor's orbit so the seams
+// The suite. Six movements of eight bars, all in A minor's orbit so the seams
 // are steps rather than key changes: the roll is a joke and the tune should
-// land as one, four times over.
+// land as one, six times over.
+//
+// Every movement is two half-phrases: bars 1-4 state, bars 5-8 answer. The
+// answer keeps the movement's grid, duty and drum pattern — those are its
+// identity — and moves the HARMONY somewhere the first half did not go, which
+// is why bar 8 wants bar 1 back instead of merely stopping next to it.
 //
 // Movement one is #1916's phrase, note for note and timbre for timbre, and
 // that is deliberate — the first pass of the titles is the one everybody sees,
@@ -304,8 +327,8 @@ type Movement = {
 // harmonic folds back is an out-of-tune whistle rather than a bright note.
 //
 // #1922: each movement now owns its RHYTHM as well as its chords — read the
-// slot arrays, not just the note names. The four grids are 8 / 8-with-holes /
-// 4 / 16.
+// slot arrays, not just the note names. The six grids are 8 / 8-with-holes /
+// 4 / 16 / 2 / 12.
 const MOVEMENTS: readonly [Movement, ...Movement[]] = [
   {
     // Pass one: Am → F → C → G, the i–VI–III–VII everyone already knows.
@@ -334,6 +357,32 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
         lead: ["D4", "G4", "B4", "D5", "B4", "G4", "D4", "E4"],
         bass: ["G2", "G2", "D3", "G2"],
         chord: ["G", "B", "D"],
+      },
+      // The answer: the same straight eighths, walked DOWNWARD from the top of
+      // the chord instead of up from the root, and turning through Dm to the
+      // major V — which is what makes bar 8 lean back into bar 1 rather than
+      // sit next to it.
+      {
+        lead: ["A5", "E5", "C5", "A4", "C5", "E5", "A5", "G5"],
+        bass: ["A2", "E3", "A2", "A2"],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["A5", "F5", "C5", "A4", "C5", "F5", "A5", "G5"],
+        bass: ["F2", "C3", "F2", "F2"],
+        chord: ["F", "A", "C"],
+      },
+      {
+        lead: ["D5", "A4", "F4", "D4", "F4", "A4", "D5", "C5"],
+        bass: ["D3", "A2", "D3", "D3"],
+        chord: ["D", "F", "A"],
+      },
+      {
+        // G# again: the V of a minor key wants its major third, and this is
+        // the bar that hands the phrase back to the Am it started on.
+        lead: ["E5", "B4", "G#4", "E4", "G#4", "B4", "E5", "D5"],
+        bass: ["E3", "B2", "E3", "E3"],
+        chord: ["E", "G#", "B"],
       },
     ],
   },
@@ -371,6 +420,29 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
         lead: ["E5", "-", "G4", null, "C5", "E5", "-", "D5"],
         bass: ["C3", null, null, "C3", "G2", null, "C3", null],
         chord: ["C", "E", "G"],
+      },
+      // The answer: Gm → C → F → Dm, a ii–V–I that overshoots home and drops
+      // back onto the Dm bar 1 opens on. Same tie-and-rest figure throughout —
+      // the swing is the movement's signature and does not get to change.
+      {
+        lead: ["G4", "-", "A#4", null, "D5", "G4", "-", "F4"],
+        bass: ["G2", null, null, "G2", "D3", null, "G2", null],
+        chord: ["G", "A#", "D"],
+      },
+      {
+        lead: ["C5", "-", "E5", null, "G4", "C5", "-", "B4"],
+        bass: ["C3", null, null, "C3", "G2", null, "C3", null],
+        chord: ["C", "E", "G"],
+      },
+      {
+        lead: ["F5", "-", "C5", null, "A4", "F4", "-", "G4"],
+        bass: ["F2", null, null, "F2", "C3", null, "F2", null],
+        chord: ["F", "A", "C"],
+      },
+      {
+        lead: ["D5", "-", "A4", null, "F4", "D5", "-", "E5"],
+        bass: ["D3", null, null, "D3", "A2", null, "D3", null],
+        chord: ["D", "F", "A"],
       },
     ],
   },
@@ -411,6 +483,32 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
         // accidental is the whole reason this progression sounds like an
         // ending rather than like a loop.
         lead: ["E4", "-", "G#4", "B4"],
+        bass: ["E3", "-", "-", "B2"],
+        chord: ["E", "G#", "B"],
+      },
+      // The answer LIFTS where the first half fell: C → B♭ → Dm and back onto
+      // the same E. The B♭ is the Phrygian ♭II the Andalusian descent implies
+      // and never states, which is why the second half sounds like the same
+      // piece arguing with itself rather than like a different one.
+      {
+        lead: ["C5", "-", "E5", "G5"],
+        bass: ["C3", "-", "-", "G2"],
+        chord: ["C", "E", "G"],
+      },
+      {
+        lead: ["A#4", "-", "D5", "F5"],
+        bass: ["A#2", "-", "-", "F2"],
+        chord: ["A#", "D", "F"],
+      },
+      {
+        lead: ["D5", "-", "F5", "A5"],
+        bass: ["D3", "-", "-", "A2"],
+        chord: ["D", "F", "A"],
+      },
+      {
+        // Falling, where bar 4 rose: the two E bars are the same chord and
+        // opposite gestures, and that is the whole join.
+        lead: ["B4", "-", "G#4", "E4"],
         bass: ["E3", "-", "-", "B2"],
         chord: ["E", "G#", "B"],
       },
@@ -536,6 +634,202 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
         ],
         bass: ["F2", "C3", "F2", "C3", "F2", "C3", "F2", "C3"],
         chord: ["F", "A", "C"],
+      },
+      // The answer: Dm → G → C → E. Same sixteenths, same alternating bass,
+      // but the runs sit a register lower than bars 1-4 so the second half is
+      // audibly the reply and not a repeat, and it ends on the dominant E
+      // rather than on the F it would otherwise circle from.
+      {
+        lead: [
+          "D5",
+          "F5",
+          "A5",
+          "F5",
+          "D5",
+          "A4",
+          "D5",
+          "F5",
+          "A5",
+          "G5",
+          "A5",
+          "F5",
+          "D5",
+          "F5",
+          "E5",
+          "F5",
+        ],
+        bass: ["D3", "A2", "D3", "A2", "D3", "A2", "D3", "A2"],
+        chord: ["D", "F", "A"],
+      },
+      {
+        lead: [
+          "G4",
+          "B4",
+          "D5",
+          "B4",
+          "G4",
+          "D4",
+          "G4",
+          "B4",
+          "D5",
+          "E5",
+          "D5",
+          "B4",
+          "G4",
+          "B4",
+          "A4",
+          "B4",
+        ],
+        bass: ["G2", "D3", "G2", "D3", "G2", "D3", "G2", "D3"],
+        chord: ["G", "B", "D"],
+      },
+      {
+        lead: [
+          "C5",
+          "G4",
+          "E5",
+          "G4",
+          "C5",
+          "E4",
+          "G4",
+          "C5",
+          "E5",
+          "G5",
+          "E5",
+          "C5",
+          "G4",
+          "C5",
+          "B4",
+          "C5",
+        ],
+        bass: ["C3", "G2", "C3", "G2", "C3", "G2", "C3", "G2"],
+        chord: ["C", "E", "G"],
+      },
+      {
+        // The D5 in the second half is the ♭7 an E7 wants: it is what turns
+        // "loud bar on the V" into "the suite is about to start again".
+        lead: [
+          "E4",
+          "G#4",
+          "B4",
+          "E5",
+          "G#5",
+          "E5",
+          "B4",
+          "G#4",
+          "E4",
+          "B4",
+          "E5",
+          "G#5",
+          "E5",
+          "B4",
+          "D5",
+          "B4",
+        ],
+        bass: ["E3", "B2", "E3", "B2", "E3", "B2", "E3", "B2"],
+        chord: ["E", "G#", "B"],
+      },
+    ],
+  },
+  {
+    // Pass five: the room the finale does not leave. Two lead notes a bar on a
+    // TWO-slot grid — half-notes, the slowest thing in the suite against the
+    // finale's sixteenths — a bass that changes once a bar and never restrikes
+    // under itself, and a drum line down to a hat and one snare.
+    //
+    // The width is 50%, the same plain square the opening uses, and that is
+    // deliberate: with the harmony channel underneath it and nothing else
+    // moving, the pair reads as an organ rather than as movement one slowed
+    // down. Am → C → F → G, then Am → Dm → E → Am, which is the only movement
+    // that lands on its own tonic instead of handing off on the dominant.
+    name: "vigil",
+    duty: 0.5,
+    second: "harmony",
+    secondDuty: 0.125,
+    drums: ["hat", null, "snare", null],
+    bars: [
+      { lead: ["A4", "E5"], bass: ["A2", "E3"], chord: ["A", "C", "E"] },
+      { lead: ["C5", "G4"], bass: ["C3", "G2"], chord: ["C", "E", "G"] },
+      { lead: ["F4", "C5"], bass: ["F2", "C3"], chord: ["F", "A", "C"] },
+      { lead: ["D5", "B4"], bass: ["G2", "D3"], chord: ["G", "B", "D"] },
+      { lead: ["C5", "A4"], bass: ["A2", "E3"], chord: ["A", "C", "E"] },
+      { lead: ["D5", "F5"], bass: ["D3", "A2"], chord: ["D", "F", "A"] },
+      { lead: ["B4", "G#4"], bass: ["E3", "B2"], chord: ["E", "G#", "B"] },
+      // One note, one bar. The hold is the point: everything else in the suite
+      // articulates, and this is the one place that simply rings out.
+      { lead: ["A4", "-"], bass: ["A2", "-"], chord: ["A", "C", "E"] },
+    ],
+  },
+  {
+    // Pass six: TRIPLETS. Twelve slots to the bar, which is the one thing none
+    // of the other five can spell — every grid in the file so far divides the
+    // bar by two, so "the same tempo in three" is a felt tempo the suite did
+    // not have. The bass runs six slots (triplet quarters) under it and the
+    // hats mark the two groups of three that make the swing legible.
+    //
+    // 37.5% duty: a width nothing else uses, between the opening's square and
+    // the swing's nasal 25%.
+    //
+    // The second channel WAS the arpeggio — sixteenths against triplets, a
+    // cross-rhythm — and it is gone on vjt's order (#grappa 12:13, "riduci le
+    // voci") after he heard clicks on this movement and only this one.
+    //
+    // Said plainly, because it decides what to try next if the clicks stay:
+    // the arp is not a measured cause. Measured, in an OfflineAudioContext
+    // running this file, pursuit was the LEAST stacked movement of the six —
+    // 32 coincident attacks at a worst instant of 1.23, against finale's 128
+    // at 1.36 — and no outlier on sample-to-sample jumps or envelope steps at
+    // either 44.1k or 48k. What the arp WAS is the only thing structurally
+    // unique here: a 16-step grid under a 12-slot lead, whose attacks land
+    // 40ms off the lead's four times a bar, which is a rhythmic artefact and
+    // matches "a tempo". Dropping it is the cheap half of that experiment.
+    name: "pursuit",
+    duty: 0.375,
+    second: "none",
+    secondDuty: 0.125,
+    drums: ["hat", null, "hat", "snare", null, "hat", "hat", null, "hat", "snare", null, "hat"],
+    bars: [
+      {
+        lead: ["A4", "C5", "E5", "A5", "-", null, "E5", "C5", "A4", "-", "B4", null],
+        bass: ["A2", null, "E3", null, "A2", null],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["E5", "A5", "E5", "C5", "-", null, "A4", "B4", "C5", "-", "E5", null],
+        bass: ["A2", null, "E3", null, "A2", null],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["D5", "F5", "A5", "D5", "-", null, "A4", "F4", "D4", "-", "E4", null],
+        bass: ["D3", null, "A2", null, "D3", null],
+        chord: ["D", "F", "A"],
+      },
+      {
+        lead: ["E5", "B4", "G#4", "E4", "-", null, "G#4", "B4", "E5", "-", "D5", null],
+        bass: ["E3", null, "B2", null, "E3", null],
+        chord: ["E", "G#", "B"],
+      },
+      {
+        lead: ["A4", "B4", "C5", "E5", "-", null, "C5", "B4", "A4", "-", "G4", null],
+        bass: ["A2", null, "E3", null, "A2", null],
+        chord: ["A", "C", "E"],
+      },
+      {
+        lead: ["F4", "A4", "C5", "F5", "-", null, "C5", "A4", "F4", "-", "G4", null],
+        bass: ["F2", null, "C3", null, "F2", null],
+        chord: ["F", "A", "C"],
+      },
+      {
+        lead: ["A4", "D5", "F5", "A5", "-", null, "F5", "D5", "A4", "-", "G4", null],
+        bass: ["D3", null, "A2", null, "D3", null],
+        chord: ["D", "F", "A"],
+      },
+      {
+        // Ends on the V, and the V hands over to the opening's Am — which is
+        // where the suite wraps.
+        lead: ["G#4", "B4", "E5", "G#5", "-", null, "E5", "B4", "G#4", "-", "D5", null],
+        bass: ["E3", null, "B2", null, "E3", null],
+        chord: ["E", "G#", "B"],
       },
     ],
   },
@@ -783,6 +1077,17 @@ function movementAtIndex(index: number): Movement {
  */
 export function creditsBar(index: number, movement = 0): readonly CreditsEvent[] {
   return barEvents(movementAtIndex(movement), index);
+}
+
+/**
+ * The name of the movement at suite position `index`, which wraps like the
+ * scheduler's own read does. Shown next to the mute button while the music is
+ * on, so a listener can say WHICH movement did the thing they are reporting —
+ * the suite turns over on the roll's pass, and by the time a bug is described
+ * the music has usually moved on.
+ */
+export function creditsMovementName(index: number): string {
+  return movementAtIndex(index).name;
 }
 
 /**

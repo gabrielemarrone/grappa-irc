@@ -485,12 +485,69 @@ const CreditsModal: Component = () => {
     // Guarded: jsdom has no pointer capture, and the tests drive this handler.
     target.setPointerCapture?.(event.pointerId);
     setHeld(true);
+    // The chrome is buttons, and a double tap on the mute toggle is two mute
+    // presses, not a skip. Everything else on the modal is reading surface.
+    const onChrome = (event.target as Element | null)?.closest?.(".credits-chrome") != null;
+    tapStartedAt = onChrome ? 0 : Date.now();
+  };
+
+  // ── double tap: skip to the next set (vjt, #grappa 12:13) ───────────────
+  // "aggiungi che un doppio tap skippa il paragraph corrente / cosi testo
+  // senza aspettare". A reader who has finished a paragraph before the roll
+  // has should not have to sit through the rest of the travel.
+  //
+  // Built on the hold gesture rather than beside it, because the two share the
+  // same pointer sequence and a second listener would see the same taps: a tap
+  // is a grab and a release close together, and a double tap is two of those.
+  // Both halves must be SHORT — a long press is the hold, and a hold followed
+  // by a tap must not read as a double tap or every paused read would end by
+  // skipping the thing it just paused to read.
+  const TAP_MAX_MS = 250;
+  const DOUBLE_TAP_MS = 320;
+  let tapStartedAt = 0;
+  let lastTapAt = 0;
+
+  /**
+   * Turn the roll over NOW, exactly as the end of a cycle would.
+   *
+   * The restart is forced rather than left to `syncRollDistance`: that one
+   * dedups on `${h}x${vh}` and returns early when the next set happens to be
+   * the same height, which is right on the animation's own boundary (nothing
+   * to re-measure) and wrong here (the roll is mid-travel and the new text
+   * would appear halfway up the screen). Clearing the key makes it re-measure,
+   * and the re-measure is what restarts the animation from the bottom.
+   */
+  const skipSet = (): void => {
+    // Nothing to skip to once the ending is up, and restarting the roll there
+    // would pull the finale back off the bottom of the screen.
+    if (ended() || roll === undefined) return;
+    rollPass += 1;
+    setMovementName(creditsMovementName(rollPass));
+    advance();
+    lastMeasure = "";
+    syncRollDistance(roll);
   };
 
   const release = (event?: PointerEvent): void => {
     if (event && heldPointer !== null && event.pointerId !== heldPointer) return;
     heldPointer = null;
     setHeld(false);
+    if (event === undefined) return;
+    const now = Date.now();
+    // A release with no matching short press is not a tap: `releaseOnHide` and
+    // `lostpointercapture` both land here without one.
+    if (tapStartedAt === 0 || now - tapStartedAt > TAP_MAX_MS) {
+      tapStartedAt = 0;
+      lastTapAt = 0;
+      return;
+    }
+    tapStartedAt = 0;
+    if (lastTapAt !== 0 && now - lastTapAt <= DOUBLE_TAP_MS) {
+      lastTapAt = 0;
+      skipSet();
+      return;
+    }
+    lastTapAt = now;
   };
 
   // The backstop for the case capture cannot cover: the app going away

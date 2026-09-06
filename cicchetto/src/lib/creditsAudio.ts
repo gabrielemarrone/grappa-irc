@@ -768,12 +768,24 @@ const MOVEMENTS: readonly [Movement, ...Movement[]] = [
     // hats mark the two groups of three that make the swing legible.
     //
     // 37.5% duty: a width nothing else uses, between the opening's square and
-    // the swing's nasal 25%. The second channel is the arpeggio rather than a
-    // harmony — sixteenths against triplets is a deliberate cross-rhythm, and
-    // it is the reason this one sounds hurried where "vigil" sounds still.
+    // the swing's nasal 25%.
+    //
+    // The second channel WAS the arpeggio — sixteenths against triplets, a
+    // cross-rhythm — and it is gone on vjt's order (#grappa 12:13, "riduci le
+    // voci") after he heard clicks on this movement and only this one.
+    //
+    // Said plainly, because it decides what to try next if the clicks stay:
+    // the arp is not a measured cause. Measured, in an OfflineAudioContext
+    // running this file, pursuit was the LEAST stacked movement of the six —
+    // 32 coincident attacks at a worst instant of 1.23, against finale's 128
+    // at 1.36 — and no outlier on sample-to-sample jumps or envelope steps at
+    // either 44.1k or 48k. What the arp WAS is the only thing structurally
+    // unique here: a 16-step grid under a 12-slot lead, whose attacks land
+    // 40ms off the lead's four times a bar, which is a rhythmic artefact and
+    // matches "a tempo". Dropping it is the cheap half of that experiment.
     name: "pursuit",
     duty: 0.375,
-    second: "arp",
+    second: "none",
     secondDuty: 0.125,
     drums: ["hat", null, "hat", "snare", null, "hat", "hat", null, "hat", "snare", null, "hat"],
     bars: [

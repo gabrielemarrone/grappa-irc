@@ -743,6 +743,25 @@ himself and device-verifies there. `scripts/deploy-cic.sh` = bundle only, no res
 server. Both assert a main-checkout on main, so **commit your own working-tree edits before pulling** or the
 pull stashes them out from under you. Prove a cic deploy by the **served** hash (`curl` the page), never by
 the script's own broadcast line.
+🔴🔴 **E LA META' INVERSA DELLA STESSA REGOLA, MISURATA IL 2026-09-06 E PIU' PERICOLOSA: LA MTIME
+DELL'ARTEFATTO SERVITO **NON** PROVA CHE IL DEPLOY ABBIA SPEDITO IL TUO LAVORO.** Questo file diceva
+*"cio' che lo settla e' la MTIME dell'artefatto servito"*. **Insufficiente**: la mtime si muove a
+OGNI rebuild, **compreso un rebuild da sorgente STANTIA**. Misurato subito dopo il merge FF della
+#1933: `rc=0`, riga `✓ cic dist built + broadcast hash=…`, **mtime nuova (01:23)** — e dentro il
+bundle **non c'era niente della PR**. Il tell che ha aperto il caso e' che l'**hash NON era
+cambiato** a fronte di +146 righe di contenuto: implausibile.
+🥇 **Il discriminante e' il CONTENUTO del bundle servito, o la SHA del checkout** — mai la mtime,
+mai l'hash da solo, mai la riga di broadcast:
+`grep -c '<stringa che SOLO il lavoro nuovo introduce>' runtime/cicchetto-dist/assets/index-*.js`
+**con un pos ctrl** (una stringa che c'e' di sicuro) **e un neg ctrl** (una inventata), piu'
+`git -C /srv/grappa rev-parse --short HEAD` contro la SHA che credi di aver spedito.
+🔴 **CAUSA, letta nello script e non dedotta: `scripts/deploy-cic.sh` NON FA `git pull`.** Asserisce
+`require_main_checkout` e poi builda **l'albero che trova su disco**; il `git pull --ff-only` vive
+solo in `infra/lib/deploy_docker.sh`, cioe' nel percorso del deploy SERVER. Lo script e' pensato per
+il ciclo *"edito `cicchetto/src/`, builddo"*, **non per spedire un ramo appena mergiato**.
+⇒ **Dopo un merge, `git pull --ff-only` nel checkout PRIMA di `deploy-cic.sh`**, e verifica per
+contenuto dopo. *Ennesima faccia della famiglia: tre segnali di successo concordi — rc, log, mtime —
+che insieme non rispondono alla domanda posta.*
 🔎 **AN UNCHANGED SERVED HASH IS NOT A FAILED CIC DEPLOY — vite hashes are CONTENT-derived (2026-08-05).**
 Staging rebuilt to the *same* `index-DZvSYJMc.js` because cic deploys are ORTHOGONAL to server deploys and
 the bundle was already current. **What settles it is the MTIME of the actually-served artefact**

@@ -99,7 +99,7 @@ if [ "$SRC_ROOT" != "$REPO_ROOT" ]; then
         -v "$SRC_ROOT/.formatter.exs:/app/.formatter.exs:ro"
         -v "$SRC_ROOT/.credo.exs:/app/.credo.exs:ro"
         -v "$SRC_ROOT/.sobelow-conf:/app/.sobelow-conf:ro"
-        # The next four mounts are all DRIFT-PIN inputs: root-level files a
+        # The next five mounts are all DRIFT-PIN inputs: root-level files a
         # test reads to assert doc-matches-reality. Without an override a
         # worktree run reads MAIN's copy and the fix can never go GREEN
         # before merge. RO — the tests only read them.
@@ -108,6 +108,10 @@ if [ "$SRC_ROOT" != "$REPO_ROOT" ]; then
         #   compose.yaml + .env.example → env_registry_drift_test.exs (#369 X1)
         -v "$SRC_ROOT/compose.yaml:/app/compose.yaml:ro"
         -v "$SRC_ROOT/.env.example:/app/.env.example:ro"
+        #   Dockerfile.release → storage_roots_config_test.exs (#1945). Measured
+        #   the hard way: the pin read MAIN's copy and stayed RED against a
+        #   worktree that had already added the missing ENV line.
+        -v "$SRC_ROOT/Dockerfile.release:/app/Dockerfile.release:ro"
         #   bin/         → operator_help_drift_test.exs (#1086)
         -v "$SRC_ROOT/bin:/app/bin:ro"
         #   cicchetto/e2e/ → keepalive_idle_ordering_test.exs (#1030). The

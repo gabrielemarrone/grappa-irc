@@ -47940,7 +47940,7 @@ re-prefixing old lines — and *everything else* re-derived the glyph from the
 LIVE members store at every render, on the stated rationale that those rows
 "describe a *now* event, so the current grade is the correct glyph".
 
-That rationale is false for every row it covered except one. **A scrollback
+That rationale is false for every row it covered. **A scrollback
 row is never "now": it is a RECORD.** Reading the live store answers "what
 grade does this nick hold at the moment you happen to be looking", which is a
 different question from "what was true when this happened", and the difference
@@ -47965,46 +47965,101 @@ anyway because the sender is gone from the store".
 ### The rule, and why the answer is not a snapshot
 
 Where the event HAS no grade — a join, a kick victim — there is nothing to
-snapshot and the correct value is always empty. So the cure is a second named
-reading of the sender button rather than a second server column:
-`bareSpanWithPrefix/2` holds the one `<button>`, `bareSenderSpan/1` passes
-`prefixFor(nick)` (live) and `recordSenderSpan/1` passes `""`. The glyph is a
-PARAMETER, never a default, so each call site states which reading it wants —
-the same no-magic-default-arg rule the bare/bracketed split already followed.
-`prefixFor` itself is untouched.
+snapshot and the correct value is always empty. So the cure is a named reading
+of the sender button rather than a second server column: `bareSpanWithPrefix/2`
+holds the one `<button>`, `contentSenderSpan/1` passes `prefixFor(nick)` and
+`recordSenderSpan/1` passes `""`. The glyph is a PARAMETER, never a default,
+so each call site states which reading it wants — the same no-magic-default-arg
+rule the bare/bracketed split already followed.
 
-`mode` is the ONE deliberate survivor, and deliberately, not by inheriting the
-default: a mode row's whole subject IS the grade, so the sender's current
-status is the honest thing to show and there is no retroactivity to remove.
+**The rule that settles it: the ONLY glyph a scrollback row may carry is the
+#25 send-time snapshot, on a CONTENT row.** `prefixFor` keeps that branch and
+nothing else; there is no live members read left in `ScrollbackPane`. The
+members pane keeps one, because it is the single surface where "now" is
+actually the subject.
+
+### The `mode` carve-out this entry first defended, and why it fell
+
+This entry originally read *"`mode` is the ONE deliberate survivor … a mode
+row's whole subject IS the grade, so the sender's current status is the honest
+thing to show"*. That is retracted. The reporter closed it with a repro that
+refutes itself on its face:
+
+```
+20:58:09 * @Mezmerize sets mode +o Mezmerize on #grappa
+```
+
+The `@` is GRANTED by that very line, so the setter provably did not hold it
+when the event happened — no knowledge of the channel's history is needed to
+see the render is wrong. The general form has nothing to do with self-ops: a
+`mode` row records who set the mode THEN, so a setter deopped since reads plain
+on the line where they were opping people, and one opped since reads `@` on a
+line from when they were not. "Its subject is the grade" describes the row's
+CONTENT; the glyph is about its SENDER, and those are two different people as
+often as not.
+
+Losing the exception made the fix SMALLER, not bigger — one branch deleted
+instead of one branch conditioned.
 
 ### Measured
 
-Seven cases on the untouched tree, `bun.sh run test -t "#1950"`: **6 red, 1
-green**. Red — `join`, `part`, `quit`, `nick_change`, `topic`, `kick`; the
-`kick` row failed with **2** glyphs, not one, because it renders the kicker
-through the sender span AND the victim through its own `NickText` (the comment
-on `prefixFor` named that target as intentionally live). Green — the `mode`
-case, which is the block's POSITIVE CONTROL: it reads `@` off the very fixture
-the six absences are asserted against, so those absences are the absence of a
-glyph the store COULD have supplied rather than of a glyph nobody had.
+Two rounds on the untouched tree, `ScrollbackPane.test.tsx`.
 
-### What this does NOT claim, and what it acquits
+Round 1, seven cases: **6 red, 1 green**. Red — `join`, `part`, `quit`,
+`nick_change`, `topic`, `kick`; the `kick` row failed with **2** glyphs, not
+one, because it renders the kicker through the sender span AND the victim
+through its own `NickText`. Green — the `mode` case, which round 1 used as the
+block's POSITIVE CONTROL.
 
-The `server_event` / `renderRawEvent` senders (WALLOPS, GLOBOPS, KILL, ERROR,
-CHGHOST, vendor verbs) are left on the live reading, and that is an acquittal
-measured in `EventRouter`, not an omission: `route_unhandled_command/2`
-persists every one of them on the synthetic `$server` window, and
-`membersByChannel()` has no entry for `$server`, so `senderPrefix/3` returns
-`""` there by construction. The single raw verb routed to a REAL channel is
-the #78 inbound INVITE — and an `:invited` window is by definition not joined,
-so it carries no member list either. **Residual, stated so nobody rediscovers
-it as a new bug:** an INVITE to a channel we are ALREADY in, whose inviter is
-opped, would still render `*** @nick invited you to #chan`. It is one row,
-behind a re-invite, and it was left alone rather than swept in silently.
+That control could not survive round 2, since `mode` is now one of the
+absences. Its replacement is the one glyph path deliberately left standing:
+a CONTENT row rendering its #25 snapshot, through the same component, fixture
+and `.nick-prefix` selector. It proves a glyph CAN reach the DOM here, so the
+ten absences are not an artefact of a mocked-away `NickText`. It does NOT
+prove the LIVE store would have supplied one — after this fix nothing in the
+module reads it, so no in-block assertion can, and that half is carried by the
+red measurement below rather than pretended at.
+
+Round 2 (this extension), four more cases: **4 red, 0 green**, one glyph each
+(`mode` channel, `mode` self-op, `mode` on `$server`, `server_event` INVITE).
+Two of them are the interesting ones, because round 1's own text had ACQUITTED
+them:
+
+* `mode` on `$server` (#154(b) user modes). Round 1 reasoned it was safe
+  because no member list exists for that key. True, and irrelevant: seed one
+  and the old code paints an `@` on a row that has no channel grade at all. It
+  was safe by ROUTING ACCIDENT, not by rule. The unit fixture seeds a
+  deliberately unrealistic `$server` member list for exactly this reason — a
+  vacuous assertion would have passed either way.
+* the `server_event` INVITE into a channel we are ALREADY in. Round 1 listed
+  this as a stated residual, reasoned from `EventRouter` rather than measured.
+  It was real: red, one glyph. It is now fixed as a consequence of the total
+  rule, not as a carve-in.
+
+Counts, `bun.sh run test`: 6759 → **6755**. That is +4 new cases and −8 for
+the deleted `senderPrefix` unit tests, and the arithmetic closes exactly.
+
+### The helper is deleted, not just unused
+
+With the live branch gone, `nickColor.senderPrefix/3` had zero production
+callers — its only remaining consumers were its own eight unit tests. It is
+removed rather than left exported: there is no correct use of a live members
+read on a scrollback row, and an exported helper that says otherwise in its
+own doc comment is how the next session reintroduces this. `memberSigil`
+remains the members-pane path and is untouched.
+
+### What this does NOT claim
 
 Nothing here was measured on production. The Azzurra lines above are the
 reporter's, quoted from the issue; what was measured is the renderer, in jsdom
-for the seven cases and against the live stack for the two-door
+for the eleven cases and against the live stack for the two-door
 (live vs. reload) contract in `issue1950-record-row-no-live-glyph.spec.ts`.
+
+The e2e `mode` case needs `/OPER` to exist at all: setting `+o` requires
+chanop, so a setter who lacks the grade cannot normally produce the row. The
+reporter could because he is Azzurra staff (`mezmerize@staff.azzurra.chat` in
+the field line above) and the testnet runs the same ircd, bahamut — so the
+spec buys the same standing the same way. That is a property of the FIXTURE,
+not of the defect: the defect needs no oper, only a setter whose grade moved.
 
 _Deploy: **cic bundle only** — no server module, no migration, no wire change._

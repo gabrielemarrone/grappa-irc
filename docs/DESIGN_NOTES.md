@@ -46352,3 +46352,79 @@ inventing a number.
   sum in hand is arithmetic, not a measurement.
 
 _Deploy: **HOT — `--cic` only.** Client-side; no server change._
+<!-- entry #1938 -->
+
+---
+
+## 2026-09-06 — #1938: mint 1.10.0, and a CVE gate that was green for the wrong reason
+
+`mint` moves 1.9.3 → 1.10.0 in `mix.lock` and nowhere else. `finch 0.23.0`
+requires `mint ~> 1.8`, so 1.10.0 satisfies a constraint already written and
+`mix.exs` does not move: the diff is one line.
+
+Two advisories, both against `Mint.HTTP1`, both fixed in 1.10.0, both read
+from `repos/elixir-mint/mint/security-advisories` rather than inferred:
+CVE-2026-82728 / GHSA-g83f-2j6r-q6m4 (HIGH — unbounded response-line
+buffering, range `>= 0.1.0 and < 1.10.0`) and CVE-2026-82729 /
+GHSA-7p8w-j234-7qc8 (MEDIUM — quadratic chunk-size parsing, range
+`>= 1.9.3 and < 1.10.0`). Both describe a hostile SERVER exhausting its
+CLIENT, which is why the reach matters and not merely the presence: `{:req,
+"~> 0.5"}` carries no `only:`, so req → finch → mint is a runtime path, and
+the link-preview fetch in `lib/grappa/net/image_fetcher/req.ex` dials a host
+chosen by whoever pasted the link. The attacker picks the server. The captcha
+siteverify in `lib/grappa/admission/captcha/site_verify_http.ex` dials a fixed
+endpoint and is the weaker of the two.
+
+### The gate was silent, and the tool was not broken
+
+🔴 `mix deps.audit` exits **0 on mint 1.9.3**, measured before the bump, and
+**0 again after it**. The pre/post pair is therefore VACUOUS as evidence that
+this change fixed anything, and it is recorded here as vacuous rather than
+quoted as a green.
+
+The cause is the database, not the tool. `mix_audit 2.1.5` vendors nothing:
+`MixAudit.Repo` clones or pulls `github.com/mirego/elixir-security-advisories`
+into `$HOME/.local/share/…` on every run and **discards the exit status of
+that `git`** — so a failed fetch yields an empty advisory list and a confident
+`No vulnerabilities found.` Here the fetch worked, and that was checked rather
+than assumed: the local clone sits on upstream's tip `5246bccd9`
+(2026-09-04T00:46:43Z) with `FETCH_HEAD` rewritten by the run. That tip
+predates the two advisories by nine hours — they were published 09:45:35Z and
+09:46:33Z the same day — and querying upstream's `packages/mint/` directly
+returns the same four files the clone holds, all disclosed 2026-06-02 and all
+first patched in 1.9.0, none of which reaches 1.9.3.
+
+The matcher was then proven to fire, so that the silence has exactly one
+remaining cause. Against the real loaded database (116 advisories):
+`cowboy 2.14.0` yields 1 vulnerability (positive control), a package that does
+not exist yields 0 (negative control), and `mint 1.8.0` yields 4 — the same
+four rows, matched on the same package name. `mint 1.9.3` and `mint 1.10.0`
+both yield 0.
+
+The lag is not the nine hours. mirego carries four of the ten mint advisories
+GitHub publishes, and the four it is missing from 2026-07-06 through
+2026-07-16 are still absent seven weeks later. **So the reading to retire is
+"`deps.audit` green ⇒ no known CVE in the tree."** The honest reading is "no
+CVE that mirego has imported, matched against the version we lock". A bump
+justified by an advisory younger than the importer's lag will show a green
+before and a green after, every time, and the gate cannot be asked to prove
+its own worth on that shape.
+
+### What was deliberately not touched
+
+The cowboy/cowlib derogation in `mix.exs` (#149) was neither extended nor
+leaned on — it was not needed. Our lock carries cowboy 2.17.0 and cowlib
+2.18.0 while every mirego range for those packages tops out at 2.15.0 /
+2.16.1, so `deps.audit` is silent there by arithmetic and not by exemption
+(measured: both yield 0 against the same loaded database). Separately, the Hex
+resolver's own OSV feed — a third database again, printed during
+`deps.update` and not a gate — flags cowboy 2.17.0, cowlib 2.18.0 and
+**bandit 1.12.4** (CVE-2026-74836, HIGH). Bandit is the production server, so
+that one is not covered by the test-only reachability argument the derogation
+rests on; it is outside this change and left exactly as found.
+
+_Deploy: **COLD** on every substrate. Measured, not reasoned:
+`Preflight.classify_paths(["mix.lock"], s)` returns
+`{:cold, [mix_deps: ["mix.lock"]]}` for `:jail`, `:linux` and `:docker` alike,
+and a dep's beams live outside the app ebin that `HotReload.reload_modified/0`
+walks._

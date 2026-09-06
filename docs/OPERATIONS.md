@@ -1961,6 +1961,54 @@ D** — see **Running the published image** below.
   with the degraded credit roll, which is correct for a source build and is
   what the smoke script's probe 5 will (rightly) fail on.
 
+### UPGRADE NOTE — v1.5.0 lost the peer-avatar cache on every Docker update (#1945)
+
+**Who this is for: anyone who ran `v1.5.0` on Docker.** Exactly that release —
+measured, the peer-avatar cache first shipped in it (`Grappa.Avatars.Reaper`
+was added 2026-08-29 and `v1.5.0` is the first tag containing it), so no
+earlier version had a cache to lose. Nothing to do if you are upgrading from
+`v1.4.x` or below straight past it.
+
+**What happened.** `config/runtime.exs` defaulted `PEER_AVATARS_STORAGE_ROOT`
+to the RELATIVE `runtime/peer_avatars`, and the image bakes neither that
+variable nor a `WORKDIR` outside `/app`. So the cache resolved to
+`/app/runtime/peer_avatars` — the container's own layer, **outside the only
+volume the image declares** (`compose.release.yaml` mounts `grappa-data:/data`,
+and `Dockerfile.release` bakes `DATABASE_PATH=/data/grappa.db` +
+`UPLOADS_STORAGE_ROOT=/data/uploads`, never the third root). The documented
+update procedure is `pull` then `up -d`, which RECREATES the container, and a
+recreate discards the layer. Every Docker update since `v1.5.0` therefore threw
+the cache away, silently: no error, no log line, nothing in `/healthz`.
+
+Note the asymmetry with the FreeBSD jail, where the same default did not lose
+data — it prevented the node from booting at all (`/runtime/peer_avatars`,
+`eacces`, `Avatars.Reaper.init/1`). Docker's `/app` is writable by the `grappa`
+user, so the same defect took the quiet branch. A crash at least tells you.
+
+**Blast radius: a cache, not state.** `peer_avatars` rows are TTL'd and the
+images re-fetch over CTCP AVATAR as peers are seen again; there is no
+soft-delete or public-URL contract to strand (see the `Grappa.Avatars`
+moduledoc). Nothing else lived there. So the loss is bandwidth and a cold
+cache, not lost user data — but it was real, and it repeated on every update.
+
+**What to do: nothing, on the next update.** From this release the root
+defaults to the sibling of the sqlite database
+(`Path.dirname(DATABASE_PATH)` + `/peer_avatars` = `/data/peer_avatars` on the
+image), and the image bakes that path explicitly as well. Both put it on the
+`grappa-data` volume, where a recreate cannot reach it. If you had set
+`PEER_AVATARS_STORAGE_ROOT` yourself it is still honoured verbatim — check it
+points under `/data` if you want it to survive, and make it ABSOLUTE: a
+relative value is read against the BEAM's working directory, which the init
+system chooses, and prod now logs a warning naming that directory when you set
+one.
+
+The stale `/app/runtime/peer_avatars` inside a running `v1.5.0` container is
+already unreachable-in-practice; it disappears with the container on the next
+recreate and needs no cleanup.
+
+`CIC_DIST_ROOT=/app/cicchetto-dist` is deliberately NOT on the volume and is
+correct as it stands: it is build output shipped inside the image, not state.
+
 ### Running the published image (`docker run` / `curl | bash`) — #503 unit D
 
 A checkout-less host runs the release image above with plain `docker` — no

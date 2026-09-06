@@ -293,3 +293,87 @@ SEED_CALL="eval Grappa.Release.seed_themes()"
         *) printf 'ERL_ZFLAGS=%s lost the #503 caps\n' "$zflags" >&2; return 1 ;;
     esac
 }
+
+# ---------------------------------------------------------------------------
+# #1952 — the release root is where this script LIVES, not where the caller
+# stood.
+#
+# Three commands in this file run `bin/grappa` and all three used to spell it
+# relatively, so the entrypoint only worked from a cwd nothing in it chose.
+# Measured on the published image, `docker run --workdir /` gave
+# `bin/grappa: not found` and `exited/1` — one flag a hardened compose file or
+# a Kubernetes `workingDir:` sets without a thought. It is issue 1945's shape:
+# a path resolved against a working directory the init system picks.
+#
+# The cases below prove the cure by SHIFT — the same call from the same
+# foreign cwd, against the entrypoint with the fix and against one with the
+# fix cut back out. A green that is not contrasted with the red it replaced
+# says nothing about which line is load-bearing.
+
+# The entrypoint invoked BY ABSOLUTE PATH from somewhere else entirely, which
+# is what `docker run --workdir /` does.
+entrypoint_from_elsewhere() {
+    local script="$1"; shift
+    local elsewhere="$BATS_TEST_TMPDIR/elsewhere"
+    mkdir -p "$elsewhere"
+    cd "$elsewhere" && "$script" "$@"
+}
+
+@test "#1952 — the entrypoint finds the release from its OWN directory, not the caller's cwd" {
+    run entrypoint_from_elsewhere "$APP/release-entrypoint.sh" start
+    [ "$status" -eq 0 ]
+    grep -qF "$MIGRATE_CALL" "$CALL_LOG"
+
+    # RED half, and it is what makes the green above mean something: the same
+    # script with the one `cd` line cut out, from the same foreign cwd.
+    local without="$BATS_TEST_TMPDIR/no-cd-entrypoint.sh"
+    sed '/^cd "\$(dirname "\$0")"$/d' "$APP/release-entrypoint.sh" > "$without"
+    chmod 0755 "$without"
+
+    # Guard the MUTATION before trusting the failure it produces. If the sed
+    # matched nothing the two files are identical, and a red below would be
+    # reporting something else entirely.
+    refute cmp -s "$APP/release-entrypoint.sh" "$without"
+
+    : > "$CALL_LOG"
+    run entrypoint_from_elsewhere "$without" start
+    [ "$status" -ne 0 ]
+    refute grep -qF "$MIGRATE_CALL" "$CALL_LOG"
+}
+
+@test "#1952 — a release tree with no runnable bin/grappa says THAT, not that a migration failed" {
+    # The second defect the measurement surfaced, and it is a different one:
+    # the operator was told MIGRATION FAILED while nothing had touched the
+    # schema. A fast path states what it OBSERVED.
+    rm -f "$APP/bin/grappa"
+    run entrypoint start
+
+    [ "$status" -eq 1 ]
+    grep -qF 'no runnable bin/grappa' <<<"$output"
+    grep -qF 'NOTHING has been migrated' <<<"$output"
+    refute grep -qF 'MIGRATION FAILED' <<<"$output"
+
+    # Present but not executable is the same fault wearing the other POSIX
+    # number, and the operator needs the same sentence. This is why the guard
+    # is `test -x` and not an exit-status arm: measured, the status for these
+    # two differs by shell (`sh -c` answers 127, this script under `set -e` on
+    # bash-as-sh hands back 1) while the observable fact does not.
+    printf '#!/bin/sh\nexit 0\n' > "$APP/bin/grappa"
+    chmod 0644 "$APP/bin/grappa"
+    run entrypoint start
+
+    [ "$status" -eq 1 ]
+    grep -qF 'no runnable bin/grappa' <<<"$output"
+    refute grep -qF 'MIGRATION FAILED' <<<"$output"
+}
+
+@test "#1952 — POSITIVE control: a migrator that RAN and failed still says MIGRATION FAILED" {
+    # Without this, a script broken into always taking the 127 arm would report
+    # the case above as a pass while having lost the real failure message.
+    export MIGRATE_RC=1
+    run entrypoint start
+
+    [ "$status" -ne 0 ]
+    grep -qF 'MIGRATION FAILED' <<<"$output"
+    refute grep -qF 'no runnable bin/grappa' <<<"$output"
+}

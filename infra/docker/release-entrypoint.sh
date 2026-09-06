@@ -13,6 +13,66 @@
 
 set -e
 
+# THE RELEASE ROOT IS WHERE THIS FILE LIVES, NOT WHERE THE CALLER STOOD (#1952).
+#
+# Three commands below run `bin/grappa` — the migrator, the theme seeder and
+# the final exec — and all three used to spell it RELATIVELY, which resolves
+# against a working directory nobody in this script chose. `Dockerfile.release`
+# bakes `WORKDIR /app` and this file lands at `/app/release-entrypoint.sh`, so
+# on every path that works today `cd` here is a NO-OP: same directory, byte for
+# byte the same behaviour. It is the paths that do NOT work today that this is
+# for.
+#
+# MEASURED, on ghcr.io/vjt/grappa:v1.5.1 with `docker run --workdir /`:
+#
+#     /app/release-entrypoint.sh: line 126: bin/grappa: not found
+#     grappa: MIGRATION FAILED — refusing to start.
+#     exited/1
+#
+# One flag — the kind a hardened compose file or a Kubernetes `workingDir:`
+# sets without a thought — and the container never comes up. That is issue 1945
+# wearing a different hat: a path resolved against a cwd the init system
+# chooses rather than the operator, which is exactly how the production jail's
+# `su -m grappa` with no `cd` turned an unset storage root into a boot crash.
+# The cure there was to stop deriving data paths from the cwd; the cure here is
+# to stop deriving the release's OWN path from it.
+#
+# `$0` is what the kernel was told to execute — `/app/release-entrypoint.sh`
+# from the image's ENTRYPOINT, or `<release>/bin/../release-entrypoint.sh` when
+# `infra/release/grappa.sh` re-enters this script for a docker-exec'd account
+# verb (#1683). `dirname` of either lands on the release root; `cd` resolves the
+# `..` on the way. The BEAM inherits that cwd, so a relative default anywhere
+# downstream resolves where it always did instead of wherever the operator's
+# shell happened to be.
+cd "$(dirname "$0")"
+
+# …and having chosen the directory, SAY SO IF THE RELEASE IS NOT IN IT (#1952).
+#
+# Three commands below run `bin/grappa`; the first of them is the migrator, and
+# what the script used to say when that command could not be executed was
+# `MIGRATION FAILED — refusing to start`, followed by a paragraph about rolling
+# the schema back. Measured under `docker run --workdir /`: the operator is
+# told the database broke while nothing had opened it. CLAUDE.md's log-honesty
+# rule is exactly this — a fast path states what it OBSERVED, not the work it
+# did not do.
+#
+# A PRECONDITION and not an exit-status arm, because the status is not a fact
+# about the fault. Measured on one missing file: `sh -c 'bin/nothere'` answers
+# 127 from an interactive-style invocation, the image's busybox ash prints
+# `not found`, and this script's own `if ! bin/grappa …` under `set -e` on
+# bash-as-sh hands back **1** — indistinguishable from a migration that ran and
+# failed. `test -x` asks the question directly and answers it the same way on
+# every shell.
+#
+# One check, at the top, for all three call sites: a release tree with no
+# runnable `bin/grappa` cannot migrate, cannot seed and cannot boot, so there
+# is nothing further worth attempting and no verb worth excepting.
+if [ ! -x bin/grappa ]; then
+    echo "grappa: no runnable bin/grappa under $(pwd) — this release tree is broken." >&2
+    echo "grappa: NOTHING has been migrated and the database is untouched." >&2
+    exit 1
+fi
+
 : "${GRAPPA_MAX_USERS:=100}"
 default_schedulers="$(nproc)"
 if [ "$default_schedulers" -lt 10 ]; then

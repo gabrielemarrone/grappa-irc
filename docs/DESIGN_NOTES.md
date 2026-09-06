@@ -46930,3 +46930,76 @@ its controls rather than printed beside them: `compose.release.yaml` on
 `:docker` and `VERSION` on `:jail` had to come back COLD, `docs/compose.notes.md`
 and `VERSION` on `:docker` HOT — all four held before any verdict was
 emitted._
+<!-- entry #1951 -->
+
+---
+
+## 2026-09-06 — #1951: the probe was fine, the ORACLE went stale — so the oracle got a test
+
+`deploy + probe the release image (amd64)` was the only red check on the
+release runs of BOTH `v1.5.0` and `v1.5.1`, twice with the same words:
+
+```
+the shipped chunks carry NEITHER a populated credit roll nor the degraded one —
+the payload's spelling changed and this probe is now blind (#1834)
+```
+
+Nothing shipped wrong. That message is #1834's anti-hollow-green branch doing
+exactly its job: neither shape matched, and rather than pass quietly it died.
+The payload's spelling HAD moved, and the mover was #1927 — `credits.sh` grew
+a third key per contributor (`nick`) while probe 5's `contributor_row` still
+spelled two, so it could never match, `populated_roll` (built on top of it)
+could never match, and the third branch was the only one left.
+
+### `nick` is not always a string, and that is the half a careless fix misses
+
+`credits.sh`'s `nickof()` returns the BARE `null` token for an author absent
+from `infra/packaging/contributors`, and the table itself is optional by
+construction — a tree that cannot read it falls back to `/dev/null` and emits
+`null` for EVERY row. A pattern accepting only `"nick":"handle"` would be
+blind to half the field in this repo and to all of it in a checkout without
+the table. The cure carries both spellings and nothing else:
+
+```sh
+contributor_row='\{"name":"[^"]*","nick":(null|"[^"]*"),"commits":[0-9]+\}'
+```
+
+### Deliberately strict, because the failure mode is the cure's mirror image
+
+The tempting fix is a looser pattern. It is the wrong one: probe 5's value is
+its THIRD outcome, and a regex that matches anything deletes that outcome
+while reporting green. Measured over six payload classes with the driver's own
+patterns — real roll with quoted nicks → passes (8 rows); real roll with bare
+`null` nicks, from the same script run without its table → passes (12 rows);
+degraded roll → dies on the degraded branch; pre-#1927 two-key row → dies on
+"neither shape"; a row whose `commits` is quoted → dies; a bundle with no roll
+at all → dies. Both directions, not just the one the issue was about.
+
+### The real lesson: nothing was reading the reader
+
+`test/infra/release_image_credits_test.bats` already read the RECIPE — that
+the build arg is declared, that the fallback survives, that the workflow
+supplies it. Nothing read the PATTERN the artifact is read WITH, so the one
+component whose whole job is to notice drift was itself free to drift, and it
+took two releases to notice because it only runs on a tag.
+
+Four cases now pin it, in that same file, against payloads the REAL
+`credits.sh` produces — never hand-typed, since a hand-typed copy drifting
+from the deriver IS the defect. They read the driver's own assignments out of
+it rather than restating them, for the same reason, and the extractor carries
+its own positive control: an empty ERE matches everything, so a reformat that
+put those lines out of grep's reach would otherwise turn the whole block
+green. Cost is nil and it runs on every PR, where the tag-only probe does not.
+
+### What this does NOT claim
+
+It was never run against a ghcr image. The assertion is oracle-vs-payload, on
+the string `credits.sh` emits — which vite re-serialises through
+`JSON.parse/stringify`, so it is canonical, but it is not the shipped chunk.
+Whether the payload REACHES the bundle stays probe 5's claim, on a real image,
+and the two halves are complementary on purpose. The healthy roll on the prod
+bundle for `v1.5.0` (8 contributor rows, three-key shape) is the issue
+reporter's measurement, not one taken here.
+
+_Deploy: **no deploy** — CI/release tooling only, nothing in the image or the
+release itself changes._

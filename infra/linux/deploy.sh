@@ -60,7 +60,11 @@ run_as_grappa() {
 
 substrate_pull() {
 	PREV_SHA=$(run_as_grappa 'git rev-parse HEAD' | tail -1)
-	run_as_grappa 'git pull --ff-only && git log --oneline -3'
+	# --recurse-submodules=on-demand completes the pull: without it a gitlink
+	# bump leaves this checkout dirty forever and every release reports
+	# X.Y.Z-<sha>. Why + why not the bare flag: infra/lib/deploy_common.sh,
+	# above the substrate_pull call (#1851).
+	run_as_grappa 'git pull --ff-only --recurse-submodules=on-demand && git log --oneline -3'
 	NEW_SHA=$(run_as_grappa 'git rev-parse HEAD' | tail -1)
 }
 

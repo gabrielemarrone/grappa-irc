@@ -122,7 +122,12 @@ substrate_pull() {
 	# A bare `git pull --ff-only` failure under `set -e` aborts with no
 	# explanation, and a diverged branch is not something an operator can
 	# read out of an exit code.
-	git pull --ff-only || die "pull is not a fast-forward — the branch diverged. Resolve it by hand."
+	#
+	# --recurse-submodules=on-demand completes the pull: without it a gitlink
+	# bump leaves this checkout dirty forever and every release reports
+	# X.Y.Z-<sha>. Why + why not the bare flag: infra/lib/deploy_common.sh,
+	# above the substrate_pull call (#1851).
+	git pull --ff-only --recurse-submodules=on-demand || die "pull is not a fast-forward — the branch diverged. Resolve it by hand."
 	NEW_SHA="$(git rev-parse HEAD)"
 }
 

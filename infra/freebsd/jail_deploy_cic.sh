@@ -25,11 +25,18 @@ set -eu
 REPO_ROOT="${REPO_ROOT:-/home/grappa/grappa}"
 RELOAD_URL="${RELOAD_URL:-http://127.0.0.1:4000/admin/cic-bundle-changed}"
 
-echo "[deploy-cic] git pull --ff-only"
+# --recurse-submodules=on-demand completes the pull: without it a gitlink bump
+# leaves this checkout dirty forever, and the NEXT server deploy compiles from
+# a dirty tree and reports X.Y.Z-<sha>. A cic-only deploy runs no compile, so
+# it does not pay the price itself — it hands it to whoever deploys next, which
+# is exactly why the flag belongs on every door and not only the compiling one.
+# Why + why not the bare flag: infra/lib/deploy_common.sh, above the
+# substrate_pull call (#1851).
+echo "[deploy-cic] git pull --ff-only --recurse-submodules=on-demand"
 su -l grappa -c "
 	set -eu
 	cd '${REPO_ROOT}'
-	git pull --ff-only
+	git pull --ff-only --recurse-submodules=on-demand
 	git log --oneline -3
 "
 

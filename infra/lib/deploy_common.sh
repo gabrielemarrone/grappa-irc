@@ -417,7 +417,33 @@ deploy_main() {
 		_deploy_defer_hot_error
 	fi
 
-	deploy_log "git pull --ff-only"
+	# #1851 — every substrate_pull spells this `git pull --ff-only
+	# --recurse-submodules=on-demand`, and the flag is load-bearing.
+	#
+	# A bare `--ff-only` advances the SUPERPROJECT and leaves every submodule
+	# working tree exactly where it was, so a single gitlink bump dirties a
+	# deploy checkout PERMANENTLY — nothing downstream ever syncs it back.
+	# `Grappa.Version.GitProbe` snapshots `git status --porcelain` at compile
+	# time, so that stale gitlink turned three consecutive prod releases into
+	# the unreleased form (`1.4.0-596d5ea0`, `1.4.1-997711ac`,
+	# `1.5.0-35e9fca6`) and left #391's "this build is NOT the tag" signal
+	# permanently on, discriminating nothing.
+	#
+	# `=on-demand` and NOT a bare `--recurse-submodules`, measured: the bare
+	# form is `=yes`, which fetches every submodule on EVERY pull, so a box
+	# that cannot reach the submodule remote goes from "deploys fine until
+	# the gitlink moves" to "never deploys". `on-demand` IS git's own fetch
+	# default, so the FETCH half of the pull is byte-for-byte what it already
+	# does and only the CHECKOUT half is new — the flag cannot introduce a
+	# failure the current pull does not already have (measured: with the
+	# submodule remote unreachable and its objects absent, both spellings
+	# exit 1 with the same "Errors during submodule fetch" and leave the
+	# superproject un-advanced).
+	#
+	# It is also a no-op on a checkout that never initialised the submodule,
+	# which is what a plain `git clone` leaves behind — so it does NOT drag a
+	# test-only testnet onto a production box that does not have one.
+	deploy_log "git pull --ff-only --recurse-submodules=on-demand"
 	substrate_pull
 
 	if [ "$DEPLOY_FEATURE_PREV_SHA_CARRY" = 1 ]; then

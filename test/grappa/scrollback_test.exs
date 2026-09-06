@@ -193,6 +193,30 @@ defmodule Grappa.ScrollbackTest do
     captured
   end
 
+  # The plural twin of `capture_one_query/1`, for a production function that
+  # is deliberately MULTI-statement (`rename_dm_peer/4` emits a count plus two
+  # `update_all`s). Returns them in emission order, so a test can pick the one
+  # whose plan it means to pin instead of pinning whichever came last.
+  defp capture_queries(fun) do
+    ref = make_ref()
+    test_pid = self()
+
+    :telemetry.attach(
+      {__MODULE__, ref},
+      [:grappa, :repo, :query],
+      fn _, _, meta, _ -> send(test_pid, {ref, meta.query, meta.params}) end,
+      nil
+    )
+
+    try do
+      fun.()
+    after
+      :telemetry.detach({__MODULE__, ref})
+    end
+
+    drain_queries(ref, [])
+  end
+
   defp drain_queries(ref, acc) do
     receive do
       {^ref, sql, params} -> drain_queries(ref, [{sql, params} | acc])
@@ -2886,6 +2910,57 @@ defmodule Grappa.ScrollbackTest do
       # AFTER: both rows read under the NEW window; the OLD nick reads empty.
       assert sorted_ids.(read_dm(user, net, "NickTemporaneo", own)) == both
       assert read_dm(user, net, "Guest87449", own) == []
+    end
+
+    # 🔴 The `dm_with` UPDATE holds SQLite's single write lock, and
+    # `NickMigration.peer_renamed/5` runs it once per session per peer NICK —
+    # so a peer in a reconnect loop pays it on every bounce. Measured on a raw
+    # copy of prod (2026-09-06, 2 GB, 2.88M rows, `page_size = 65536`): with
+    # the plan degraded to a SCAN behind the `(user_id, network_id)` prefix it
+    # cost 352 ms on a 25k-row history and 1704 ms on a 205k-row one (1591 ms
+    # of it `sys` — 64 KiB page reads); as a SEARCH, 2.8 ms and 1.9 ms.
+    #
+    # What makes the difference is ONE redundant conjunct: SQLite matches an
+    # expression index only against the same expression text, so
+    # `lower(dm_with) = ?` alone can never reach the folded index, which is on
+    # `lower(COALESCE(dm_with, channel))`. This test pins the seek, not the
+    # timing — the row-set is identical either way, which is exactly why the
+    # regression would otherwise be invisible to every other test here.
+    test "the dm_with UPDATE seeks the folded coalesce index (it must not SCAN)",
+         %{user: user, network: net} do
+      # Enough history that the planner has a real choice to get wrong: on a
+      # table of a handful of rows SQLite may pick a SCAN whatever the index.
+      for i <- 1..300 do
+        {:ok, _} =
+          Scrollback.persist_event(sample(user, net, 400 + i, %{channel: "#chan", sender: "someone", dm_with: nil}))
+      end
+
+      {:ok, _} =
+        Scrollback.persist_event(sample(user, net, 900, %{channel: "Guest87449", sender: "vjt", dm_with: "Guest87449"}))
+
+      queries = capture_queries(fn -> Scrollback.rename_dm_peer({:user, user.id}, net.id, "Guest87449", "Nuovo") end)
+
+      {sql, params} =
+        Enum.find(queries, fn {sql, _} -> String.starts_with?(sql, "UPDATE") and sql =~ ~s("dm_with" =) end) ||
+          flunk("no dm_with UPDATE captured; got:\n#{Enum.map_join(queries, "\n", &elem(&1, 0))}")
+
+      # The conjunct must reach the SQL byte-identically to the index's own
+      # expression — `Identifier.nick_fold_sql/1` is the single source both
+      # sides render from, and one byte of drift silently loses the index.
+      assert sql =~ Identifier.nick_fold_sql(~s|COALESCE(m0."dm_with", m0."channel")|),
+             "the dm_with UPDATE lost the coalesce-fold conjunct:\n#{sql}"
+
+      {:ok, %{rows: rows}} = Repo.query("EXPLAIN QUERY PLAN " <> sql, params)
+      plan = rows |> List.flatten() |> Enum.map_join("\n", &to_string/1)
+
+      assert plan =~ "messages_user_id_network_id_dm_coalesce_fold_id_kind_index",
+             "the dm_with UPDATE must run on the folded coalesce index:\n#{plan}"
+
+      # The seek term is the whole point: without `<expr>=?` the plan is the
+      # same index used as a SCAN behind `(user_id, network_id)` — which is
+      # the exact shape that cost 1704 ms in prod.
+      assert plan =~ "<expr>=?", "the dm_with UPDATE degraded to a prefix scan:\n#{plan}"
+      refute plan =~ "SCAN messages", "the dm_with UPDATE must not full-scan messages:\n#{plan}"
     end
 
     test "does NOT rename the own-nick inbound channel column", %{user: user, network: net} do

@@ -136,6 +136,11 @@ const CENSUS = [
   // padding reach the physical edges, which is why the animated rule has none.
   ".credits-chrome | right: max(0.5rem, var(--safe-area-inset-right))",
   ".credits-chrome | top: max(0.5rem, var(--safe-area-inset-top))",
+  // #1934 — the fast-forward button is the same guard in the opposite corner:
+  // one full-bleed modal, two corners of controls, so it insets itself for the
+  // same reason and with the same floor.
+  ".credits-ff | bottom: max(0.5rem, var(--safe-area-inset-bottom))",
+  ".credits-ff | right: max(0.5rem, var(--safe-area-inset-right))",
   ".credits-roll | padding: max(3rem, var(--safe-area-inset-top)) 1.5rem max(3rem, var(--safe-area-inset-bottom))",
   // #1931 — the ending parks the roll, and it parks it by reusing the
   // `prefers-reduced-motion` posture above declaration for declaration

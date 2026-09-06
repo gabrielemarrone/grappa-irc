@@ -376,8 +376,48 @@ const CreditsModal: Component = () => {
    * things to read at the same height anyway: the block is a sparse list of
    * names, prose is packed paragraphs, and pixels per second is not words per
    * second between them.
+   *
+   * vjt, #grappa 14:35, second time on the same complaint: "i blocchi di testo
+   * lunghi scorrono ancora troppo velocemente, rallentiamoli ulteriormente."
+   * 1.3 → 1.7. The reader who now wants to get ON has the fast-forward button
+   * for it, so the default no longer has to be a compromise between reading it
+   * and getting past it.
    */
-  const PROSE_PACE = 1.3;
+  const PROSE_PACE = 1.7;
+  // ── fast forward (vjt, #grappa 14:35) ───────────────────────────────────
+  // "magari mettiamo un bottone fast forward che velocizza lo scroll? in basso
+  // a dx?" — the way OUT of a set now that the double tap is gone, and the
+  // reason the default pace above can afford to be slow.
+  //
+  // `playbackRate` and not a second duration: the durations here are solved
+  // from a measurement and re-solved at every set boundary, so a temporary
+  // speed written into them would have to be divided back out of every one of
+  // those. The rate is a property of the CLOCK instead, it leaves the numbers
+  // alone, and the rain follows for free — it reads `getComputedTiming()`,
+  // which is already rate-scaled.
+  //
+  // BOTH animations get it, for the same reason they share a duration: the
+  // fade lives on the block and would otherwise keep real-time while the roll
+  // ran at 5x, which is the desync of 10:56 all over again.
+  const FAST_FORWARD_RATE = 5;
+  const [fastForward, setFastForward] = createSignal(false);
+  /**
+   * Put the current rate on the roll and its fade.
+   *
+   * Called again after every restart inside `syncRollDistance`, because a
+   * restart hands back BRAND NEW `Animation` objects: the rate is not a style,
+   * it does not survive the animation it was set on, and a set boundary
+   * crossed with the button held would otherwise drop back to 1x silently.
+   */
+  const applyRollRate = (node: HTMLElement): void => {
+    const rate = fastForward() ? FAST_FORWARD_RATE : 1;
+    const fade = node.querySelector<HTMLElement>(".credits-block-fading");
+    for (const el of fade ? [node, fade] : [node]) {
+      // jsdom has no `getAnimations`, and the tests drive this path.
+      for (const animation of el.getAnimations?.() ?? []) animation.playbackRate = rate;
+    }
+  };
+
   // Latched by the first measurement, then constant for the rest of the run.
   // It is a pace with the reading factor DIVIDED OUT, so that factor can be
   // re-applied per set: latching the first set's own speed would carry that
@@ -432,6 +472,9 @@ const CreditsModal: Component = () => {
         block.style.animation = "";
         block.style.animationDuration = `${cycle.toFixed(2)}s`;
       }
+      // Last, and after both restarts: the rate belongs to the animations that
+      // exist now, not to the ones this just threw away.
+      applyRollRate(node);
     });
   };
 
@@ -487,80 +530,53 @@ const CreditsModal: Component = () => {
     // dispatched at the CAPTURE TARGET, so the button's own onClick never runs
     // and the mute/close controls go dead. Measured: e2e #1773 read
     // aria-pressed="false" after clicking mute, nine polls in a row.
-    if ((event.target as Element | null)?.closest?.(".credits-chrome") != null) return;
+    if ((event.target as Element | null)?.closest?.(".credits-chrome, .credits-ff") != null) return;
     heldPointer = event.pointerId;
     const target = event.currentTarget as HTMLElement;
     // Guarded: jsdom has no pointer capture, and the tests drive this handler.
     target.setPointerCapture?.(event.pointerId);
     setHeld(true);
-    tapStartedAt = Date.now();
   };
 
-  // ── double tap: skip to the next set (vjt, #grappa 12:13) ───────────────
-  // "aggiungi che un doppio tap skippa il paragraph corrente / cosi testo
-  // senza aspettare". A reader who has finished a paragraph before the roll
-  // has should not have to sit through the rest of the travel.
-  //
-  // Built on the hold gesture rather than beside it, because the two share the
-  // same pointer sequence and a second listener would see the same taps: a tap
-  // is a grab and a release close together, and a double tap is two of those.
-  // Both halves must be SHORT — a long press is the hold, and a hold followed
-  // by a tap must not read as a double tap or every paused read would end by
-  // skipping the thing it just paused to read.
-  const TAP_MAX_MS = 250;
-  const DOUBLE_TAP_MS = 320;
-  let tapStartedAt = 0;
-  let lastTapAt = 0;
-
-  /**
-   * Turn the roll over NOW, exactly as the end of a cycle would.
-   *
-   * The restart is forced rather than left to `syncRollDistance`: that one
-   * dedups on `${h}x${vh}` and returns early when the next set happens to be
-   * the same height, which is right on the animation's own boundary (nothing
-   * to re-measure) and wrong here (the roll is mid-travel and the new text
-   * would appear halfway up the screen). Clearing the key makes it re-measure,
-   * and the re-measure is what restarts the animation from the bottom.
-   */
-  const skipSet = (): void => {
-    // Nothing to skip to once the ending is up, and restarting the roll there
-    // would pull the finale back off the bottom of the screen.
-    if (ended() || roll === undefined) return;
-    rollPass += 1;
-    setMovementName(creditsMovementName(rollPass));
-    advance();
-    lastMeasure = "";
-    syncRollDistance(roll);
-  };
-
+  // The double tap that used to live here — a second tap inside 320ms skipped
+  // to the next set (#grappa 12:13) — is GONE by vjt's order of 14:35: "il
+  // doppio tap per skippare non funziona, togliamolo". It shared its pointer
+  // sequence with the hold, which is exactly what made it unreliable in the
+  // hand: every tap short enough to count was also a hold being taken and
+  // dropped, and the two readings of the same gesture cannot both be right.
+  // The fast-forward button below is its replacement, and it is a button
+  // precisely so no gesture has to be disambiguated at all.
   const release = (event?: PointerEvent): void => {
     if (event && heldPointer !== null && event.pointerId !== heldPointer) return;
     heldPointer = null;
     setHeld(false);
-    if (event === undefined) return;
-    const now = Date.now();
-    // A release with no matching short press is not a tap: `releaseOnHide` and
-    // `lostpointercapture` both land here without one.
-    if (tapStartedAt === 0 || now - tapStartedAt > TAP_MAX_MS) {
-      tapStartedAt = 0;
-      lastTapAt = 0;
-      return;
-    }
-    tapStartedAt = 0;
-    if (lastTapAt !== 0 && now - lastTapAt <= DOUBLE_TAP_MS) {
-      lastTapAt = 0;
-      skipSet();
-      return;
-    }
-    lastTapAt = now;
   };
 
   // The backstop for the case capture cannot cover: the app going away
   // mid-hold (task switcher, lock button, a call). iOS does not always deliver
   // a pointer event on the way out, and a roll left frozen behind a hidden tab
   // is exactly the state this whole comment is about.
+  // Press and hold, like the button on a tape deck: the roll runs fast for
+  // exactly as long as the finger is down. A toggle would need a second press
+  // to undo it, and a fast-forward left latched by a missed release is a roll
+  // that never slows down again — the failure the hold gesture already taught
+  // us about, which is also why this takes the pointer capture.
+  const fastForwardOn = (event: PointerEvent): void => {
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    setFastForward(true);
+    if (roll !== undefined) applyRollRate(roll);
+  };
+  const fastForwardOff = (): void => {
+    if (!fastForward()) return;
+    setFastForward(false);
+    if (roll !== undefined) applyRollRate(roll);
+  };
+
   const releaseOnHide = (): void => {
-    if (document.visibilityState === "hidden") release();
+    if (document.visibilityState === "hidden") {
+      release();
+      fastForwardOff();
+    }
   };
   document.addEventListener("visibilitychange", releaseOnHide);
   onCleanup(() => {
@@ -620,6 +636,29 @@ const CreditsModal: Component = () => {
             onClick={closeCreditsModal}
           >
             ×
+          </button>
+        </div>
+
+        {/* Bottom right, where vjt asked for it and away from the chrome: the
+            two are opposite corners because they are opposite jobs — mute and
+            close are one press each, this one is held down. Its own container,
+            so `grab` can bail out of the whole corner the same way it bails
+            out of the chrome: without that, the modal's pointer capture eats
+            the button's own pointer sequence and the fast forward would take
+            the reading hold instead. */}
+        <div class="credits-ff">
+          <button
+            type="button"
+            class="modal-chrome-button credits-ff-button"
+            data-testid="credits-fast-forward"
+            aria-label="fast forward the credits"
+            aria-pressed={fastForward()}
+            onPointerDown={fastForwardOn}
+            onPointerUp={fastForwardOff}
+            onPointerCancel={fastForwardOff}
+            onLostPointerCapture={fastForwardOff}
+          >
+            ⏩
           </button>
         </div>
 

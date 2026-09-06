@@ -14548,6 +14548,30 @@ audio.media-viewer-media {
   gap: 0.25rem;
 }
 
+/* #1934 — fast forward, bottom right (vjt, #grappa 14:35). The opposite corner
+   from the chrome on purpose: those are one-press buttons, this one is held
+   down, and a held button beside the close button is a mis-tap waiting to
+   happen. Same safe-area guard, mirrored to the bottom. */
+.credits-ff {
+  position: absolute;
+  z-index: 2;
+  right: max(0.5rem, var(--safe-area-inset-right));
+  bottom: max(0.5rem, var(--safe-area-inset-bottom));
+}
+
+.credits-ff-button {
+  /* The modal above carries `touch-action: none`; this one says it for itself
+     because it is the element that takes the pointer capture, and a browser
+     pan gesture claiming the sequence would eat the release. */
+  touch-action: none;
+}
+
+/* Held is a state worth showing: the only other evidence is text going past
+   faster, which is not obvious on a paragraph you were not reading. */
+.credits-ff-button[aria-pressed="true"] {
+  color: var(--accent);
+}
+
 /* #1934 — the playing movement's name, next to the speaker. Muted, so it does
    not compete with the titles: it exists to be READ when someone wants to
    report what the music just did, not to be watched. */

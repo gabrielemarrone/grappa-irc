@@ -356,6 +356,28 @@ const CreditsModal: Component = () => {
   /** The reading factor of a set `h` tall on a `vh` screen — `[1, READ_SLOWDOWN]`. */
   const readSlowdown = (h: number, vh: number): number =>
     1 + (READ_SLOWDOWN - 1) * (Math.min(h, vh) / vh);
+  /**
+   * How much slower prose runs than the credits block it is paced against.
+   *
+   * vjt, #grappa 11:54: "i blocchi di testo lunghi sono ancora troppo veloci,
+   * rallentiamoli ancora un po'". Raising `READ_SLOWDOWN` would NOT have done
+   * it, and the reason is arithmetic rather than taste: the pace is solved
+   * from the first set, so a later set's cycle is
+   * `35 * ((h + vh) * f) / ((h1 + vh) * f1)` — and the credits block is itself
+   * taller than the screen (measured 1096 against a 894 viewport), so it sits
+   * at the cap. Every set that is ALSO taller than the screen — i.e. every
+   * long one, the ones vjt is complaining about — has `f = f1`, the factor
+   * cancels, and the constant washes out entirely. It only ever moved the
+   * SHORT sets, and moved them the wrong way.
+   *
+   * So the long sets need a term the first set does not have. The credits
+   * block keeps `FIRST_SET_SECONDS` exactly (11:10, "ok timing perfetti"),
+   * and everything after it reads slower by this much. The two are different
+   * things to read at the same height anyway: the block is a sparse list of
+   * names, prose is packed paragraphs, and pixels per second is not words per
+   * second between them.
+   */
+  const PROSE_PACE = 1.3;
   // Latched by the first measurement, then constant for the rest of the run.
   // It is a pace with the reading factor DIVIDED OUT, so that factor can be
   // re-applied per set: latching the first set's own speed would carry that
@@ -381,7 +403,11 @@ const CreditsModal: Component = () => {
       if (rollSpeedPxPerS === 0) {
         rollSpeedPxPerS = ((h + vh) * readSlowdown(h, vh)) / FIRST_SET_SECONDS / ROLL_TRAVEL_SHARE;
       }
-      const cycle = ((h + vh) * readSlowdown(h, vh)) / rollSpeedPxPerS / ROLL_TRAVEL_SHARE;
+      // Which SET is showing, not which measurement this is: rotating the
+      // phone during the credits block re-measures it, and that re-measure
+      // must still be the block, on the block's own clock.
+      const pace = rollPass === 0 ? 1 : PROSE_PACE;
+      const cycle = (((h + vh) * readSlowdown(h, vh)) / rollSpeedPxPerS / ROLL_TRAVEL_SHARE) * pace;
       node.style.setProperty("--credits-roll-h", `${h}px`);
       // Restart, or the compositor keeps the keyframes it already resolved and
       // the new number changes nothing until the next unrelated recalc.

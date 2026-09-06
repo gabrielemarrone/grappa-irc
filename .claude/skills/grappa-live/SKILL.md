@@ -23,6 +23,18 @@ Config lives at `~/.config/grappa/client.json` (or `$GRAPPA_CLIENT_CONFIG`),
 mode 0600, one per agent. It carries the credential — **never** pass a token or
 password on the command line, and never print the config.
 
+🔴 **On the Pi there is NO `client.json` — the configs are named PER AGENT** and the
+default path fails `exit 1` (`cannot read …/client.json`). Measured 2026-09-06:
+`~/.config/grappa/` holds `orch.json`, `w1.json`, `w2.json`. **The orchestrator posts with**
+
+```sh
+GRAPPA_CLIENT_CONFIG=$HOME/.config/grappa/orch.json tools/grappa-post.py "…"
+```
+
+⚠️ **Read the exit code from a redirected FILE, never through a pipe**, and read the
+message too: `1` is *your invocation*, not a broken transport — do not report a mute as
+a transport failure until a correctly-pathed call has also failed.
+
 Exit codes: `0` sent, `1` config/usage, `2` server refused, `3` transport. A
 non-zero exit is not worth retrying in a loop: the message was optional, the
 work is not. Log it and move on.

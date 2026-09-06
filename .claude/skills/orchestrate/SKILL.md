@@ -718,6 +718,20 @@ The daemon-survives-clear design means the *record* is never lost. The **listene
 - **Self-contained prompt files only.** With `/compact` an auto-summary covers gaps. With `/clear`, the prompt body in `/tmp/orchestrate-next.txt` is the ENTIRE context the sibling has after wipe. Sibling MUST bake in: every sub-task SHA so far, file paths, exact first action, all carried-forward state from any "deferred to next sub-task" notes. Tell sibling that explicitly when asking for the file.
 - **Daemon survives orchestrator restarts but NOT host reboots.** State + log + pid file in `/tmp` — fine across `/clear` + `/exit` + harness restart. If the box reboots, `/tmp` may be wiped (depends on OS); resume-check returns FRESH and you start over. Not a bug, just a constraint.
 - **Sibling can stash YOUR working-tree changes during its own deploy.** Visitor-parity V9 cluster: orchestrator was rewriting `lib/orchestrate/*` while sibling was prepping V9 deploy from a clean tree; sibling correctly stashed orchestrator's changes as `orchestrator-infra-pre-v9-deploy`. Untracked new files were lost (default `git stash` skips untracked — use `-u` if you care). Fix: stage + commit infra changes onto a separate branch BEFORE letting sibling deploy, OR pause infra work during sibling's deploy windows.
+  🔴🔴 **E NON È SOLO IL SIBLING: UN `git reset --hard` DI *VJT* NEL CHECKOUT CONDIVISO FA LO STESSO,
+  E NON LASCIA NIENTE DA RECUPERARE (06-09, misurato sul reflog).** Ha committato un bump `VERSION`
+  di sua iniziativa (`23:13:01 commit: release: 1.5.2`) e l'ha annullato 14 secondi dopo
+  (`23:13:15 reset: moving to HEAD~1`): il reset si è portato via **due mie modifiche NON committate**
+  alle skill, tornate al contenuto di HEAD. **Mai staged ⇒ nessun blob nell'object database ⇒
+  `git fsck --lost-found`, lo stash e il reflog non possono restituirle**: il reflog conserva i
+  COMMIT, non il working tree. Le ho riscritte solo perché erano ancora nel mio contesto.
+  🥇 **Regola: una modifica dell'orchestratrice a `.claude/skills/**` o a qualunque file tracciato del
+  checkout condiviso si COMMITTA nel turno in cui la fai** — sono docs, main è lecito. Lasciarla nel
+  working tree la espone a ogni `reset`/`checkout`/`stash` di chiunque altro lavori lì, worker E umano.
+  ⚠️ **`/home/vjt/code/grappa-irc` È `/srv/grappa`** (symlink, stesso `.git` inode): due nomi, un solo
+  albero. **Non leggere due path diversi come due checkout diversi** prima di aver risolto il symlink.
+  🥇 *E quando l'umano ti dice cosa ha rotto invece di lasciartelo scoprire dal disco, il reflog te lo
+  conferma in un comando: verificalo e vai avanti, senza farne un caso.*
 - **Stale task IDs surface back as notifications.** The harness sometimes re-fires completion events for old `task-id`s. Don't treat them as new events — verify the cursor advanced before processing. v2 cursor-tracking makes this safe (re-reading the same byte range yields nothing).
 - **Recurring same-triplet flake = real regression**, not flake (per `feedback_recurring_e2e_not_flake`). The visitor-parity cluster failed CI on the SAME 2 specs (network-circuit-ets-leak + push-server-fires-30s) for 6+ buckets in a row. Each bucket "documented as pre-existing flake and proceeded" — this is exactly the retry-mask pattern the rule warns against. Halt + investigate after the SECOND consecutive recurrence, not the sixth.
 - **`STALL state=idle` means YOU forgot to dispatch.** Don't ping vjt with "sibling stalled" — sibling is waiting on you. If the pane shows sibling's `CLEAR` + a staged `/tmp/orchestrate-next.txt`, auto-dispatch immediately under the autopilot mandate. Origin: visitor-parity cluster CLOSE → Images dispatch — orchestrator pinged vjt twice asking "Images dispatch a/b/c?" while sibling sat idle for 600+ seconds. The autopilot rule from cluster open already covered "dispatch staged next-cluster prompts without asking" — STALL idle is the signal that you missed the cue.
@@ -1124,6 +1138,15 @@ said "ask vjt for the STACK lane", which is flatly wrong: lanes are MINE).
   body-keyword close at `19:24:32Z commit_id=null`). **Quoting the trap sets it off.** So the rule
   binds **PR bodies, commit messages, and any text that lands on the default branch** — and when you
   must QUOTE the pattern, break it: write the keyword and the number **without an adjacent `#`**.
+  ✅ **MA LA FORMA CONVENTIONAL-COMMIT COL PAREN NON MATCHA — misurato 06-09, e restringe la regola
+  invece di allargarla.** Quattro commit `fix|feat|docs|style` con il numero fra parentesi tonde
+  subito dopo il verbo — la forma `<verbo>(<numero>):` che questo repo usa in ogni scope — sono
+  atterrati su main e la issue **è rimasta OPEN**. ⇒ **la trappola è il verbo seguito da uno SPAZIO e
+  poi il numero**, non il verbo attaccato a una parentesi. **Non è licenza per rilassare la regola**:
+  il costo di sbagliare è asimmetrico (una issue chiusa a tradimento contro un `#` in meno), quindi
+  la forma sicura resta scrivere il numero **senza il cancelletto adiacente** ogni volta che la frase
+  deve nominarlo e non deve chiuderlo. Serve a NON farsi prendere dal panico rileggendo lo storico:
+  i commit di scope non hanno mai chiuso niente.
   🔍 **How to tell the three closes apart:** body keyword ⇒ **`commit_id: null`**, ~2 s after
   `mergedAt`; **commit message ⇒ `commit_id` IS the offending SHA** (that is how the second one was
   caught); a human ⇒ neither, and you cannot prove it from the actor field at all.

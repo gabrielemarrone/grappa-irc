@@ -47446,3 +47446,133 @@ them to contrast had the second silently eat the first.
 _Deploy: **cold** — `infra/docker/release-entrypoint.sh` is baked into the
 release image, so it reaches an operator only through a new image. The m42
 jail runs `mix release` and does not read it; nothing else here leaves CI._
+<!-- entry #1952b -->
+
+---
+
+## 2026-09-07 — #1952b: the two hostile shapes the first pass refused, and the reading that made one of them look impossible
+
+The hostile-substrate matrix #1952 asks for is FOUR shapes. The first pass
+shipped two — `--read-only` and `--workdir /` — and named the other two in the
+driver's non-coverage list, one as a judgement and one as a measurement. Both
+are now run. This entry is mostly about why the refusals were wrong, because
+the mistake is reusable and the fix is not.
+
+### An arbitrary uid: the mechanism was right, the conclusion did not follow
+
+The refusal read: docker re-seeds an EMPTY named volume from the image on every
+mount, ownership included, so a helper container's `chown -R 65534 /data` reads
+back as `65534` inside that container and as the image's `100:101` in the next
+one — therefore the shape cannot be set up.
+
+The first clause is TRUE and re-measured here: create a volume, chown it,
+mount it again, and the image's owner is back. The second clause does not
+follow from it, because the re-seed only applies **while the volume is empty**.
+One zero-byte file inside and the ownership sticks:
+
+| fixture | next container reads |
+| --- | --- |
+| empty volume, `chown 65534` from a helper | `100:101` — re-seeded |
+| one file inside, `chown -R 65534` | `65534:65534`, and writable |
+| control: virgin volume, `--user 65534` writes | `permission denied` |
+
+So the shape is constructible, and the fixture is not a trick to dodge docker:
+handing storage to the uid it will run as is what an arbitrary-uid deployment
+does anyway — a Kubernetes `fsGroup`, an operator's `chown` on the host path.
+The general rule the miss illustrates: **a measured mechanism plus an
+inference is not a measurement.** "I could not build it" and "it cannot be
+built" are different claims, and only the first was in evidence.
+
+What the shape then found is the strongest red in the file, because it is
+#1945 verbatim rather than a cousin of it. Same fixture, same flags, the two
+releases apart:
+
+```
+v1.5.1   running/0, /healthz in 2s
+v1.5.0   exited/1
+         ** (File.Error) could not make directory (with -p)
+            "runtime/peer_avatars": permission denied
+                (grappa 1.5.0) lib/grappa/avatars/reaper.ex:79
+```
+
+The path in that error is RELATIVE. `/app` is writable by the baked user and
+by nobody else, which is exactly why the same defect is silent on every other
+docker shape. The control that makes the pair mean something: v1.5.0 with the
+baked user on an ordinary volume boots healthy, so the red belongs to the uid
+and not to the release.
+
+### A volume over /app: one sentence, two substrates, opposite answers
+
+The refusal read: the release IS `/app`, so mounting over it removes the thing
+under test. That is TRUE OF A BIND MOUNT AND FALSE OF A NAMED VOLUME, and the
+issue's words ("a volume mounted over `/app`") name the second.
+
+* empty **bind** mount — the container is not merely unable to boot, it cannot
+  be CREATED: `stat /app/release-entrypoint.sh: no such file or directory`,
+  status `created/127`. It stays in the non-coverage list, now with that
+  measurement attached.
+* named **volume** — docker copies the image's `/app` into it at first mount,
+  permissions and the setgid bit included, and the container boots. Both
+  v1.5.0 and v1.5.1 answer `/healthz`.
+
+Which is the problem with the shape: **boot alone does not discriminate**, so
+a probe asserting only `/healthz` here would be a fifth ordinary boot. What
+discriminates is the release root itself. `docker diff` — probe 7's oracle for
+"the boot wrote nothing outside /data" — never reports what is under a mount,
+and on this substrate answers **zero lines for v1.5.0**, whose #1945 defect
+creates `runtime/peer_avatars` right there. So shape 3 reads the same property
+through the window the mount leaves open: `ls -1A` on the volume after the
+boot must equal `ls -1A` on the `/app` the image ships. Measured, the same
+comparison the driver runs:
+
+```
+[ -s shipped ]  → non-empty (the blindness guard)
+cmp             → DIFFER
+diff            → 7a8 > runtime
+```
+
+### What this probe's green does NOT mean, and it needs saying
+
+Mounting a volume over `/app` is not thereby supported. The copy-up happens
+ONCE, while the volume is empty: pull a new image, recreate the container, and
+the volume still holds the OLD release. Measured — a container started from
+`:v1.5.1` on a volume seeded by v1.5.0 reports `.Config.Image = …:v1.5.1` to
+`docker inspect` and version `1.5.0` to `/api/config`. Silent stale code across
+exactly the upgrade this issue exists for. The driver therefore removes that
+volume before the run AND in the teardown, since a leaked one would make the
+NEXT smoke boot a release nobody built while reporting the tag it was asked
+for.
+
+### A mutation test that landed somewhere else, and was worth keeping
+
+To prove shape 3's oracle is not blind, an image was built from v1.5.1 with
+#1945's shape reintroduced — a relative `mkdir -p runtime/peer_avatars` in the
+entrypoint, guarded by a `cmp` proving the `sed` had matched. Run through the
+driver it died at **probe 7**, not shape 3: the mutation writes on every boot,
+and `docker diff` on the ordinary container sees it first. That is the right
+behaviour and the wrong experiment — the two oracles overlap on the ordinary
+substrate, and shape 3's exists only for the one where probe 7 cannot look. The
+isolating evidence is the direct run above, against a volume a real v1.5.0
+booted on.
+
+### Shape of the driver
+
+`hostile_boot` now takes the `uid:gid` its `/data` volume must be handed to as
+a REQUIRED third argument — no default, because that ownership is half of what
+a shape means, and a call that forgets it puts a docker flag where the owner
+belongs. Three of the four pass the image's own owner, read out of the image
+with `stat -c %u:%g /data` rather than spelled: a literal `100:101` here is a
+second copy of a Dockerfile fact, wrong the day `adduser -S` picks another
+number. The arbitrary uid is guarded against BEING that owner, or the shape
+would be an ordinary boot wearing a `--user` flag.
+
+`test/infra/release_hostile_matrix_test.bats` is the PR-time half, for the same
+reason the upgrade probe has one: nothing in the `smoke` job runs on a pull
+request. It folds the driver's backslash-continuations and EVALUATES each
+`hostile_boot` call with the function replaced by a recorder, so the assertions
+read the real argument lists through the real quoting — a shape that dropped
+its owner argument shows up as a flag in `$3`, which is the mistake a grep
+cannot see. It carries its own negative control on that predicate.
+
+_Deploy: **nothing** — the driver and its bats run in CI and by hand; no
+runtime code changed, and no substrate reads either file._

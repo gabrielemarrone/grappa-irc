@@ -452,22 +452,56 @@ passing that arg too — see § "The published release image" in
 `docs/OPERATIONS.md`. The asymmetry is the point: the naked build must
 keep degrading honestly, the shipped image must not.
 
-**The version seam, and the two hostile shapes that are NOT run (#1952).**
-The upgrade probe boots the previous release on a fresh volume, writes
-state through it, stops it and starts the candidate on that same volume —
-previous → candidate only, since a downgrade is a different question with
-a different answer. How many migrations must run is DERIVED from the two
-images (the previous booted on an empty volume, so what is applied there
-is exactly its own set) rather than naming a migration that would go
-stale. Refused, and each for a measured reason rather than a preference:
+**The version seam (#1952).** The upgrade probe boots the previous
+release on a fresh volume, writes state through it, stops it and starts
+the candidate on that same volume — previous → candidate only, since a
+downgrade is a different question with a different answer. How many
+migrations must run is DERIVED from the two images (the previous booted
+on an empty volume, so what is applied there is exactly its own set)
+rather than naming a migration that would go stale.
 
-* **a volume over `/app`** removes the release itself, so asserting that
-  it answers 200 would assert a falsehood;
-* **an arbitrary uid (`--user 65534`)** cannot be set up. Docker re-seeds
-  an EMPTY named volume from the image on every mount, ownership
-  included, so `chown -R 65534 /data` in a helper container reads back as
-  `65534` inside it and as the image's `100:101` in the next one. The
-  property it would test is what the read-only shape asserts directly.
+**All FOUR hostile shapes now run (#1952b).** Each gets a first boot of
+its own on a fresh volume, and each carries a `docker inspect` ARM CHECK
+that must come back `true` — without it, a flag docker silently stopped
+honouring turns the shape into an ordinary boot reporting green. Two of
+them arrived later than the others and are worth reading before touching
+either:
+
+* **an arbitrary uid (`--user 65534`)** was first refused as
+  unconstructible, on a mechanism that is real and an inference that is
+  not. Docker re-seeds an EMPTY named volume's ownership from the image
+  on every mount — but only while it is empty, so one zero-byte file
+  inside makes a `chown -R` stick. `hostile_boot` therefore takes the
+  `uid:gid` its `/data` must be handed to as a required argument.
+  Measured, the same fixture on the two releases: v1.5.1 `/healthz` in
+  2s, v1.5.0 `exited/1` on `(File.Error) could not make directory (with
+  -p) "runtime/peer_avatars"` — #1945 verbatim, and note the RELATIVE
+  path. Control: v1.5.0 with the baked user on an ordinary volume boots
+  healthy, so the red is the uid and not the release.
+* **a volume over `/app`** boots, and that is not the same sentence for
+  both readings of it. An empty BIND mount leaves no release to run and
+  the container cannot even be created (`created/127`); a NAMED volume
+  is seeded from the image at first mount and comes up. Boot alone does
+  not discriminate — both releases answer `/healthz` — so this shape
+  also compares the release root after the boot against the one the
+  image ships (`ls -1A`, hidden entries included, with a non-empty
+  guard and a planted-`runtime/` canary). It must: `docker diff`, the
+  oracle for "the boot wrote nothing outside `/data`", never reports
+  what is under a mount and answers **zero lines** for v1.5.0 on this
+  substrate, while the volume grows `runtime`.
+  ⚠️ **A green here does NOT mean the shape is supported.** The copy-up
+  happens once, while the volume is empty; recreate the container on a
+  newer image and it still boots the OLD release — measured, `:v1.5.1`
+  on a v1.5.0-seeded volume reports the new tag to `docker inspect` and
+  `1.5.0` to `/api/config`. That is why the driver destroys that volume
+  before the run AND in the teardown.
+
+`test/infra/release_hostile_matrix_test.bats` is the PR-time half —
+nothing in the `smoke` job runs on a pull request, so a shape deleted or
+left unarmed would surface only on a release. It folds the driver's line
+continuations and EVALUATES each `hostile_boot` call with the function
+replaced by a recorder, so it reads the real argument lists rather than
+grepping for them.
 
 **The read-only recipe is `--read-only --tmpfs /tmp`, and nothing more.**
 Naked, the boot dies on `mktemp: : Read-only file system` before it

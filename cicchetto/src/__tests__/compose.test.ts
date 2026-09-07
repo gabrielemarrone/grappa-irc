@@ -139,6 +139,18 @@ vi.mock("../lib/aliasList", () => ({
 // sub-page. The real module just bumps a signal: nothing throws, so the arm
 // reported `{ok: true}` with no trace, which is a silent success no mutant
 // could reach. Mocked here so the requested SECTION becomes observable.
+// #1958 — /credits flips the credits modal's open signal. Same argument as
+// settingsNav above: the real module only bumps a signal, so the arm would
+// report `{ok: true}` with no trace. Mocked so the open becomes observable.
+vi.mock("../lib/creditsModal", () => ({
+  CREDITS_LABEL: "credits",
+  creditsModalOpen: vi.fn(() => false),
+  openCreditsModal: vi.fn(),
+  closeCreditsModal: vi.fn(),
+  creditsMuted: vi.fn(() => false),
+  toggleCreditsMuted: vi.fn(),
+}));
+
 vi.mock("../lib/settingsNav", () => ({
   requestOpenSettings: vi.fn(),
   requestSettingsPage: vi.fn(),
@@ -5080,6 +5092,25 @@ describe("compose submit — info verbs (TODO stubs)", () => {
   });
 });
 
+// #1958 — /credits is a UI deep-link like the bare watch-family verbs: it
+// opens the end-titles modal, prints nothing, touches no REST and no socket.
+describe("compose submit — /credits (#1958)", () => {
+  it("/credits opens the credits modal and clears the draft, silently", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const credits = await import("../lib/creditsModal");
+    const sb = await import("../lib/scrollback");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/credits");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(credits.openCreditsModal).toHaveBeenCalledTimes(1);
+    expect(sb.sendMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true });
+    expect(compose.getDraft(k)).toBe("");
+  });
+});
+
 // #356 — watch-family dispatch: keyword highlight (/hilight add, /dehilight
 // del, /highlight alias) + presence (/notify, /watch alias) as classic-IRC
 // irssi-direct verbs; a bare form opens the watch-lists settings section
@@ -5691,6 +5722,7 @@ const DISPATCH_CASE_LABELS = [
   "notify",
   "np",
   "op",
+  "open-credits",
   "open-settings",
   "oper",
   "part",
@@ -5812,6 +5844,7 @@ const DISPATCH_DRAFTS: ReadonlyArray<{ kind: SlashCommand["kind"]; draft: string
   { kind: "alias-define", draft: "/alias hi /msg bob $*" },
   { kind: "unalias", draft: "/unalias hi" },
   { kind: "open-settings", draft: "/watch" },
+  { kind: "open-credits", draft: "/credits" },
   { kind: "service-modal", draft: "/ns" },
   { kind: "error", draft: "/nosuchverb" },
 ];
@@ -5824,6 +5857,7 @@ const MOCKED_SEAM_MODULES = [
   "../lib/api",
   "../lib/banlistModal",
   "../lib/channelDirectory",
+  "../lib/creditsModal",
   "../lib/members",
   "../lib/mentionsWindow",
   "../lib/modeModal",
@@ -5907,12 +5941,12 @@ describe("#1396 — dispatch characterization over every arm", () => {
       misparsed,
     }).toMatchInlineSnapshot(`
       {
-        "arms": 63,
+        "arms": 64,
         "armsWithNoDraft": [],
         "draftsNamingNoArm": [],
         "duplicated": [],
         "misparsed": [],
-        "rows": 63,
+        "rows": 64,
       }
     `);
   });
@@ -6357,6 +6391,16 @@ describe("#1396 — dispatch characterization over every arm", () => {
             "ok": true,
           },
         },
+        "open-credits": {
+          "effects": [
+            "aliasList.aliases()",
+            "creditsModal.openCreditsModal()",
+            "networks.networkIdBySlug("freenode")",
+          ],
+          "result": {
+            "ok": true,
+          },
+        },
         "open-settings": {
           "effects": [
             "aliasList.aliases()",
@@ -6715,7 +6759,7 @@ describe("#1396 — dispatch characterization over every arm", () => {
           "aliasList.aliases()",
           "networks.networkIdBySlug("freenode")",
         ],
-        "arms": 63,
+        "arms": 64,
         "indistinguishablePairs": [
           [
             "ame",

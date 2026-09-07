@@ -11,6 +11,7 @@ import { watchlistCommand } from "./commands/highlight";
 import {
   aliasDefineCommand,
   errorCommand,
+  openCreditsCommand,
   openSettingsCommand,
   unaliasCommand,
 } from "./commands/local";
@@ -1147,6 +1148,10 @@ const exports_ = identityScopedStore((onIdentityChange) => {
         }
         case "open-settings": {
           result = await openSettingsCommand(cmd, ctx);
+          break;
+        }
+        case "open-credits": {
+          result = await openCreditsCommand(cmd, ctx);
           break;
         }
         case "quote": {

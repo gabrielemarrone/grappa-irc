@@ -1919,3 +1919,57 @@ con la variante senza `\n` come controllo che discrimina.)
   hot/cold.* **Cura: `git fetch origin main` NELLO STESSO BLOCCO di ogni misura che usa
   `origin/main`** — specie **dopo un merge fatto via `gh api -X PATCH`, che NON tocca la ref
   locale** (è la stessa trappola già scritta per il push via URL ssh esplicito, da un'altra porta).
+
+## 🧭 REGOLE NATE IL 2026-09-07 (permanenti — migrate dall'handoff)
+- 🥇🥇 **N RAMI CHE APPENDONO ALLO STESSO FILE SI CHIUDONO CON UNA UNION, E LA UNION SI COSTRUISCE
+  PER **MERGE**, NON PER CHERRY-PICK (ruling di vjt, misurata sul campo con #1967+#1976+#1978).**
+  Il precedente #851 di questo file cherry-pickava; **vjt l'ha corretto e aveva ragione due volte.**
+  (1) Il cherry-pick **riscrive le SHA e porta via la paternità** delle worker — stessa ragione per
+  cui non si squasha la PR di un altro. (2) **Col merge le head restano ANTENATE di main, quindi
+  GitHub marca le PR `MERGED` DA SOLE**: misurato, quattro PR passate a `MERGED` **allo stesso
+  secondo** (14:06:13Z) dopo un FF. ⇒ **sparisce del tutto la chore "chiudi per contenuto"**, quella
+  che questo file registra essere leakata cinque volte in un giorno. Il driver `merge=union` gira
+  comunque, perché è **git locale**: è solo GitHub a non applicarlo sul merge-ref.
+  🥇 **E la union è la scelta ONESTA, non solo quella economica**, quando due rami toccano la stessa
+  SUPERFICIE pur senza un file in comune (lì: readout dello skew del bundle vs
+  `CLIENT_PROTOCOL_VERSION` 9→13). *"Non si toccano testualmente"* non vuol dire indipendenti — è la
+  regola già scritta per il batch-merge, vista dall'altro lato.
+  📏 **Il conto che decide:** con N rami append-only, GitHub rifà `CONFLICTING` gli altri N−1 a ogni
+  merge ⇒ **N cicli rebase+CI serializzati**. Misurato lì: 2 delle 3 pagavano una `integration` piena
+  (~25' l'una) ⇒ ~55-60' contro **una** CI sola.
+- 🥇🥇 **L'ARITMETICA PREDETTA PRIMA SCALA A N RAMI, ED È L'UNICA PROVA PORTANTE QUANDO UNION
+  RISOLVE IN SILENZIO.** `rc=0` + zero file in conflitto è **esattamente** il caso in cui il verde non
+  prova niente. Forma: `byte(DN di main) + Σ byte(entry di ogni ramo) == byte(DN dopo)`, idem per le
+  righe, **scritta PRIMA**. Misurata al byte su tre rami (`47614+130+109+76 = 47929`;
+  `2792128+6810+6081+4429 = 2809448`) e poi su un quarto in cascata.
+  ➕ **Il compagno che il numstat non può dare su un append puro** (lì *"deletions zero"* è una
+  tautologia): **`cmp` byte-identico sul PREFISSO** — le prime N righe del file nuovo contro il DN di
+  main. Portato da w2 senza che lo chiedessi.
+- 🔴 **UN FILE CONTESO SENZA DRIVER SI VERIFICA NEI DUE VERSI, RIGA PER RIGA.** `merge=union` copre
+  **solo** `docs/DESIGN_NOTES.md`: `docs/OPERATIONS.md` (toccato da ramo **e** main) se lo risolve
+  `ort` da solo, e va provato che **nessuno dei due lati** sia stato mangiato — lì 14/14 del ramo e
+  67/67 di main, con pos ctrl e neg ctrl. 🪞 **E il primo giro del controllo era rotto nel MIO
+  strumento**: le righe che iniziano per `-` vengono lette da `grep` come **opzioni** ⇒ falsi
+  "MANCA". **Usa `grep -qxF -e "$l"`.**
+- 🔴 **UN DEPLOY "HOT COMPLETO, SESSIONI PRESERVATE" PUÒ NON AVER CAMBIATO NIENTE CHE GIRA.** Il
+  delta `3277a1700..2277a28f7` **non conteneva una riga di `lib/`**: il carico utente era tutto nel
+  bundle cic. **Leggere la riga di successo del deploy server come "il server fa cose nuove" è un
+  errore** — misura il diff e dillo. (E la classificazione hot/cold **la verifichi TU**, non lo
+  script: lì zero trigger cold, con pos ctrl su un altro delta.)
+- 🥇 **LA VERIFICA PER CONTENUTO DEL BUNDLE CIC SI FA CON UN BEFORE/AFTER, NON CON UN SOLO DOPO.**
+  Prendi un token che **solo il lavoro nuovo** introduce (un nome di classe sopravvive alla
+  minificazione), misuralo sul bundle servito **PRIMA** (deve dare 0), deploya, rimisura (deve dare
+  >0), con pos ctrl (una stringa che c'è già) e neg ctrl. Misurato:
+  `settings-build-deployed-hash` **0 → 1**, pos ctrl 3 → 4, neg ctrl 0, hash `CH9WCihg → CdqZuSQZ`.
+  **La mtime e la riga di broadcast non rispondono alla domanda.**
+- ⚠️ **`ci-watch.sh` stampa `NO-CHECKS (conflicting?)` anche quando l'API è semplicemente
+  IRRAGGIUNGIBILE** — tre volte su tre armamenti dal Pi, sempre rete. **Quella riga asserisce una
+  causa che non ha misurato** (stessa famiglia dell'etichetta cablata *"still refusing port 22"*).
+  **Rimisura a mano; non rebasare mai su quell'evento.**
+- 🥇 **UNA WORKER CHE TI LASCIA UNA PREDIZIONE VERIFICABILE AL POSTO DI UNA RASSICURAZIONE È LO
+  STANDARD — chiedilo nei brief.** w2: *"dopo il tuo ff main deve misurare 48013 righe / 2814158
+  byte"*. È un'affermazione che **può fallire**, e questo la rende utile.
+- 🥇 **E la risposta migliore a una tua domanda può essere un ARTEFATTO, non una risposta.** Avevo
+  chiesto a w1 se il cwd su `main` fosse deriva o deliberato: ha stampato **`PWD_AT_RUN` dentro OGNI
+  log** ⇒ l'attribuzione sta nell'artefatto e non nella sua parola. *Il controllo DENTRO lo
+  strumento, di nuovo.*

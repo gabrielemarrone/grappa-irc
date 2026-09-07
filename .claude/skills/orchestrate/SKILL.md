@@ -976,6 +976,18 @@ block as the dispatch send-keys; `strip status:*` rides the SAME turn as process
   cheaper.** Take the shard cost; the rerun shortcut buys nothing here and costs a full extra cycle
   plus the worker's time re-deriving why the "fix" did not land. `rerun` stays right for a genuinely
   transient failure (runner/registry death), where the merge ref is not what changed.
+- 🔴🔴 **`.claude/` IS NOT UNGATED — `.claude/skills/orchestrate/lib/` IS RUN BY CI, ONLY `SKILL.md`
+  IS NOT (w1, 2026-09-07, correcting me with the measure).** I justified merging a PR whose green
+  predated a docs commit of mine by saying *"nothing compiles `.claude/`"*. **The file was safe; the
+  sentence was not:** `test/scripts/orchestrate_auto_clear_watch_test.bats:40` reads
+  `.claude/skills/orchestrate/lib/auto-clear-watch.sh`, and `ci.yml:152` runs bats over
+  `test/scripts/`. So editing a script under `lib/` **can redden CI**, and the next person to reuse my
+  sentence would ship a break believing the directory is inert.
+  🥇 **The rule is per-PATH, never per-directory: `…/orchestrate/lib/` YES, `SKILL.md` NO.** Same
+  family as *"«it is a label» is a property of the SINGLE BEARER, not of the class"* — I had measured
+  one file and generalised to its whole tree. 🥇 *And the worker who catches this says both halves —
+  "your conclusion holds, your generalisation does not" — instead of just agreeing or just objecting.
+  Ask for that shape in briefs.*
 - 🥇 **THE SAME JOB GREEN ON ONE PR AND RED ON ANOTHER, WITH THE SAME COMMITS, IS NOT A FLAKE — CHECK THE CLOCK.**
   A PR's CI builds `refs/pull/N/merge`, i.e. the branch merged with main **as of when that check-run STARTED**. So a
   fix landing on main silently turns the job green for every check-run started afterwards, while older runs keep

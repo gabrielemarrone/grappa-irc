@@ -7,8 +7,11 @@ defmodule Grappa.Push.PayloadTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  alias Grappa.IRC.MircFormat
   alias Grappa.Push.Payload
   alias Grappa.Scrollback.Message
+
+  @color "\x03"
 
   defp msg(opts) do
     %Message{
@@ -102,6 +105,104 @@ defmodule Grappa.Push.PayloadTest do
     test "shape is always the four required atom keys" do
       payload = Payload.build(msg(channel: "#sniffo"), "libera", "vjt")
       assert Enum.sort(Map.keys(payload)) == [:body, :tag, :title, :url]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # build/3 — mIRC formatting projection (issue 1977)
+  # ---------------------------------------------------------------------------
+
+  describe "build/3 — mIRC formatting projection (issue 1977)" do
+    # `\x03` is non-printing, so the OS notification renderer DROPS the byte
+    # and leaves its decimal operands sitting in the text as ordinary digits —
+    # the lock-screen capture that filed 1977 read `04QUACK` where the wire
+    # carried `\x03` `0` `4` `QUACK`. The expectations below are LITERALS
+    # (what the reader saw), not a re-derivation through the projection: a
+    # `== MircFormat.plain_text(body)` assert alone would survive the
+    # projection being dropped from `build/3` if the input happened to be
+    # clean. The one lockstep assert that DOES call production carries its own
+    # `refute` against the raw input for exactly that reason.
+    test "a colour-padded body reaches the payload as the text a human read" do
+      body = @color <> "15QUACK" <> @color <> "04,08 quack" <> @color
+
+      payload = Payload.build(msg(channel: "#allnitecafe", body: body), "azzurra", "vjt")
+
+      assert payload.body == "QUACK quack"
+
+      # 1977 left this unmeasured ("probably untouched, but I did not check
+      # it"). It is: `dedup_key` reads `sender` or `channel`, never `body`, so
+      # no amount of formatting in the body can perturb the OS dedup surface.
+      assert payload.tag == "azzurra:#allnitecafe"
+      assert payload.title == "alice in #allnitecafe"
+    end
+
+    test "a DM body is projected on the same door" do
+      payload =
+        Payload.build(
+          msg(channel: "vjt", sender: "alice", dm_with: "alice", body: @color <> "15ping"),
+          "libera",
+          "vjt"
+        )
+
+      assert payload.title == "alice"
+      assert payload.body == "ping"
+    end
+
+    # The title takes the same input class as the body. A nick cannot carry
+    # `\x03` — `Identifier.valid_nick?/1`'s charset has no control byte and
+    # `valid_sender?/1`'s host arm excludes `\x00-\x1f` outright — but a
+    # CHANNEL can: `@channel_regex` excludes only whitespace, comma and BELL,
+    # the parser strips only `\x00 \r \n`, and `canonical_target/1` folds
+    # `A-Z` and passes every other byte through. So the projection is on the
+    # composed title rather than on the channel alone: one door for both arms,
+    # and the sender arm costs nothing because the projection is provably a
+    # no-op on a valid nick.
+    test "a colour-padded channel does not leak digits into the title" do
+      payload =
+        Payload.build(
+          msg(channel: "#" <> @color <> "04allnitecafe", sender: "peluche"),
+          "azzurra",
+          "vjt"
+        )
+
+      assert payload.title == "peluche in #allnitecafe"
+    end
+
+    # The projection is a DISPLAY rule, so it stops at the two fields the OS
+    # renders. `tag` is an OS dedup key and `url` is a deep link cic resolves
+    # back to a window — both must carry the channel KEY as stored, or the
+    # banner coalesces against the wrong surface and the click lands on a
+    # channel that does not exist.
+    test "the tag and the deep link keep the RAW channel key" do
+      channel = "#" <> @color <> "04allnitecafe"
+
+      payload = Payload.build(msg(channel: channel), "azzurra", "vjt")
+
+      assert payload.tag == "azzurra:" <> channel
+      assert payload.url == "/?network=azzurra&channel=%23%0304allnitecafe"
+    end
+
+    test "the projection IS MircFormat.plain_text/1, not a private copy" do
+      body = @color <> "04,08QUACK" <> "\x02bold\x0F"
+
+      payload = Payload.build(msg(channel: "#allnitecafe", body: body), "azzurra", "vjt")
+
+      assert payload.body == MircFormat.plain_text(body)
+      # Non-vacuity: the input MUST be one the projection actually changes,
+      # else the assert above passes on an unprojected `build/3`.
+      refute payload.body == body
+    end
+
+    # CLAUDE.md's charset rule: CTCP framing is NOT formatting and round-trips
+    # verbatim. `build/3` now runs a stripper over the body, so pin here that
+    # the stripper is the mIRC one and not a general control-byte purge — an
+    # ACTION row must still reach the payload framed.
+    test "CTCP framing survives the projection" do
+      body = "\x01ACTION " <> @color <> "04waves\x01"
+
+      payload = Payload.build(msg(channel: "#allnitecafe", body: body), "azzurra", "vjt")
+
+      assert payload.body == "\x01ACTION waves\x01"
     end
   end
 

@@ -623,7 +623,7 @@ defmodule Grappa.Session.EventRouterTest do
         assert {:cont, _, effects} = EventRouter.route(m, state)
 
         for effect <- effects, elem(effect, 0) == :reply do
-          assert {:reply, _line, origin} = effect
+          assert {:reply, _, origin} = effect
           assert origin in [:event_router_reply, :ghost_recovery, :recover_identity]
         end
       end

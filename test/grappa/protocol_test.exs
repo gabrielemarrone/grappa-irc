@@ -58,6 +58,58 @@ defmodule Grappa.ProtocolTest do
     end
   end
 
+  # #1973 — the OTHER direction, and the one every pin in this file was blind
+  # to: cic falling behind `version/0`.
+  #
+  # The three pins that exist all point one way and all stayed green while the
+  # constant rotted. `>= min_version()` above is `9 >= 1`; the server floor
+  # below is `9 <= 13`; cic's own `MIN_SERVER <= CLIENT`
+  # (`serverProtocol.test.ts`) is `9 <= 9`. Nothing compared cic against what
+  # the server actually SPEAKS, which is the number socket.ts says it is
+  # declaring ("The number is the CONTRACT version", socket.ts:71-75).
+  #
+  # Measured drift on `origin/main` at the time of writing: 12 bumps of
+  # `@protocol_version` (1 → 13, 2026-07-27 → 2026-09-06) against 3 writes of
+  # `CLIENT_PROTOCOL_VERSION`, two of which were catch-ups — the 2 → 9 one
+  # skipped seven bumps at once. Since cic first declared a version
+  # (2026-08-16) the two constants have been equal for roughly 8 days out of
+  # 22. The stale value is the normal state, not the accident.
+  #
+  # Why that is not cosmetic: `noteServerProtocol` (socket.ts:441-451) warns on
+  # ANY inequality, in either direction, and its only silence is exact
+  # equality. A constant that lags therefore fires "protocol mismatch" on every
+  # healthy boot of a deploy whose bundle and BEAM came from the SAME commit —
+  # which destroys the one signal that a service-worker-cached PWA is skewed
+  # against the BEAM (socket.ts:428-433). It has already misled a tester once.
+  # With this pin, an inequality at runtime means the two artefacts came from
+  # different commits, which is exactly what the warn is for.
+  #
+  # Why EQUALITY and not `>=`: the two numbers are the same contract by
+  # definition, so there is no direction to tolerate. cic below `version/0` is
+  # a stale constant; cic above it is a bundle claiming a shape no server has
+  # ever emitted. Both are the same defect — the declaration not matching the
+  # wire — and `>=` would wave one of them through. This is deliberately NOT
+  # the axis of `MIN_SERVER_PROTOCOL_VERSION`, which stays a separate number
+  # precisely because a bundle may speak v13 and still cope with a v9 server
+  # (serverProtocol.ts:45-49); pinning what cic SPEAKS says nothing about what
+  # it REQUIRES.
+  describe "what cicchetto declares vs what the server SPEAKS (#1973)" do
+    test "cicchetto's declared version IS the protocol the server speaks" do
+      # Fails on any bump of `@protocol_version` that does not carry the cic
+      # constant with it — i.e. on the commit that introduces the drift, rather
+      # than on the browser console of whoever notices months later.
+      cic = cic_protocol_version()
+      server = Protocol.version()
+
+      assert cic == server,
+             "cicchetto declares CLIENT_PROTOCOL_VERSION = #{cic} " <>
+               "(#{@cic_socket}) while the server speaks #{server}. " <>
+               "These are one contract version, not two: bump the cic " <>
+               "constant in the same change that bumps @protocol_version, " <>
+               "and extend its note the way `2 -> 9` did."
+    end
+  end
+
   # 🔴 THIS IS NOT THE GATE #1654 ASKS FOR. It is the half of it that can be
   # written against facts the repo holds today, shipped as such.
   #

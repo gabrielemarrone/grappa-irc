@@ -91,17 +91,56 @@ let _socket: Socket | null = null;
 // refuse every server that accepts it. The pair moves together or neither
 // moves.
 //
+// 9 → 13. The same defect as 2 → 9, recurring for the same reason: nothing
+// pinned this number to `Grappa.Protocol.version/0` — only to its FLOOR,
+// which is 1 and which everything satisfies. In the seven days after 9
+// landed the server bumped four times (10, the server_pass route; 11, the
+// upload-confirm settings door; 12, the ISON presence fallback; 13, the
+// stale_code_path refusal) and this constant did not move, so every boot of
+// every current bundle logged `protocol mismatch: this bundle speaks 9, the
+// server speaks 11` against production. A true statement about a stale
+// constant, again — and this time it cost someone real work: a tester
+// narrowing an unrelated report read it in the console and offered it as the
+// likely cause.
+//
+// The bundle already SPOKE 13 and merely declared 9. `wireSchema.ts` carries
+// v12's `presence_changed.source: "ison"` and v13's `stale_code_path`
+// refusal token; the number was the only thing lagging.
+//
+// Measured, because the shape of the recurrence is the argument for the new
+// pin rather than for more diligence: 12 bumps of `@protocol_version`
+// against 3 writes of this constant, two of which were catch-ups (2 → 9
+// swallowed seven bumps at once). Since cic first declared a version the two
+// have been equal for roughly 8 days out of 22 — the stale value is the
+// NORMAL state of this file, not an accident that better attention would
+// have avoided.
+//
+// Why it is not cosmetic, and why the cure is a pin and not a habit:
+// `noteServerProtocol` below warns on ANY inequality and its only silence is
+// exact equality, so a lagging constant fires "protocol mismatch" on every
+// healthy boot of a deploy whose bundle and BEAM came from the SAME commit.
+// That is the one signal for a service-worker-cached PWA skewed against the
+// BEAM (see its own note), and a signal that fires on every healthy boot
+// cannot carry that meaning. `protocol_test.exs` now pins
+// `cic_protocol_version() == Protocol.version()`, so the next bump that
+// forgets this file is red at the commit that forgets it, and an inequality
+// at RUNTIME means what it is supposed to mean: the two artefacts came from
+// different commits.
+//
 // Raising THIS one is safe in the direction that can bite: the handshake
 // refuses a client BELOW `Grappa.Protocol.min_version/0`, which is 1, and
 // never one above. `protocol_test.exs` pins that from the other side
-// (`cic_protocol_version() >= Protocol.min_version()`).
+// (`cic_protocol_version() >= Protocol.min_version()`) and, since #1973, the
+// equality against `version/0` as well.
 //
 // This is what cic SPEAKS. What it REQUIRES of the server is a separate
 // constant in `serverProtocol.ts` (`MIN_SERVER_PROTOCOL_VERSION`), and the
 // two are deliberately not the same number — a later bundle may speak v5
-// and still cope with a v2 server. They coincide today; that is a fact about
-// today, not a merge of the two axes.
-export const CLIENT_PROTOCOL_VERSION = 9;
+// and still cope with a v2 server. They coincided until this bump and no
+// longer do: this bundle speaks 13 and still serves a v9 server. That gap is
+// the two axes behaving as designed, not drift to be tidied away — raising
+// the floor is the #1654 question and is not answered here.
+export const CLIENT_PROTOCOL_VERSION = 13;
 
 // #193 — force the correct WS scheme from the page origin, absolutely.
 //

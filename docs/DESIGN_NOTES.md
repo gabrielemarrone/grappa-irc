@@ -48744,3 +48744,121 @@ modal's title, then closes it and opens it again from the drawer.
 
 _Deploy: **HOT**, cic bundle only — no server change, no wire change, no
 protocol bump: the verb never leaves the client._
+<!-- entry #1993 -->
+
+---
+
+## 2026-09-08 — #1993: the general settings page, grouped by what governs it
+
+The general sub-page had grown by accretion. Network-scoped and account-scoped
+controls were interleaved, and the `<select>` deciding WHICH network four of
+them target sat buried inside one of those four — the identity card. Nothing
+above the fold said the identity/profile/avatar/password block was per-network
+at all. What follows is the set of rulings the reshaping needed; the mechanics
+are in the diff.
+
+### Scope is a GROUP, and on the common path the heading is its only witness
+
+The picker is lifted to the top of a `.settings-network-scope` group holding
+exactly what it governs; the account-scoped knobs (upload retention, auto-away)
+stay outside. The heading naming the scope is not decoration, and that is the
+load-bearing half: **#497 stands** — a one-option picker is noise, so a subject
+with a single network never sees the selector at all — which means on the common
+path the heading is the ONLY thing on screen saying what those cards are keyed
+to. Membership asserted on one side proves nothing (a group that swallowed the
+whole page would satisfy it), so the tests assert it two-sided: the identity
+card INSIDE, auto-away and upload retention OUTSIDE.
+
+### One gesture, two endpoints: a CEILING, not a single bounce
+
+Identity and the NickServ password now apply with one button. They remain two
+endpoints — `PATCH /identity` and `PUT /password` fail differently, so the
+signals and the error banners stay separate — and each leg is skipped unless it
+has something to write (`identityDirty()`, password `!== ""`). The password leg
+goes FIRST and fails fast: a refused secret must not buy a reconnect for the
+half of the gesture that would have worked.
+
+**#124's objection is ANSWERED, not overruled.** It refused an earlier fold
+because an untouched password field would be indistinguishable from *clear my
+password*. Leave-blank-to-keep now lives on the password LEG rather than on a
+button of its own: the empty field is never sent, so it cannot mean *clear*. The
+objection was about a semantic the fold destroyed; that semantic survives in a
+different place, which is why the fold became admissible — the ruling was not
+outvoted, its premise stopped holding.
+
+**What the merge guarantees is a CEILING: never MORE reconnects than the two
+buttons it replaces.** A single-axis change costs exactly one bounce; an
+untouched card costs none. It does NOT guarantee ONE bounce when both axes are
+dirty, and that is measured rather than assumed — `identity/2` and
+`update_password/2` BOTH call `live_apply_identity/3`
+(`lib/grappa_web/controllers/networks_controller.ex`), so two writes are two
+reconnect requests. A genuinely single bounce needs a COMBINED SERVER VERB,
+which is a server-side scope change and not this slice. cic cannot manufacture
+one: the only client-side way to spend a single bounce is to withhold a write,
+and withholding a write is originating state.
+
+Renamed while there: "Network password" reads as the server PASS (#1044's
+separate secret, with its own door). This field writes what identifies you to
+NickServ, so that is now what it says.
+
+### Sub-page, not disclosure
+
+Profile, avatar and the peer-profiles opt-in — many fields for something set
+once — moved behind a nav row into their own sub-page. **Chosen over a
+checkbox-driven disclosure because the drawer already HAS sub-pages**: a
+disclosure would mint a second in-drawer navigation idiom for the same job, and
+a second idiom for one job is the accretion this issue exists to undo.
+`subpageHeader` takes its back target as an explicit parameter now, with no
+default — profile is entered from general and must return there, and a defaulted
+back target is precisely the silent-degradation path a wrong return would take.
+
+The door is UNGATED on networks and sits OUTSIDE the per-network group, on
+purpose: the profile page also carries the ACCOUNT-scoped peer-profiles opt-in,
+so gating the door on holding a network would strand a control that has nothing
+to do with networks. "profile" is also the first NESTED sub-page — reachable in
+one tap from general, never from the index — which the flat routing signal
+supports unchanged, but which a future deep link should respect rather than
+stranding someone a level in.
+
+### Point 4 is NOT decided here
+
+Making `show_peer_profiles` network-scoped is deliberately left out. It is a
+server-side scope change that the issue itself files as an open design question,
+and the layout states TODAY's truth — account-wide, outside the per-network
+group — rather than pre-positioning for a ruling nobody has made. If the ruling
+lands the other way the control moves INTO the group, and this paragraph is what
+the current placement meant, not an argument for keeping it.
+
+### A length pass may not drop what a user cannot guess
+
+The blurbs are cut to one sentence each. #462's three facts about upload
+retention all survive INSIDE that one sentence: that pass was about LENGTH, and
+brevity is not licence to drop what a user provably cannot derive from the
+control in front of them. The guard is a SHAPE rule — at most one sentence
+terminator per blurb, over the general and profile pages — not a string pin. A
+string pin would rot on the next reword and teach the next reader to delete the
+guard instead of the prose.
+
+### The select-sizing rule, and exactly what its guard proves
+
+`:where(.upload-ttl-fieldset, .auto-away-fieldset) > label > select { width:
+100% }`. Both fieldsets wear the #1227/#1766 shape — the visible label text was
+dropped and the `<label>` stayed as the flex ROW — which left the select sized
+by its own option text inside a full-width fieldset; neither fieldset carried a
+rule at all. One rule on the class both share. The notifications mute picker is
+deliberately excluded: its label still carries visible text sharing the row. The
+guard reads the CSS SOURCE (`ruleBody`), so it proves what is ASKED of the
+cascade, never what a browser paints.
+
+### What this entry does NOT claim
+
+* Not that the merged apply is ONE reconnect. It is at most two, and exactly two
+  when both axes are dirty — measured on the controller, above.
+* Not that the select sizing was observed in a real browser. The guard is on the
+  source rule; no rendered width was measured anywhere in this slice.
+* Not a ruling on point 4, and not a claim that outside-the-group is where
+  `show_peer_profiles` BELONGS — only that it is where it currently is.
+
+_Deploy: **HOT**, cic bundle only — no server change, no migration, no wire
+change, no protocol bump: nothing here leaves the client except the two REST
+calls the two buttons already made._

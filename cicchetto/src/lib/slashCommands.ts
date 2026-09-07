@@ -99,6 +99,10 @@ import { DEFAULT_CHANTYPES, isChannelName } from "./chantypes";
 // A bare form of any of them yields {kind: "open-settings"} (the unified
 // watch-lists section); compose.ts routes add/del over the existing
 // server round-trips and opens the settings drawer for the bare case.
+//
+// #1958 — `/credits` → {kind: "open-credits"}: the end-titles modal, the
+// same UI deep-link shape as the bare watch-family verbs (no network, no
+// wire). Shadowable by a user alias.
 
 export type SlashCommand =
   | { kind: "empty" }
@@ -239,6 +243,11 @@ export type SlashCommand =
   // bare-verb deep-links; it must stay assignable to settingsNav's
   // SettingsSubPage.
   | { kind: "open-settings"; section: "watchlists" | "aliases" | "ignores" }
+  // #1958 — a bare `/credits` opens the end titles: the same modal the
+  // settings drawer's last entry opens, one verb deep instead of three taps.
+  // It carries nothing — the modal is a module-singleton signal and the verb
+  // takes no arguments; trailing text is ignored, the no-arg family's posture.
+  | { kind: "open-credits" }
   // #385 — user-defined command aliases. `/alias <name> <expansion>` defines
   // one, `/unalias <name>` removes one. The define carries the parsed name +
   // expansion; compose.ts round-trips them through the aliasList store.
@@ -951,6 +960,12 @@ const DISPATCH: Readonly<Record<string, Handler>> = {
   hilight: (verb, rest) => parseHilight(verb, rest),
   dehilight: (verb, rest) => parseDehilight(verb, rest),
   highlight: (verb, rest) => parseHilight(verb, rest),
+
+  // #1958 — /credits: the end titles. A UI deep-link like a bare /hilight,
+  // resolving no network and putting nothing on the wire. Shadowable by a
+  // user alias like every verb but /alias + /unalias (Gabriele's ruling on
+  // the issue: nothing argues it must join the deny list).
+  credits: (_verb, _rest) => ({ kind: "open-credits" }),
 
   // Issue #20 — services shortcuts. Each one rewrites to a {kind: "msg"}
   // command targeting the canonical ServiceNick. Empty body → error (no

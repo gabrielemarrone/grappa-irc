@@ -1,9 +1,10 @@
 import { addAlias, delAlias } from "../aliasList";
+import { openCreditsModal } from "../creditsModal";
 import { requestOpenSettings } from "../settingsNav";
 import type { CommandHandler } from "./context";
 
 /**
- * The arms that reach no network: two client-side stores, one UI deep-link,
+ * The arms that reach no network: two client-side stores, two UI deep-links,
  * and the parser's own failure arriving as a pseudo-verb. None of them resolves
  * a network id or puts a frame on the wire, which is why none of them reads
  * anything off the context record.
@@ -17,6 +18,18 @@ import type { CommandHandler } from "./context";
  */
 export const openSettingsCommand: CommandHandler<"open-settings"> = async (cmd) => {
   requestOpenSettings(cmd.section);
+  return { ok: true };
+};
+
+/**
+ * #1958 — `/credits` opens the end titles: the same `openCreditsModal` the
+ * settings drawer's last entry calls, one verb deep instead of menu → settings
+ * → scroll to the bottom. The drawer entry stays — the verb is a shortcut, the
+ * drawer is where people find the things they cannot name. Opening the modal
+ * IS the feedback, so this is a silent success.
+ */
+export const openCreditsCommand: CommandHandler<"open-credits"> = async () => {
+  openCreditsModal();
   return { ok: true };
 };
 

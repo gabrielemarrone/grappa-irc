@@ -48701,3 +48701,46 @@ coverage.
 
 _Deploy: **test-only** — no production module, no migration, no `VERSION` bump,
 no cic bundle, no wire change._
+<!-- entry #1958 -->
+
+---
+
+## 2026-09-07 — #1958: /credits, one verb deep
+
+The end titles (#1773) opened from exactly one place: the last entry of the
+settings drawer, three taps down — menu, settings, scroll to the bottom — for
+the one screen in cicchetto people stop to read. A `/credits` verb now opens
+the same modal from the compose box.
+
+### Shape: a UI deep-link, like a bare /hilight
+
+The parser gains `{kind: "open-credits"}`, carrying nothing: the modal is a
+module-singleton signal (`lib/creditsModal.ts`) and the verb takes no
+arguments, so trailing text is ignored, the no-arg family's posture. The
+handler sits in `lib/commands/local.ts` beside `openSettingsCommand`, the
+existing precedent for an arm that resolves no network id and puts no frame on
+the wire; its body is the `openCreditsModal()` the drawer entry already calls.
+Opening the modal IS the feedback, so it is a silent `{ok: true}` and the draft
+clears. The modal itself is untouched — one opener signal, two doors.
+
+### The issue's two open questions, answered on the issue (Gabriele)
+
+1. **Shadowable.** `/credits` does NOT join `NON_SHADOWABLE_VERBS` (`alias` /
+   `unalias`, the command-side repair surface). Nothing argues an alias over
+   the end titles needs a deny; a unit test pins that an alias wins.
+2. **The drawer entry stays.** The verb is a shortcut, not a replacement — the
+   drawer is where people find the things they cannot name. The e2e spec
+   opens the modal both ways in one run.
+
+### What each gate proves
+
+The unit layer (`slashCommands.test.ts`, `compose.test.ts`) pins the parse and
+the dispatch — the #1396 characterization net gained an arm, with
+`../lib/creditsModal` as a mocked seam so the open is observable rather than a
+silent `{ok: true}`. What a mock cannot see is that the signal the verb flips
+is the one the MOUNTED modal listens to; `e2e/tests/issue1958-credits-verb.spec.ts`
+types the verb into a channel window against the real bundle and asserts the
+modal's title, then closes it and opens it again from the drawer.
+
+_Deploy: **HOT**, cic bundle only — no server change, no wire change, no
+protocol bump: the verb never leaves the client._

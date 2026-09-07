@@ -1184,6 +1184,24 @@ describe("parseSlash — keyword highlight (/hilight, /highlight alias, /dehilig
   });
 });
 
+// #1958 — /credits: the end titles, one verb deep. No arguments, no wire.
+describe("parseSlash — /credits (#1958)", () => {
+  it("bare /credits → open-credits", () => {
+    expect(parseSlash("/credits")).toEqual({ kind: "open-credits" });
+  });
+
+  it("trailing text is ignored, like the rest of the no-arg family", () => {
+    expect(parseSlash("/credits please")).toEqual({ kind: "open-credits" });
+    expect(parseSlash("/CREDITS")).toEqual({ kind: "open-credits" });
+  });
+
+  // The issue's first open question, answered: /credits is NOT on the
+  // non-shadowable deny list, so a user alias takes precedence over it.
+  it("a user alias may shadow /credits", () => {
+    expect(parseSlash("/credits", { credits: "np" })).toEqual({ kind: "np" });
+  });
+});
+
 describe("parseSlash — /lusers (P-0d, args #579)", () => {
   it("parses bare /lusers (no mask, no server)", () => {
     expect(parseSlash("/lusers")).toEqual({ kind: "lusers", mask: null, server: null });

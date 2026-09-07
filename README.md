@@ -274,6 +274,7 @@ Typed in cicchetto's compose box, parsed client-side, dispatched to REST or IRC.
 | `/notify <nick>…` · `/watch <nick>…` | Watch nicks for presence (online/offline dots + toasts); bare opens the **watch lists** settings section |
 | `/hilight <pattern>` · `/dehilight <pattern>` | Add / remove a highlight keyword (alias `/highlight`); bare opens the **watch lists** settings section |
 | `/alias <name> <expansion>` · `/unalias <name>` | Define / remove your own slash-command alias (`/alias wii whois $1 $1` → `/wii foo` runs `/whois foo foo`). `$1`..`$9` positional, `$N-` the Nth arg and everything after it (`/alias k kick $1 $2-`), `$*` all args; with no placeholder the rest is appended. Server-synced per user; builtins can't be shadowed. Bare `/alias` opens the **aliases** settings section, where existing aliases are also editable in place (rename + change expansion) |
+| `/credits` | Roll the end titles — the same modal as the **credits** entry at the bottom of the settings drawer, one verb deep instead of three taps |
 | `/connect <network>` | Unpark + respawn a network |
 | `/disconnect [network] [reason]` | Park one network (persists across reboots until `/connect`) |
 | `/reconnect [network] [reason]` | Bounce one network — park, then unpark, in that order (irssi's `RECONNECT`). The one-command form of `/disconnect` + `/connect`, and the way to re-roll a vhost (the source address is picked per connect). Bare form targets the active window's network; the reason travels as the upstream QUIT |

@@ -1339,6 +1339,18 @@ said "ask vjt for the STACK lane", which is flatly wrong: lanes are MINE).
   muovere — **costo o ctx**, campionati contro il valore PRIMA — mai su un token del testo che hai
   appena digitato. *Gemello esatto del `test -f` su un path che una run precedente aveva già creato:
   un check che risponde subito perché sta ponendo la domanda sbagliata.*
+  🔴🔴 **E LA GRANDEZZA GIUSTA NON BASTA SE IL CONFRONTO È FRAGILE: UN `until [ "$X" != "<literal>" ]`
+  SULLA RIGA DI COSTO ESCE AL PRIMO GIRO (orch, 2026-09-07, misurato).** Chiavato correttamente sul
+  COSTO — la grandezza che solo la worker muove — e comunque uscito **a costo INVARIATO** (`$3.52`),
+  perché il letterale a destra non riproduceva **gli spazi variabili** che la status line mette fra
+  `💰` e la cifra ⇒ la disuguaglianza è **vera da subito**. **La direzione del difetto è la peggiore:
+  un `!=` che non matcha mai afferma la consegna, non la nega.**
+  🥇 **Forma che regge: cattura il valore PRIMA nella stessa forma normalizzata con cui lo rileggerai**
+  (`grep -o '\$[0-9]*\.[0-9]*' | head -1`, niente emoji e niente spazi nel pattern), **e mettici
+  dentro un controllo a risposta nota** — il primo giro DEVE vedere il valore vecchio, o il waiter non
+  stampa nulla. In dubbio: **campiona a mano N volte e guarda la serie**, che costa un comando e non
+  può mentire in silenzio. *Ennesima faccia dello zero falso e plausibile: non un check che guarda la
+  cosa sbagliata, ma uno che guarda la cosa GIUSTA con un righello storto.*
 - 🔴🔴 **UN WARNING PUO' AVERE LA FORMA DI UN ERRORE, E IN CODA A UN LOG SI LEGGE COME IL FALLIMENTO
   (misurato 25-08-2026).** `tail -3` del log di `check.sh` mostrava uno stack trace bats
   (`from function 'run' ... in test file ..., line 308`) **immediatamente sopra `rc=0`** — cioe' la

@@ -105,10 +105,23 @@ defmodule Grappa.Session.EventRouterPropertyTest do
           assert is_integer(attrs.server_time)
           assert is_map(attrs.meta)
 
-        {:reply, line} ->
+        {:reply, line, origin} ->
           # iodata is binary | improper-list-of-bytes; we accept any
           # binary as the lowest-cost shape check.
           assert is_binary(IO.iodata_to_binary(line))
+          # issue 1988 — this arm still carried the pre-#1390 2-tuple after
+          # the interpreter had moved to `{:reply, iodata(), origin()}`, so it
+          # said something false about the grammar it exists to mirror (see
+          # the "Mirror the FULL union" note below). Measured before changing
+          # it: DEAD, not a live red — `string(:ascii)` cannot produce the
+          # `\x01` of a CTCP body, and `show_peer_profiles` is hardcoded false
+          # in all three state generators, so neither producer of a `:reply`
+          # is reachable from here and the suite was green either way. It
+          # would have started flunking on the `other ->` clause the day a
+          # generator turned that flag on. The tag is asserted against the
+          # CLOSED `origin()` set for the same reason the #279 and #878 arms
+          # assert a class: `is_atom/1` would certify nothing.
+          assert origin in [:event_router_reply, :ghost_recovery, :recover_identity]
 
         {:topic_changed, channel, entry} ->
           assert is_binary(channel)

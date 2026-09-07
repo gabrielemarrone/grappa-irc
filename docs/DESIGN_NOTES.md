@@ -48401,3 +48401,67 @@ plus this entry. `Preflight.classify_paths/2` was deliberately NOT run: it
 needs the shared `_build` and the COMPILE lane was held by another worker, and
 a classification quoted without running it would be a guess wearing a
 measurement's clothes._
+<!-- entry #1988b -->
+
+---
+
+## 2026-09-07 — #1988b: pinning an effect's shape at the producer does not prove the interpreter accepts it
+
+The #1988 P0 — an inbound `/ctcp <victim> USERINFO` killing the victim's session —
+is cured in `9adc65ee3` (v1.5.3). This entry is not about the defect. It is about
+why the defect survived a suite that already covered all four of its sites.
+
+`Session.Server.apply_effects/2` is the interpreter of the effect grammar
+`EventRouter` produces. It has one clause per effect shape and deliberately NO
+catch-all, so an out-of-grammar tuple is a `function_clause` crash rather than a
+silent drop. That is the right posture, and its price is that the grammar is
+checked at RUNTIME, only for the shapes some test actually drives.
+
+Every test that covered the four broken sites asserted the tuple that
+`EventRouter.route/2` RETURNS. Such a test type-checks the producer against
+itself and is green for any shape the producer is free to emit — including one
+no clause of the interpreter can match. The defect never lived in either module;
+it lived in the JUNCTION, and nothing in the suite crossed it. So a test that
+pins arity at the producer is worth having (it stops those four sites
+regressing) and it is structurally incapable of catching the class.
+
+`test/grappa/session/ctcp_reply_effect_test.exs` is the other half: it feeds a
+real line into a real `Session.Server` over a real socket and asserts the answer
+reached the wire. Two-sided against the shipped cure — intact: 4 tests, 0
+failures; the four sites reverted to the 2-tuple in a local tree: 4 tests, 4
+failures, every one `no function clause matching in
+Grappa.Session.Server.apply_effects/2`.
+
+### The assertion that is easy to get wrong
+
+It asserts the pid is the SAME pid, not merely that a session is alive.
+`Session.Server` is `:transient`, so a crash is followed immediately by a
+supervisor restart under a NEW pid re-registering the same key: a liveness check
+on a re-looked-up pid goes green milliseconds after the crash it exists to
+catch. The wire assertion carries the same weight from the other side — a dead
+session sends nothing, so `{:error, :tcp_closed}` on the waiter IS the crash,
+observed from outside the VM's supervision.
+
+### The rest of the class, measured
+
+The class is "a producer whose arity the single interpreter clause cannot
+match", and it was enumerated rather than grepped: parse every `apply_effects`
+clause head into `atom -> accepted arity` (34 atoms), then scan all 337 modules
+under `lib/` for balanced `{:atom, ...}` tuples. Comments and `@doc` heredocs
+must be stripped first — the first pass reported 12 hits and 8 were abbreviated
+tuples in prose, which read exactly like code. The answer over all of `lib/` is
+that the four cured sites were the only real ones; the remaining hits are
+documentation, plus `session_log.ex`'s `GenServer.cast(__MODULE__, {:persist,
+metadata})`, an unrelated protocol colliding on the atom alone.
+
+One test-side straggler is fixed here: `event_router_property_test.exs`'s
+`:reply` arm still carried the 2-tuple, so the file's own "Mirror the FULL
+union" contract was false. Measured before touching it: DEAD, not a latent red —
+`string(:ascii)` cannot generate the `\x01` of a CTCP body and
+`show_peer_profiles` is hardcoded false in all three state generators, so no
+`:reply` producer is reachable from that generator and the property suite was
+green either way. It would have begun flunking on its own `other ->` clause the
+day a generator turned that flag on.
+
+_Deploy: **test-only** — no production module, no migration, no `VERSION` bump,
+no cic bundle, no wire change._

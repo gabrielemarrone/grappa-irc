@@ -10157,6 +10157,40 @@ button.topic-bar-windows-opener {
   font-size: 0.85rem;
 }
 
+/* Issue 1974 — running-vs-deployed bundle readout, at the tail of the
+ * settings index. It borrows `.settings-section-card` wholesale (heading +
+ * bordered bg-alt card) rather than minting a look of its own; the only thing
+ * it needs beyond the shared idiom is the 2×2 matrix and the per-verdict
+ * accent below. */
+.settings-build-table {
+  border-collapse: collapse;
+  /* Not `width: 100%`: the cells hold an 8-char hash and a semver, and
+   * stretching them to the drawer's full width puts the two values the reader
+   * is comparing as far apart as the layout allows. */
+  width: auto;
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+.settings-build-table :where(th, td) {
+  padding: 0.1rem 0.75rem 0.1rem 0;
+  font-weight: normal;
+  /* The hash is the thing being compared character by character, so it must
+   * never wrap mid-token into two visually different-looking values. */
+  white-space: nowrap;
+}
+
+.settings-build-table :where(thead th, tbody th) {
+  color: var(--muted);
+}
+
+/* The verdict line carries the colour, not the card: a bordered box that
+ * turns red the moment a deploy lands would read as an error the user has to
+ * act on, and being one build behind is not one. */
+.settings-build[data-skew="skewed"] .settings-section-blurb {
+  color: var(--accent);
+}
+
 /* #462 — the per-network identity editor had NO rule of its own. What the
    issue reports as "unstyled inputs" is already fixed: #497/#508's global
    input treatment gives the three fields their 44px height, the app's

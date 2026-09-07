@@ -81,13 +81,39 @@ export function setServerBundleVersion(version: string | null): void {
   setServerBundleVersionInternal(version);
 }
 
+/**
+ * Whether the bundle this tab booted is the one the server says is deployed.
+ *
+ * A closed set of three, not a boolean, and `"unknown"` is the load-bearing
+ * member (issue 1974): until the user-topic join lands its `bundle_hash`, or
+ * on a page with no parseable `<script src>`, the two sides have not been
+ * compared at all. The banner predicate below only ever needed "is there
+ * skew", so it could collapse that into `false`; a READOUT cannot, because
+ * painting an uncompared pair as "up to date" states a fact nobody measured.
+ */
+export type BundleSkew = "aligned" | "skewed" | "unknown";
+
+/**
+ * Pure verdict over the two hashes — same pure/wrapper split this module
+ * already uses for `formatRefreshBanner` vs `refreshBannerMessage`, so a
+ * caller that RENDERS both hashes can compute the verdict from exactly the
+ * values it printed rather than from a second, independent signal read.
+ */
+export function bundleSkew(bootHash: string | null, serverHash: string | null): BundleSkew {
+  if (bootHash === null || serverHash === null) return "unknown";
+  return bootHash === serverHash ? "aligned" : "skewed";
+}
+
 // True iff (1) we know what we booted with, (2) the server has told us
 // what's live, and (3) they differ. nulls on either side = unknown =
 // don't pester the user; the next push will resolve the question.
+//
+// Derived from `bundleSkew` rather than restating its comparison: two copies
+// of "are these the same bundle" is one copy too many, and the readout and
+// the banner disagreeing about it is precisely the confusion a diagnosis
+// surface must not create.
 export function shouldShowRefreshBanner(): boolean {
-  const boot = bootBundleHash();
-  const server = serverBundleHashSignal();
-  return boot !== null && server !== null && boot !== server;
+  return bundleSkew(bootBundleHash(), serverBundleHashSignal()) === "skewed";
 }
 
 // #292 — refresh bar "current vs available" version display.

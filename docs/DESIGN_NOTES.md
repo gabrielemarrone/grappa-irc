@@ -47742,3 +47742,112 @@ cannot see. It carries its own negative control on that predicate.
 
 _Deploy: **nothing** — the driver and its bats run in CI and by hand; no
 runtime code changed, and no substrate reads either file._
+<!-- entry #1974 -->
+
+---
+
+## 2026-09-07 — issue 1974: where "which bundle am I running?" gets answered
+
+The four facts were already collected. `cicchetto/src/lib/bundleHash.ts` has
+carried `bootBundleHashAccessor`, `bootBundleVersionAccessor`,
+`serverBundleHash` and `serverBundleVersion` since #292; the skew between them
+already drives the refresh banner. What did not exist was anywhere to READ
+them. Measured before touching anything: `bootBundleVersionAccessor` reached
+exactly two surfaces — the credits roll and #775's update toast — and the two
+server-side accessors reached NO production code at all, only tests and the
+e2e window hook. So a person chasing a stale service-worker cache had one of
+the four numbers, in an easter egg, and none of the server side.
+
+### The ruling, and why it is not `AdminDebugTab`
+
+The issue left one thing open — which panel — and vjt ruled it UNGATED
+(relayed 2026-09-07, not observed first-hand). `AdminDebugTab` is the panel
+named for diagnosis and it stays exactly as it is.
+
+The argument that decided it is a population argument: whoever gets served a
+stale bundle is an ordinary PWA user, so a readout behind `is_admin` answers
+the question for everyone except the people who have it. The second half is
+sharper. The failure worth seeing is the one `performRefresh`'s own header
+documents (`bundleHash.ts`, the UX-6-I comment): the service worker keeps
+serving the OLD precached `index.html`, so a refresh press can land back on
+the same bundle — the "three presses to update" vjt measured on iPhone. That
+is only observable by watching the running hash NOT move across presses, and
+an admin-gated panel cannot host that observation for the population that
+hits it.
+
+Within "ungated", the placement is the settings drawer's main index, at the
+tail beside `credits`. The drawer is the one ungated, always-reachable
+surface both subject kinds get; it is not the credits modal, which declares
+itself an easter egg (`lib/creditsModal.ts` header), is a full-viewport
+animated end-titles roll with a soundtrack, and renders one of the four
+values as a line that scrolls past. It is deliberately NOT a
+`.settings-nav-row`: a nav row pushes a sub-page and wears a chevron saying
+so, and this pushes nothing and changes nothing. #1773's contract that
+`credits` is the LAST of the drawer's own ENTRIES is therefore untouched — a
+readout is not an entry.
+
+### Why the boolean had to become a closed set of three
+
+`shouldShowRefreshBanner()` folded "we have not compared yet" into the same
+`false` as "these agree". For a banner that is right: both mean do-not-pester.
+For a readout it is a lie, and precisely the lie the surface exists to
+prevent — before the user-topic join lands its `bundle_hash`, nothing has been
+compared, and rendering that as "up to date" asserts a fact nobody measured.
+
+So the comparison moved into a pure `bundleSkew(bootHash, serverHash) ->
+"aligned" | "skewed" | "unknown"`, and the banner predicate is now literally
+`bundleSkew(...) === "skewed"`. Pure-plus-caller rather than a signal-reading
+`bundleSkew()` with no arguments: the readout renders both hashes, so it
+computes the verdict from exactly the two values it printed and the two can
+never disagree. The module already used this shape — `formatRefreshBanner`
+(pure) beside `refreshBannerMessage` (signal-reading wrapper).
+
+### Two things deliberately NOT built
+
+**No fourth refresh button.** Three already exist: `errorBanners.ts:282` →
+`requestBundleRefreshNow("user")`, `BootErrorBoundary.tsx:138`, and #674's
+auto-refresh announced by #775's toast. The first of those renders on the
+ungated banner stack under `shouldShowRefreshBanner()` — which is now, by
+definition, the same condition that makes a refresh actionable in the
+readout. A control here would be the same verb twice, live in the same state,
+a drawer apart.
+
+**No build id or ISO date.** The version and the hash are already baked; a
+third carrier is exactly the drift #538 closed
+(`cicchetto/src/lib/buildCredits.ts:13-15`).
+
+### The hash prints whole, and that is a measurement
+
+`versionLabel`/`formatRefreshBanner` truncate to `SHORT_HASH_LEN = 7` so a
+sentence stays readable, and reusing them here was the obvious move. Measured
+against a real build instead: `cicchetto/dist/index.html` points at
+`/assets/index-DyH3fZLf.js` — an EIGHT-character hash. Borrowing the banner's
+formatter would drop the last character of the two values the reader opened
+the panel to compare. The readout therefore renders four cells rather than
+two composed labels, which also makes the trivial-rebuild case #292 names
+(same semver, different hash) legible as a column.
+
+### What was proven, and what was not
+
+Red-then-green on a new `BundleReadout.test.tsx` (six cases), plus three
+reachability cases in `SettingsDrawer.test.tsx` and four on the pure
+predicate. Four mutants, each killing what it was predicted to kill and
+nothing else: the deployed-version cell reading the boot accessor (1 test),
+the `unknown` arm returning `aligned` (2 — one per file, the pure fn and the
+render), `cell()` truncating to 7 (3), and unmounting the readout from the
+drawer (3 — the drawer cases only, so the mount is pinned separately from the
+component). Negative control: rewording all three verdict strings kills
+nothing, so the tests pin structure and values rather than prose.
+
+NOT established, and worth stating rather than implying: nothing here was
+observed in a real browser or on a real PWA install. The "three presses"
+behaviour this readout is meant to make visible remains #292/UX-6-I's
+measurement, not one taken in this slice — jsdom has neither a service worker
+nor a precache. The readout is also reachable only by an AUTHENTICATED
+subject; a bundle stale enough to break login is `BootErrorBoundary`'s
+territory and keeps its own refresh.
+
+_Deploy: **cic bundle only** — no server code, no wire change, no
+`protocol_version` movement. `serverBundleVersion` was already on the wire
+(`api.ts` `bundle_hash` event); this slice is the first production code to
+read it._

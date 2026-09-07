@@ -1796,6 +1796,39 @@ describe("SettingsDrawer (#460 — settings index)", () => {
     expect(screen.getByTestId("share-session-entry")).toBeInTheDocument();
     expect(screen.getByTestId("settings-drawer-done")).toBeInTheDocument();
   });
+
+  // Issue 1974 — the running-vs-deployed bundle readout. The ruling that
+  // decided this issue is about REACHABILITY, so that is what these pin: the
+  // four cells' contents belong to `BundleReadout.test.tsx`.
+  it("issue 1974 — the bundle readout renders on the main index with NO subject at all (ungated)", () => {
+    // `beforeEach` leaves `meHolder`/`subjectHolder` null: no user, no admin.
+    // A readout behind either gate finds nothing here — which is precisely
+    // the `AdminDebugTab` posture the ruling rejected, because the population
+    // served a stale service-worker cache is ordinary PWA users.
+    wrap(true);
+    expect(screen.getByTestId("settings-build")).toBeInTheDocument();
+    // All four cells, not just the card: a mounted-but-empty readout would
+    // satisfy the line above and answer none of the question.
+    expect(screen.getByTestId("settings-build-running-version")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-build-running-hash")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-build-deployed-version")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-build-deployed-hash")).toBeInTheDocument();
+  });
+
+  it("issue 1974 — a visitor sees the bundle readout too (not a user-kind gate either)", () => {
+    subjectHolder.current = { kind: "visitor", id: "v1", nick: "alice" };
+    wrap(true);
+    expect(screen.getByTestId("settings-build")).toBeInTheDocument();
+  });
+
+  it("issue 1974 — the readout belongs to the index: a sub-page replaces it, back restores it", () => {
+    wrap(true);
+    expect(screen.getByTestId("settings-build")).toBeInTheDocument();
+    openSub("display-settings-entry");
+    expect(screen.queryByTestId("settings-build")).toBeNull();
+    fireEvent.click(screen.getByTestId("display-back"));
+    expect(screen.getByTestId("settings-build")).toBeInTheDocument();
+  });
 });
 
 // #476 / #478 — the per-network identity editor is available to BOTH subjects

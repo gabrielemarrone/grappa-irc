@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { channelKey } from "../lib/channelKey";
+import { type ChannelKey, channelKey } from "../lib/channelKey";
 import type { SlashCommand } from "../lib/slashCommands";
 import { LIST_WINDOW_NAME, SERVER_WINDOW_NAME } from "../lib/windowKinds";
 import { BLANK_BODY_ERROR, serverAcceptsBody } from "./serverBodyPredicate";
@@ -49,6 +49,12 @@ vi.mock("../lib/api", () => {
     patchNetwork: vi.fn(),
     // #356 — /notify + /watch presence add hits this REST helper.
     postNotifyAdd: vi.fn().mockResolvedValue(undefined),
+    // #162 — every ignore mutation answers with the resulting list.
+    getIgnores: vi.fn().mockResolvedValue(["spambot!*@*"]),
+    postIgnore: vi
+      .fn()
+      .mockResolvedValue({ masks: ["spambot!*@*"], mask: "spambot!*@*", outcome: "added" }),
+    deleteIgnore: vi.fn().mockResolvedValue({ masks: [], mask: "spambot!*@*", outcome: "removed" }),
     // Required by networks.ts (transitively imported via compose.ts → networks.ts)
     listNetworks: vi.fn().mockResolvedValue([]),
     listChannels: vi.fn().mockResolvedValue([]),
@@ -5127,6 +5133,107 @@ describe("compose submit — watch-family verbs (#356)", () => {
     expect(result).toMatchObject({ ok: expect.stringContaining("highlight") });
   });
 
+  // #162 — /ignore <mask> and /unignore <mask>. The answer lands IN THE
+  // WINDOW (`commandOutput`), never as the compose notice: one labelled row
+  // naming ITS OWN outcome on the NORMALISED mask (`/unignore spambot`
+  // removes `spambot!*@*`). A bare /ignore opens the settings sub-page.
+  const outputLines = async (k: ChannelKey): Promise<Array<[string | null, string, boolean]>> => {
+    const { commandOutputByWindow } = await import("../lib/commandOutput");
+    return (commandOutputByWindow()[k] ?? []).map((e) => [e.label, e.text, e.indent]);
+  };
+
+  it("/ignore <mask> posts the mask and prints what was added into the window", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/ignore spambot");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(api.postIgnore).toHaveBeenCalledWith("tok", "freenode", "spambot");
+    expect(result).toEqual({ ok: true });
+    expect(await outputLines(k)).toEqual([["Ignore:", "added spambot!*@*", false]]);
+  });
+
+  it("/ignore of a mask already on the list says so instead of posing as a first add", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    const compose = await import("../lib/compose");
+    vi.mocked(api.postIgnore).mockResolvedValueOnce({
+      masks: ["spambot!*@*"],
+      mask: "spambot!*@*",
+      outcome: "already_ignored",
+    });
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/ignore SPAMBOT");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(result).toEqual({ ok: true });
+    expect(await outputLines(k)).toEqual([["Ignore:", "spambot!*@* is already ignored", false]]);
+  });
+
+  it("/unignore <mask> prints the normalised mask it removed, and only that", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/unignore spambot");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(api.deleteIgnore).toHaveBeenCalledWith("tok", "freenode", "spambot");
+    expect(result).toEqual({ ok: true });
+    expect(await outputLines(k)).toEqual([["Unignore:", "removed spambot!*@*", false]]);
+  });
+
+  it("/unignore of a mask that was never ignored says so", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    const compose = await import("../lib/compose");
+    vi.mocked(api.deleteIgnore).mockResolvedValueOnce({
+      masks: ["spambot!*@*"],
+      mask: "nobody!*@*",
+      outcome: "not_ignored",
+    });
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/unignore nobody");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(result).toEqual({ ok: true });
+    expect(await outputLines(k)).toEqual([["Unignore:", "nobody!*@* was not ignored", false]]);
+  });
+
+  // Bare /ignore takes the bare-/hilight door: open the sub-page, print
+  // nothing, touch no REST.
+  it("bare /ignore opens the ignore-list settings sub-page without mutating", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    const nav = await import("../lib/settingsNav");
+    const compose = await import("../lib/compose");
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/ignore");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(nav.requestOpenSettings).toHaveBeenCalledWith("ignores");
+    expect(api.getIgnores).not.toHaveBeenCalled();
+    expect(api.postIgnore).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true });
+    expect(await outputLines(k)).toEqual([]);
+  });
+
+  // 422 `invalid_mask` must surface as the inline error, never a green line.
+  it("/ignore with a mask the server refuses surfaces the error", async () => {
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    const compose = await import("../lib/compose");
+    vi.mocked(api.postIgnore).mockRejectedValueOnce(new api.ApiError(422, "invalid_mask"));
+    const k = channelKey("freenode", "#a");
+    compose.setDraft(k, "/ignore nick@host!user");
+    const result = await compose.submit(k, "freenode", "#a");
+
+    expect(result).toMatchObject({ error: expect.any(String) });
+    expect(compose.getDraft(k)).toBe("/ignore nick@host!user");
+  });
+
   it("/notify <nick> calls postNotifyAdd and returns a green confirmation naming the nick", async () => {
     localStorage.setItem("grappa-token", "tok");
     const api = await import("../lib/api");
@@ -5563,6 +5670,7 @@ const DISPATCH_CASE_LABELS = [
   "disconnect",
   "error",
   "info",
+  "ignore",
   "invite",
   "join",
   "kb",
@@ -5667,6 +5775,7 @@ const DISPATCH_DRAFTS: ReadonlyArray<{ kind: SlashCommand["kind"]; draft: string
   { kind: "nick", draft: "/nick bob" },
   { kind: "away", draft: "/away brb" },
   { kind: "notify", draft: "/notify bob" },
+  { kind: "ignore", draft: "/ignore spambot" },
   { kind: "watchlist", draft: "/hilight badger" },
   { kind: "whois", draft: "/whois bob" },
   { kind: "whowas", draft: "/whowas bob" },
@@ -5798,12 +5907,12 @@ describe("#1396 — dispatch characterization over every arm", () => {
       misparsed,
     }).toMatchInlineSnapshot(`
       {
-        "arms": 62,
+        "arms": 63,
         "armsWithNoDraft": [],
         "draftsNamingNoArm": [],
         "duplicated": [],
         "misparsed": [],
-        "rows": 62,
+        "rows": 63,
       }
     `);
   });
@@ -6002,6 +6111,17 @@ describe("#1396 — dispatch characterization over every arm", () => {
           ],
           "result": {
             "error": "unknown command: /nosuchverb",
+          },
+        },
+        "ignore": {
+          "effects": [
+            "aliasList.aliases()",
+            "api.postIgnore("tok", "freenode", "spambot")",
+            "networks.networkIdBySlug("freenode")",
+            "networks.networkIdBySlug("freenode")",
+          ],
+          "result": {
+            "ok": true,
           },
         },
         "info": {
@@ -6595,7 +6715,7 @@ describe("#1396 — dispatch characterization over every arm", () => {
           "aliasList.aliases()",
           "networks.networkIdBySlug("freenode")",
         ],
-        "arms": 62,
+        "arms": 63,
         "indistinguishablePairs": [
           [
             "ame",

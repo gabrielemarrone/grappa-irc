@@ -3817,6 +3817,14 @@ button.topic-bar-windows-opener {
   color: var(--muted);
 }
 
+/* #162: a member row of a slash verb's list answer (`Ignore list for
+   azzurra:` then one mask per row), indented under its header the way irssi
+   indents a list under its title. `ch` so the indent tracks the monospace
+   grid rather than the font size. */
+.scrollback-command-output-indent {
+  padding-left: 4ch;
+}
+
 .scrollback-time {
   color: var(--muted);
 }

@@ -91,7 +91,7 @@ defmodule Grappa.Session.Server do
     UserSettings
   }
 
-  alias Grappa.IRC.{AuthFSM, Client, CTCP, Identifier, LineSplit, Message}
+  alias Grappa.IRC.{AuthFSM, Client, CTCP, Identifier, LineSplit, Mask, Message}
   alias Grappa.Net.SourceAliasManager
   alias Grappa.PubSub.Topic
   alias Grappa.Push.Triggers, as: PushTriggers
@@ -440,6 +440,10 @@ defmodule Grappa.Session.Server do
           # above; omitted opt (test seam) defaults to `false` — silent
           # unless a test explicitly opts in.
           optional(:show_peer_profiles) => boolean(),
+          # #162 — stored `/ignore` masks, resolved at the spawn boundary
+          # (`Grappa.Session.start_session/3`); compiled in `init/1`. Kept
+          # in sync with the `Grappa.Session.start_session/3` opts twin.
+          optional(:ignores) => [String.t()],
           # GH #189 — on-connect perform list + its `$oper_pass` secret,
           # decrypted plaintext from the credential (nil when unset). Run at 001
           # before the built-in identify and before autojoin. The `$nickserv_pass`
@@ -647,6 +651,11 @@ defmodule Grappa.Session.Server do
           # /notify must work on ircds that support WATCH but don't
           # advertise it).
           presence_mechanism: ISupport.presence_mechanism() | nil,
+          # #162: the /ignore masks for THIS network, normalised `nick!user@host`
+          # globs. Loaded from UserSettings at init and re-synced on every
+          # mutation, so EventRouter's delivery filter stays a pure read of
+          # state — no IO on the inbound hot path.
+          ignores: [Mask.compiled()],
           # #1946: the ISON polling loop. `presence_poll_ref` is the armed
           # timer (nil when the mechanism is not `:ison`, or when the watch
           # list is empty — an empty list arms nothing at all).
@@ -1189,6 +1198,16 @@ defmodule Grappa.Session.Server do
       # #216: default capability table until 005 arrives — MODES/LINELEN
       # included since #1390.
       isupport: ISupport.default(),
+      # #162: /ignore masks, read at the SPAWN BOUNDARY (`start_session/3`,
+      # like `auto_away_debounce_ms` and `show_peer_profiles`) so the very
+      # first inbound line is filtered — an ignore set while the session was
+      # parked holds from the first message after reconnect. Not read here:
+      # a `:transient` respawn re-runs `init/1` and a query in it would fire
+      # on every crash (measured by `JoinSeedCostTest` as a stray read inside
+      # a join storm). Compiled ONCE here and on every `:ignores_changed`,
+      # never per message. Absent = a unit test built the Server directly
+      # (the boundary was bypassed), the same contract as its two siblings.
+      ignores: Mask.compile_all(Map.get(opts, :ignores, [])),
       # #247: /notify presence map — seeded at the end-of-MOTD arm.
       presence: %{},
       presence_armed: false,
@@ -2490,6 +2509,13 @@ defmodule Grappa.Session.Server do
   def handle_call({:notify_changed, added, removed}, _, state)
       when is_list(added) and is_list(removed) do
     {:reply, :ok, sync_presence(state, added, removed)}
+  end
+
+  # #162 — the ignore list changed (REST add/remove). The controller hands over
+  # the whole resulting list rather than a diff: it is small, bounded, and a
+  # replace cannot drift from the DB the way an incremental patch could.
+  def handle_call({:ignores_changed, masks}, _, state) when is_list(masks) do
+    {:reply, :ok, Map.put(state, :ignores, Mask.compile_all(masks))}
   end
 
   @doc """

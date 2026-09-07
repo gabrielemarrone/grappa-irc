@@ -57,6 +57,7 @@ import { serviceModalCommand } from "./commands/services";
 import {
   awayCommand,
   disconnectCommand,
+  ignoreCommand,
   nickCommand,
   notifyCommand,
   operCommand,
@@ -1134,6 +1135,10 @@ const exports_ = identityScopedStore((onIdentityChange) => {
         // ---------------------------------------------------------------
         case "watchlist": {
           result = await watchlistCommand(cmd, ctx);
+          break;
+        }
+        case "ignore": {
+          result = await ignoreCommand(cmd, ctx);
           break;
         }
         case "notify": {

@@ -138,6 +138,18 @@ defmodule Grappa.IRC.Message do
   def sender_nick(nil), do: @anonymous_sender
 
   @doc """
+  The full origin of a nick-prefixed line as `{nick, user, host}` — the
+  triple `Grappa.IRC.Mask.matches?/4` compares against (#162). `nil` for a
+  server-prefixed or prefix-less line: a server has no user@host and is never
+  a candidate for an ignore.
+  """
+  @spec sender_origin(t()) :: {String.t(), String.t() | nil, String.t() | nil} | nil
+  def sender_origin(%__MODULE__{prefix: {:nick, nick, user, host}}) when is_binary(nick),
+    do: {nick, user, host}
+
+  def sender_origin(%__MODULE__{}), do: nil
+
+  @doc """
   Returns the value of an IRCv3 message-tag, or `nil` when the tag is
   absent. A tag-only entry (`@account`, no `=`) yields `""`, the same as
   `@account=` — IRCv3 message-tags §3.2 gives both an absent value, so a

@@ -11,6 +11,7 @@ import {
 import AliasSettings from "./AliasSettings";
 import BundleReadout from "./BundleReadout";
 import DeleteAccountModal from "./DeleteAccountModal";
+import IgnoresSettings from "./IgnoresSettings";
 import InlineConfirmButton from "./InlineConfirmButton";
 import { windowCandidates } from "./lib/activeWindows";
 import { ApiError, displayNick, type Network, visitorNetworkNick } from "./lib/api";
@@ -1249,6 +1250,24 @@ const SettingsDrawer: Component<Props> = (props) => {
             <span class="settings-nav-row-text">
               <span class="settings-nav-row-label">watch lists</span>
               <span class="settings-nav-row-subtitle">presence notify and keyword highlight</span>
+            </span>
+            <span class="settings-nav-row-chevron" aria-hidden="true">
+              ›
+            </span>
+          </button>
+
+          {/* #162 — ignore list sub-page nav row (per-network masks whose
+              messages are dropped at delivery). Sits right after watch lists:
+              the two are the "who do I want to hear from" pair. */}
+          <button
+            type="button"
+            class="settings-nav-row"
+            data-testid="ignores-settings-entry"
+            onClick={() => setSettingsPage("ignores")}
+          >
+            <span class="settings-nav-row-text">
+              <span class="settings-nav-row-label">ignore list</span>
+              <span class="settings-nav-row-subtitle">masks whose messages are dropped</span>
             </span>
             <span class="settings-nav-row-chevron" aria-hidden="true">
               ›
@@ -2567,6 +2586,13 @@ const SettingsDrawer: Component<Props> = (props) => {
             directly (like the retired home WatchedPanel), so no data props. */}
         <Show when={settingsPage() === "watchlists"}>
           <WatchlistsSettings onBack={() => setSettingsPage("main")} />
+        </Show>
+
+        {/* #162 — ignore list sub-page (per-network masks). Self-contained:
+            reads the ignoreList store directly and refreshes it on open, the
+            same shape as the watch lists page. */}
+        <Show when={settingsPage() === "ignores"}>
+          <IgnoresSettings onBack={() => setSettingsPage("main")} />
         </Show>
 
         {/* #385 — aliases sub-page (user-defined command aliases).

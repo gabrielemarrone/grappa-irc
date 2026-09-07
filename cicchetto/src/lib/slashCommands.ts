@@ -229,12 +229,16 @@ export type SlashCommand =
   // NOT the keyword highlight list above). irssi-direct: `/notify <nick> …`
   // adds. Removal is via the settings ×; a bare form opens settings.
   | { kind: "notify"; action: "add"; nicks: string[] }
+  // #162 — /ignore + /unignore, the server-honoured mask list. irssi-direct:
+  // `/ignore <mask>` adds (a bare nick means nick!*@*), `/unignore <mask>`
+  // removes, and a BARE `/ignore` lists what is set for this network.
+  | { kind: "ignore"; action: "add" | "del"; mask: string }
   // #356/#385 — a BARE verb that opens a settings sub-page instead of
   // printing inline (watch-family → watch lists; bare /alias → aliases).
   // Opening the drawer IS the feedback. `section` widens as sub-pages gain
   // bare-verb deep-links; it must stay assignable to settingsNav's
   // SettingsSubPage.
-  | { kind: "open-settings"; section: "watchlists" | "aliases" }
+  | { kind: "open-settings"; section: "watchlists" | "aliases" | "ignores" }
   // #385 — user-defined command aliases. `/alias <name> <expansion>` defines
   // one, `/unalias <name>` removes one. The define carries the parsed name +
   // expansion; compose.ts round-trips them through the aliasList store.
@@ -296,6 +300,25 @@ function parseNickReason(kind: NickReasonKind, verb: string, rest: string): Slas
   const nick = sp === -1 ? rest : rest.slice(0, sp);
   const reason = sp === -1 ? "" : rest.slice(sp + 1).trim();
   return { kind, nick, reason };
+}
+
+// #162 — /ignore and /unignore. One token: the mask. `/ignore` alone lists.
+// Trailing tokens are ignored, the no-arg family's posture — a second token
+// is not a second mask, and irssi's `<levels>` argument is deliberately not
+// parsed here (v1 ignores content only; see the server filter).
+// #162 — `/ignore <mask>` adds; a BARE `/ignore` opens the ignore-list
+// settings sub-page, the same door bare `/hilight` and `/notify` take (the
+// list with its per-entry × is right there; Gabriele's ruling, 2026-09-06).
+function parseIgnore(_verb: string, rest: string): SlashCommand {
+  const [mask] = tokens(rest);
+  if (mask === undefined) return { kind: "open-settings", section: "ignores" };
+  return { kind: "ignore", action: "add", mask };
+}
+
+function parseUnignore(verb: string, rest: string): SlashCommand {
+  const [mask] = tokens(rest);
+  if (mask === undefined) return { kind: "error", verb, message: "/unignore requires a mask" };
+  return { kind: "ignore", action: "del", mask };
 }
 
 // #356 — presence-watch parser, shared by /notify + /watch (alias).
@@ -917,6 +940,8 @@ const DISPATCH: Readonly<Record<string, Handler>> = {
   // #356 — presence watch (classic IRC WATCH/MONITOR = presence).
   // /notify is canonical; /watch is now a presence ALIAS (was a keyword
   // alias pre-#356). Both: irssi-direct add, or bare → open settings.
+  ignore: (verb, rest) => parseIgnore(verb, rest),
+  unignore: (verb, rest) => parseUnignore(verb, rest),
   notify: (verb, rest) => parseNotify(verb, rest),
   watch: (verb, rest) => parseNotify(verb, rest),
 

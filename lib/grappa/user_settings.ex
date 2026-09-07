@@ -71,6 +71,8 @@ defmodule Grappa.UserSettings do
   | `"upload_confirm_enabled"` | `boolean()`        | `get_upload_confirm_enabled/1`, |
   |                        |                        | `put_upload_confirm_enabled/2`  |
   |                        |                        | (#1883)                         |
+  | `"ignores"`            | `ignores()`            | `get_ignores/2`, `add_ignore/4`,|
+  |                        |                        | `remove_ignore/4` (#162)        |
   | `"vhost_selection"`    | `list(String.t())`     | `get_vhost_selection/1`,        |
   |                        |                        | `put_vhost_selection/2`         |
   | `"active_theme_id"`    | `pos_integer() \\| nil`| `get_active_theme_id/1`,        |
@@ -975,6 +977,159 @@ defmodule Grappa.UserSettings do
     # explicit `false` row would be a second spelling of the default. Same
     # rule as `put_show_peer_profiles/2`.
     update_data(subject, &put_or_delete(&1, @upload_confirm_enabled_key, value || nil))
+  end
+
+  # ---------------------------------------------------------------------------
+  # ignores accessors (#162 — the /ignore mask list, honoured server-side)
+  # ---------------------------------------------------------------------------
+
+  @ignores_key "ignores"
+
+  # Cap per (subject, network). Same reasoning as @aliases_max_count — a
+  # user-writable list needs a boundary, and no human ignores a hundred people.
+  @ignores_max_per_network 100
+
+  @typedoc """
+  The `/ignore` list (#162): `network_slug => [mask]`, every mask a normalised
+  `nick!user@host` glob (`Grappa.IRC.Mask`).
+
+  Its OWN key, deliberately NOT a field inside `notification_prefs` beside
+  `muted_targets` — vjt's ruling on #162. The two look alike (both deny, both
+  network-keyed, both fold the same way) but answer different questions: a
+  mute is "this ROOM is noisy" and only suppresses attention; an ignore is
+  "this PERSON is a problem" and drops the message before it exists. One
+  shared shape would carry a field meaningless on half its rows.
+
+  Keyed by the network SLUG rather than a composite `channel_key`: an ignore
+  has no target — it applies everywhere the sender speaks on that network.
+  The network is in the key for the #1038 reason (the same nick on two
+  networks is two people).
+  """
+  @type ignores :: %{String.t() => [String.t()]}
+
+  @doc """
+  The ignore masks for `subject` on `network_slug`. Never fails: an absent
+  row, absent key, or malformed value reads as `[]` — an unreadable ignore
+  list must fail OPEN (messages delivered), never closed (a user silently
+  ignoring everyone).
+  """
+  @spec get_ignores(Subject.t(), String.t()) :: [String.t()]
+  def get_ignores({_, _} = subject, network_slug) when is_binary(network_slug) do
+    case fetch_existing_or_nil(subject) do
+      nil -> []
+      %Settings{data: data} -> masks_for(data[@ignores_key], network_slug)
+    end
+  end
+
+  # Lenient readers, one shape each: a value that is not the map/list we wrote
+  # reads as "nothing ignored" rather than raising on the inbound hot path.
+  defp masks_for(%{} = by_network, slug), do: by_network |> Map.get(slug) |> only_binaries()
+  defp masks_for(_, _), do: []
+
+  defp only_binaries(masks) when is_list(masks), do: Enum.filter(masks, &is_binary/1)
+  defp only_binaries(_), do: []
+
+  @doc """
+  Adds one mask for `subject` on `network_slug`. Idempotent: an already
+  present (normalised, so `Spambot` and `spambot!*@*` are the same) mask is a
+  no-op success. Rejects an unparseable mask with `{:error, :invalid_mask}`
+  and a full list with `{:error, :list_full}`.
+
+  Returns the resulting list so the caller can sync a live session. Newest
+  first — the list is small, order is not a contract, and a prepend is the
+  idiomatic write.
+  """
+  @typedoc """
+  What a mutation did, next to the normalised mask it did it to and the list
+  it left behind. The verb reports the outcome on the NORMALISED mask
+  (`removed spambot!*@*`) because `/unignore spambot` acts on a mask the
+  operator never typed, and an idempotent re-add is only honest if it says
+  `already ignored`; the list is for the session re-sync, not the reply.
+  """
+  @type ignore_outcome :: :added | :already_ignored | :removed | :not_ignored
+
+  @spec add_ignore(Subject.t(), String.t(), String.t(), Identifier.casemapping()) ::
+          {:ok, :added | :already_ignored, String.t(), [String.t()]}
+          | {:error, :invalid_mask | :list_full | Ecto.Changeset.t() | :db_unavailable}
+  def add_ignore({_, _} = subject, network_slug, raw_mask, casemapping)
+      when is_binary(network_slug) and is_binary(raw_mask) and is_atom(casemapping) do
+    with {:ok, mask} <- normalize_mask(raw_mask, casemapping) do
+      add_normalized(subject, network_slug, mask, get_ignores(subject, network_slug))
+    end
+  end
+
+  defp add_normalized(subject, slug, mask, current) do
+    cond do
+      mask in current ->
+        {:ok, :already_ignored, mask, current}
+
+      length(current) >= @ignores_max_per_network ->
+        {:error, :list_full}
+
+      true ->
+        with {:ok, next} <- persist_ignores(subject, slug, [mask | current]),
+             do: {:ok, :added, mask, next}
+    end
+  end
+
+  @doc """
+  Removes one mask (normalised before comparing, so `/unignore spambot`
+  removes `spambot!*@*`). Idempotent: removing an absent mask is
+  `{:ok, :not_ignored, mask, list}`.
+  """
+  @spec remove_ignore(Subject.t(), String.t(), String.t(), Identifier.casemapping()) ::
+          {:ok, :removed | :not_ignored, String.t(), [String.t()]}
+          | {:error, :invalid_mask | Ecto.Changeset.t() | :db_unavailable}
+  def remove_ignore({_, _} = subject, network_slug, raw_mask, casemapping)
+      when is_binary(network_slug) and is_binary(raw_mask) and is_atom(casemapping) do
+    with {:ok, mask} <- normalize_mask(raw_mask, casemapping) do
+      remove_normalized(subject, network_slug, mask, get_ignores(subject, network_slug))
+    end
+  end
+
+  defp remove_normalized(subject, slug, mask, current) do
+    if mask in current do
+      with {:ok, next} <- persist_ignores(subject, slug, List.delete(current, mask)),
+           do: {:ok, :removed, mask, next}
+    else
+      {:ok, :not_ignored, mask, current}
+    end
+  end
+
+  defp persist_ignores(subject, slug, next) do
+    with {:ok, _} <- put_ignores(subject, slug, next), do: {:ok, next}
+  end
+
+  # The #537 ingress fold: the caller names the network's casemapping (the
+  # web edge reads it off `Grappa.Session.casemapping/2`), so the stored mask
+  # already sits in that network's folded space and the delivery match only
+  # has to fold the subject.
+  defp normalize_mask(raw, casemapping) do
+    case Grappa.IRC.Mask.normalize(raw, casemapping) do
+      {:ok, mask} -> {:ok, mask}
+      :error -> {:error, :invalid_mask}
+    end
+  end
+
+  # An empty per-network list deletes that network's key, and an empty map
+  # deletes the whole key — a fresh subject already reads `[]`, so an explicit
+  # empty would be a second spelling of the default (the put_or_delete rule).
+  defp put_ignores(subject, network_slug, masks) do
+    update_data(subject, fn data ->
+      by_network =
+        case data[@ignores_key] do
+          %{} = m -> m
+          _ -> %{}
+        end
+
+      next =
+        case masks do
+          [] -> Map.delete(by_network, network_slug)
+          _ -> Map.put(by_network, network_slug, masks)
+        end
+
+      put_or_delete(data, @ignores_key, if(next == %{}, do: nil, else: next))
+    end)
   end
 
   # ---------------------------------------------------------------------------

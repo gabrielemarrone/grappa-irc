@@ -88,6 +88,7 @@ defmodule GrappaWeb.FallbackController do
            | :too_many_attempts
            | :theme_cap_reached
            | :list_full
+           | :invalid_mask
            | :not_raster
            | :too_large
            | :ssrf_blocked
@@ -298,6 +299,15 @@ defmodule GrappaWeb.FallbackController do
     conn
     |> put_status(:unprocessable_entity)
     |> json(%{error: "list_full"})
+  end
+
+  # #162 — an /ignore mask that does not parse as `nick!user@host` (bad
+  # `!`/`@` order, CR/LF, empty, oversized). 422 like `:list_full`: the request
+  # is well-formed, the value is refused — cic renders "not a valid mask".
+  def call(conn, {:error, :invalid_mask}) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{error: "invalid_mask"})
   end
 
   # #75 themes background pipeline — the source (upload or fetched URL) is not

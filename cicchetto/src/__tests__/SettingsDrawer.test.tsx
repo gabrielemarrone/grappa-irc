@@ -1697,6 +1697,7 @@ describe("SettingsDrawer (#460 — settings index)", () => {
       "themes-settings-entry",
       "push-settings-entry",
       "watchlists-settings-entry",
+      "ignores-settings-entry",
       "aliases-settings-entry",
       "perform-settings-entry",
     ]);
@@ -1708,6 +1709,7 @@ describe("SettingsDrawer (#460 — settings index)", () => {
       "themes-settings-entry",
       "push-settings-entry",
       "watchlists-settings-entry",
+      "ignores-settings-entry",
       "aliases-settings-entry",
       "perform-settings-entry",
       "vhost-settings-entry",
@@ -1716,10 +1718,10 @@ describe("SettingsDrawer (#460 — settings index)", () => {
 
   it("every index nav row carries a non-empty subtitle (self-explaining index)", async () => {
     const { container } = wrap(true);
-    // Wait for the async vhost row so all eight rows are present.
+    // Wait for the async vhost row so all nine rows are present.
     await waitFor(() => screen.getByTestId("vhost-settings-entry"));
     const rows = Array.from(container.querySelectorAll(".settings-nav-row"));
-    expect(rows.length).toBe(8);
+    expect(rows.length).toBe(9);
     for (const row of rows) {
       const subtitle = row.querySelector(".settings-nav-row-subtitle");
       expect(subtitle).not.toBeNull();

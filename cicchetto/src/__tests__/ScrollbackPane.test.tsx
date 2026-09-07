@@ -312,6 +312,9 @@ import { type ChannelKey, channelKey } from "../lib/channelKey";
 // entry so ScrollbackPane derives the #237 on-JOIN topic-join line; the #325
 // block proves that line survives the #222 presence-hide filter.
 import { seedTopic } from "../lib/channelTopic";
+// #1914 — the REAL `/topic` answer store, for the same reason: the pane is
+// its only reader, and what these tests assert IS that it reads it.
+import { appendCommandOutput } from "../lib/commandOutput";
 // #1302 — the REAL ISUPPORT store (not mocked): the badge derives its level
 // names from the network's own PREFIX, so what these tests seed here IS the
 // input the derivation reads. Network id 1 is what the mocked
@@ -332,8 +335,6 @@ import {
 // advances the read cursor without needing the button to render (jsdom's
 // zero-geometry keeps `atBottom` true, so the button never mounts).
 import { requestScrollToBottom } from "../lib/scrollToBottomCommand";
-// #1914 — the REAL `/topic` answer store, for the same reason: the pane is
-// its only reader, and what these tests assert IS that it reads it.
 import { appendTopicShow } from "../lib/topicShow";
 import { dismissWhoisCard, setWhoisBundle } from "../lib/whoisCard";
 import ScrollbackPane, {
@@ -6970,6 +6971,93 @@ describe("ScrollbackPane", () => {
 
       expect(getDraft(KEY)).toBe("<alice> hello << ");
     });
+  });
+});
+
+// #162 — a slash verb's answer prints INTO the window, one row per line. The
+// pane's half: the `commandOutput` entries become rows at the moment they were
+// given. Own channels per test for the same reason the #1914 block below
+// spells out: the store is a module singleton whose only emptier is an
+// identity rotation.
+describe("#162 command output rows", () => {
+  let n = 0;
+  const freshChannel = (): string => {
+    n += 1;
+    return `#t162-${n}`;
+  };
+  const keyFor = (chan: string) => `freenode ${chan}` as ChannelKey;
+  const msg = (chan: string, id: number, server_time: number): ScrollbackMessage => ({
+    id,
+    network: "freenode",
+    channel: chan,
+    server_time,
+    kind: "privmsg",
+    sender: "alice",
+    body: "hello",
+    meta: {},
+  });
+  const mount = (chan: string) =>
+    render(() => <ScrollbackPane networkSlug="freenode" channelName={chan} kind="channel" />);
+
+  beforeEach(() => {
+    setUserNick("vjt");
+    mockMembersByChannel.mockReturnValue({});
+  });
+
+  it("renders the header row, then one indented row per member, in order", () => {
+    const chan = freshChannel();
+    appendCommandOutput(keyFor(chan), [
+      { label: "Ignore list for freenode:", text: "", indent: false },
+      { label: null, text: "spambot!*@*", indent: true },
+      { label: null, text: "*!*@*.evil.example", indent: true },
+    ]);
+    setScrollback({ [keyFor(chan)]: [msg(chan, 1, 1000)] });
+    mount(chan);
+
+    const rows = screen.getAllByTestId("command-output-line");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent("Ignore list for freenode:");
+    expect(rows[0]).not.toHaveClass("scrollback-command-output-indent");
+    expect(rows[1]).toHaveTextContent("spambot!*@*");
+    expect(rows[1]).toHaveClass("scrollback-command-output-indent");
+    expect(rows[2]).toHaveTextContent("*!*@*.evil.example");
+    expect(rows[2]).toHaveClass("scrollback-command-output-indent");
+  });
+
+  // The bug Gabriele hit: `/ignore` then `/topic` printed the topic ABOVE the
+  // ignore rows. Each ephemeral kind used to be woven in its own pass anchored
+  // only on messages, so the later-asked `/topic` never saw the `/ignore` rows
+  // and went past them. A message AFTER both is what exposed it.
+  it("keeps ask order across kinds — a /topic asked after /ignore renders below it", () => {
+    const chan = freshChannel();
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValueOnce(2000);
+    appendCommandOutput(keyFor(chan), [{ label: "Ignore:", text: "added x!*@*", indent: false }]);
+    now.mockReturnValueOnce(2500);
+    appendTopicShow(keyFor(chan), chan, { text: "beta", set_by: "vjt", set_at: null });
+    now.mockRestore();
+    setScrollback({ [keyFor(chan)]: [msg(chan, 1, 1000), msg(chan, 2, 3000)] });
+    mount(chan);
+
+    const kinds = Array.from(
+      document.querySelectorAll('[data-kind="command-output"], [data-kind="topic-show"]'),
+    ).map((el) => el.getAttribute("data-kind"));
+    expect(kinds).toEqual(["command-output", "topic-show"]);
+  });
+
+  // An empty window is exactly where an operator types a verb first; the
+  // early-return for "nothing to show" must not swallow the answer.
+  it("renders in a window with no messages at all", () => {
+    const chan = freshChannel();
+    appendCommandOutput(keyFor(chan), [
+      { label: "Unignore:", text: "removed spambot!*@*", indent: false },
+    ]);
+    setScrollback({ [keyFor(chan)]: [] });
+    mount(chan);
+
+    expect(screen.getByTestId("command-output-line")).toHaveTextContent(
+      "Unignore: removed spambot!*@*",
+    );
   });
 });
 

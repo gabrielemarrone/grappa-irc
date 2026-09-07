@@ -314,6 +314,15 @@ defmodule Grappa.Session do
           # exactly like `auto_away_debounce_ms`. Kept in sync with the
           # `Grappa.Session.Server.init_opts/0` twin.
           optional(:show_peer_profiles) => boolean(),
+          # #162 — the subject's `/ignore` masks on this network, as stored
+          # (strings; the Server compiles them). Resolved at the spawn
+          # boundary below like the two above, and for a reason a respawn
+          # makes concrete: a `:transient` restart re-runs `init/1` with the
+          # SAME opts and does not re-run this boundary, so a read placed in
+          # `init/1` fires again on every crash — which is exactly what
+          # `JoinSeedCostTest` counted as a stray query inside a join storm.
+          # Kept in sync with the `Grappa.Session.Server.init_opts/0` twin.
+          optional(:ignores) => [String.t()],
           optional(:refresh_plan) => Server.refresh_plan_check(),
           # GH #189 — on-connect perform list + its `$oper_pass` secret,
           # decrypted plaintext from the credential (nil when unset). Set by
@@ -367,6 +376,11 @@ defmodule Grappa.Session do
       end)
       |> Map.put_new_lazy(:show_peer_profiles, fn ->
         UserSettings.get_show_peer_profiles(subject)
+      end)
+      # #162 — same choke point: the ignore list read ONCE at spawn, never in
+      # `init/1` (see the `:ignores` opt above for why a respawn cares).
+      |> Map.put_new_lazy(:ignores, fn ->
+        UserSettings.get_ignores(subject, Map.fetch!(opts, :network_slug))
       end)
 
     DynamicSupervisor.start_child(
@@ -1971,6 +1985,28 @@ defmodule Grappa.Session do
     case call_session(subject, network_id, :presence_snapshot) do
       {:error, _} = err -> err
       map when is_map(map) -> {:ok, map}
+    end
+  end
+
+  @doc """
+  #162 — pushes the current `/ignore` mask list to the live session for
+  `(subject, network_id)` so the delivery filter picks it up immediately.
+  No live session is a normal `:ok`: the next spawn reads the list from
+  `UserSettings` at the spawn boundary (`start_session/3`).
+  """
+  @spec ignores_changed(subject(), integer(), [String.t()]) :: :ok
+  def ignores_changed(subject, network_id, masks)
+      when is_subject(subject) and is_integer(network_id) and is_list(masks) do
+    case call_session(subject, network_id, {:ignores_changed, masks}) do
+      :ok ->
+        :ok
+
+      {:error, :no_session} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("ignores_changed sync failed", reason: inspect(reason))
+        :ok
     end
   end
 

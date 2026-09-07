@@ -11,7 +11,7 @@ defmodule Grappa.Session.EventRouterTest do
   """
   use ExUnit.Case, async: true
 
-  alias Grappa.IRC.{JoinFailure, Message, Parser}
+  alias Grappa.IRC.{JoinFailure, Mask, Message, Parser}
 
   alias Grappa.Session.{
     Deps,
@@ -7198,4 +7198,112 @@ defmodule Grappa.Session.EventRouterTest do
 
   defp unwrap_ann({:ann_type, _, [{:var, _, _}, type]}), do: type
   defp unwrap_ann(type), do: type
+
+  # #162 — the /ignore delivery filter at the head of `route/2`. A dropped
+  # message produces NO effects: no persist, so no row, no broadcast, no push.
+  # The four exclusions are each pinned, because each is a way a mask could
+  # silence something it must not.
+  describe "/ignore delivery filter (#162)" do
+    # The state carries the masks COMPILED, as `Session.Server` hands them
+    # over — the router never sees a string.
+    defp ignoring(masks), do: base_state(%{ignores: Mask.compile_all(masks)})
+
+    # #537 — the subject folds with the SESSION's casemapping. On rfc1459 the
+    # mask `/ignore Foo[1]` was stored as `foo{1}!*@*` (the ingress fold), and
+    # a sender spelled `Foo[1]` is the same person to that ircd, so it drops.
+    # On ascii the same stored string is a different key from `foo[1]`.
+    test "on rfc1459 a sender folds to the stored mask across the national chars" do
+      from_brackets = msg(:privmsg, ["#chan", "x"], {:nick, "Foo[1]", "u", "h"})
+
+      on_rfc =
+        base_state(%{
+          isupport: %{ISupport.default() | casemapping: :rfc1459},
+          ignores: Mask.compile_all(["foo{1}!*@*"])
+        })
+
+      on_ascii = ignoring(["foo{1}!*@*"])
+
+      assert {:cont, _, []} = EventRouter.route(from_brackets, on_rfc)
+      assert {:cont, _, [{:persist, :privmsg, _}]} = EventRouter.route(from_brackets, on_ascii)
+    end
+
+    test "a PRIVMSG from an ignored nick is dropped — no effects at all" do
+      privmsg = msg(:privmsg, ["#chan", "buy my coins"], {:nick, "spambot", "u", "h"})
+      assert {:cont, _, []} = EventRouter.route(privmsg, ignoring(["spambot!*@*"]))
+    end
+
+    test "the same PRIVMSG with no ignores persists as usual" do
+      privmsg = msg(:privmsg, ["#chan", "hello"], {:nick, "spambot", "u", "h"})
+      assert {:cont, _, [{:persist, :privmsg, _}]} = EventRouter.route(privmsg, ignoring([]))
+    end
+
+    test "a host mask drops any nick from that host, and only that host" do
+      from_evil = msg(:privmsg, ["#chan", "x"], {:nick, "alice", "~a", "evil.example"})
+      from_good = msg(:privmsg, ["#chan", "x"], {:nick, "alice", "~a", "good.example"})
+      state = ignoring(["*!*@evil.example"])
+
+      assert {:cont, _, []} = EventRouter.route(from_evil, state)
+      assert {:cont, _, [{:persist, :privmsg, _}]} = EventRouter.route(from_good, state)
+    end
+
+    test "a DM from an ignored nick is dropped too — the filter is not per-target" do
+      dm = msg(:privmsg, ["vjt", "psst"], {:nick, "spambot", "u", "h"})
+      assert {:cont, _, []} = EventRouter.route(dm, ignoring(["spambot!*@*"]))
+    end
+
+    test "NOTICE from an ignored nick is dropped; ACTION rides PRIVMSG and is too" do
+      notice = msg(:notice, ["#chan", "ad"], {:nick, "spambot", "u", "h"})
+      action = msg(:privmsg, ["#chan", "ACTION waves"], {:nick, "spambot", "u", "h"})
+      state = ignoring(["spambot!*@*"])
+
+      assert {:cont, _, []} = EventRouter.route(notice, state)
+      assert {:cont, _, []} = EventRouter.route(action, state)
+    end
+
+    # Exclusion 1 — presence verbs are NOT dropped: they are governed by the
+    # presence filter, and eating a JOIN here would desync the members map.
+    test "a JOIN from an ignored nick still routes" do
+      join = msg(:join, ["#chan"], {:nick, "spambot", "u", "h"})
+      {:cont, after_join, _} = EventRouter.route(join, ignoring(["spambot!*@*"]))
+      assert Map.has_key?(after_join.members["#chan"], "spambot")
+    end
+
+    # Exclusion 2 — never our own lines, even under a mask that matches us.
+    test "our own PRIVMSG is never dropped, whatever the masks say" do
+      own = msg(:privmsg, ["#chan", "hi"], {:nick, "vjt", "u", "h"})
+      assert {:cont, _, [{:persist, :privmsg, _}]} = EventRouter.route(own, ignoring(["*!*@*"]))
+    end
+
+    # Exclusion 3 — services and the server are never chatter.
+    test "a services NOTICE is never dropped, even by a catch-all mask" do
+      nickserv = msg(:notice, ["vjt", "Password incorrect."], {:nick, "NickServ", "services", "azzurra.chat"})
+      assert {:cont, _, [_ | _]} = EventRouter.route(nickserv, ignoring(["*!*@*"]))
+    end
+
+    # Exclusion 4 — an origin with no nick is never a candidate.
+    test "a server-prefixed line is untouched by the filter" do
+      notice = msg(:notice, ["vjt", "*** Looking up your hostname"], {:server, "irc.example"})
+      # Compare EFFECTS, not the whole tuple: the two states differ by the
+      # `ignores` key itself, so tuple equality would fail for that reason alone.
+      {:cont, _, with_mask} = EventRouter.route(notice, ignoring(["*!*@*"]))
+      {:cont, _, without} = EventRouter.route(notice, ignoring([]))
+      assert with_mask == without
+      assert with_mask != []
+    end
+
+    # The cloaking rule from Mask: an absent host satisfies only `*`.
+    test "a host mask does not fire for a sender whose host is cloaked away" do
+      cloaked = msg(:privmsg, ["#chan", "x"], {:nick, "alice", nil, nil})
+
+      assert {:cont, _, [{:persist, :privmsg, _}]} =
+               EventRouter.route(cloaked, ignoring(["*!*@evil.example"]))
+    end
+
+    # A state with no :ignores key at all (older tests, a pre-#162 process)
+    # must route normally — the filter reads it with a [] default.
+    test "a state without an :ignores key routes normally" do
+      privmsg = msg(:privmsg, ["#chan", "hello"], {:nick, "spambot", "u", "h"})
+      assert {:cont, _, [{:persist, :privmsg, _}]} = EventRouter.route(privmsg, base_state())
+    end
+  end
 end

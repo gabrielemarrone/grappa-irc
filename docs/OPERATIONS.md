@@ -1947,7 +1947,7 @@ D** — see **Running the published image** below.
   is `scripts/smoke-release-image.sh`, runnable by hand — probes, mutation
   evidence and the explicit non-coverage list are in
   `docs/TESTING.md` § "The release-image smoke".
-- **It crosses a VERSION SEAM, and boots where the cwd is hostile (#1952).**
+- **It crosses a VERSION SEAM, and boots on hostile substrates (#1952).**
   Until then every probe was a FIRST boot on an empty volume of ONE image, so
   the shape that breaks a self-hoster — an existing box on the previous
   release, updated in place — had no coverage; that is the shape #1945 reached
@@ -1959,8 +1959,19 @@ D** — see **Running the published image** below.
   written under the old release still there. It then asserts that the boot
   wrote **nothing** into the container layer (`docker diff`, which never
   reports what is under a mount — measured empty on a healthy release and
-  three lines on v1.5.0, two of them #1945 itself), and boots the candidate
-  under `--read-only --tmpfs /tmp` and under `--workdir /`.
+  three lines on v1.5.0, two of them #1945 itself), and boots the candidate on
+  FOUR hostile substrates (#1952b): `--read-only --tmpfs /tmp`, `--workdir /`,
+  a named volume mounted over `/app`, and `--user 65534`. Each carries a
+  `docker inspect` check proving the flag is actually in force, and the `/app`
+  shape additionally compares the release root after the boot against the one
+  the image ships — `docker diff` cannot see under a mount, and answers zero
+  lines for v1.5.0 there while the volume grows `runtime`.
+  ⚠️ **Do not read the `/app` shape's green as "mounting a volume over `/app`
+  is supported".** Docker seeds such a volume from the image ONCE, while it is
+  empty: recreate the container on a newer image and it boots the OLD release
+  while `docker inspect` reports the new tag (measured, `:v1.5.1` on a
+  v1.5.0-seeded volume serving `1.5.0` from `/api/config`). Mount volumes at
+  `/data`, never at `/app`.
   ⚠️ **The previous image is now REQUIRED**, on the same no-skip footing as
   the candidate: a run that quietly fell back to the same-version probes would
   report exactly the green this closed. The one exception is a repair dispatch

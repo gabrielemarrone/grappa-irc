@@ -60,20 +60,13 @@
 #   * ONE direction only: previous -> candidate. A downgrade is a different
 #     question with a different answer (a migration that ran is not undone by
 #     booting the older image) and is not smuggled in here (#1952).
-#   * no volume mounted OVER /app. The release IS /app, so hiding it removes
-#     the thing under test, and a probe asserting that shape answers 200 would
-#     be asserting a falsehood.
-#   * no arbitrary-uid shape (`--user 65534`), and this one is a MEASUREMENT
-#     rather than a judgement: the setup cannot be made to hold. Docker
-#     re-seeds an EMPTY named volume from the image on every mount, ownership
-#     included, so `chown -R 65534 /data` in a helper container reads back as
-#     65534 inside that container and as the image's 100:101 in the next one.
-#     Only a pre-populated volume survives it, which is a fixture built to
-#     dodge a docker behaviour rather than a substrate anybody runs — and the
-#     property it would test (nothing outside /data need be writable) is what
-#     the read-only shape asserts directly.
-#     Both are named here because they are the two hostile shapes #1952 lists
-#     that this driver deliberately does not run.
+#   * an EMPTY BIND MOUNT over /app is not a shape and cannot be one: docker
+#     never copies the image's content into a bind mount, so the release is
+#     simply gone. Measured — the container does not fail to boot, it fails to
+#     be CREATED: `stat /app/release-entrypoint.sh: no such file or directory`,
+#     status `created/127`. The named-volume reading of the same words IS
+#     covered, as shape 3 below; the two are different substrates wearing one
+#     sentence, and only one of them has an application in it to test.
 
 set -euo pipefail
 
@@ -109,6 +102,17 @@ UP_VOLUME=grappa-smoke-upgrade-data
 # name keeps the teardown list finite.
 HOSTILE=grappa-smoke-hostile
 HOSTILE_VOLUME=grappa-smoke-hostile-data
+# Shape 3's SECOND volume, the one mounted over the release root itself.
+#
+# ⚠️ THIS ONE MUST NEVER SURVIVE A RUN, and it is the only volume here whose
+# leak is worse than untidy. Docker seeds a named volume from the image ONCE,
+# while it is empty; a leftover /app volume is not empty, so the next run's
+# container mounts LAST RUN'S RELEASE over the candidate's and boots it.
+# Measured: a container started from `:v1.5.1` on a volume seeded by v1.5.0
+# reports `.Config.Image = …:v1.5.1` to `docker inspect` and version `1.5.0` to
+# /api/config. The whole smoke would then probe an image nobody built, and say
+# nothing about it — so it is removed before the run AND in the teardown.
+HOSTILE_APP_VOLUME=grappa-smoke-hostile-app
 
 # The account created under the PREVIOUS release, read back after the upgrade
 # through the same operator door — see probe 6.
@@ -140,7 +144,7 @@ teardown() {
         done
     fi
     docker rm -f "$BOX" "$BARE" "$UP_OLD" "$UP_NEW" "$HOSTILE" >/dev/null 2>&1 || true
-    docker volume rm "$BOX_VOLUME" "$BARE_VOLUME" "$UP_VOLUME" "$HOSTILE_VOLUME" >/dev/null 2>&1 || true
+    docker volume rm "$BOX_VOLUME" "$BARE_VOLUME" "$UP_VOLUME" "$HOSTILE_VOLUME" "$HOSTILE_APP_VOLUME" >/dev/null 2>&1 || true
     rm -rf "$SMOKE_HOME"
     exit "$status"
 }
@@ -149,14 +153,16 @@ trap teardown EXIT
 # A crashed earlier run leaves the box behind, and `install` refuses to run
 # onto an existing container. Clear the dedicated names before, not just after.
 docker rm -f "$BOX" "$BARE" "$UP_OLD" "$UP_NEW" "$HOSTILE" >/dev/null 2>&1 || true
-docker volume rm "$BOX_VOLUME" "$BARE_VOLUME" "$UP_VOLUME" "$HOSTILE_VOLUME" >/dev/null 2>&1 || true
+docker volume rm "$BOX_VOLUME" "$BARE_VOLUME" "$UP_VOLUME" "$HOSTILE_VOLUME" "$HOSTILE_APP_VOLUME" >/dev/null 2>&1 || true
 
 # wait_healthz CONTAINER WHAT — poll /healthz from INSIDE, so this works for
 # the bare container too (no published port). WHAT names the shape being
-# waited on, not the container: since #1952 the same driver waits on six
-# boots, and "grappa-smoke-hostile never answered" would not say WHICH hostile
-# substrate it was. Both arguments are required — a defaulted label is a
-# failure message that degrades exactly when it is needed.
+# waited on, not the container: since #1952 the same driver waits on the boots
+# of several different shapes, and "grappa-smoke-hostile never answered" would
+# not say WHICH hostile substrate it was. Both arguments are required — a
+# defaulted label is a failure message that degrades exactly when it is needed.
+# The count is deliberately not spelled here: it went from two to four in one
+# follow-up, and a number in a comment is a thing to forget.
 wait_healthz() {
     deadline=$((SECONDS + 300))
     until docker exec "$1" curl -fsS -o /dev/null http://localhost:4000/healthz 2>/dev/null; do
@@ -544,10 +550,24 @@ pass "the boot left the container layer empty, and a planted /app/runtime is sti
 # asked exactly one question: does it answer /healthz. The failures they are
 # hunting are the same one wearing different clothes — a path resolved against
 # something the operator, not the application, chose.
-say "probe 8: the candidate boots where the cwd is hostile"
+say "probe 8: the candidate boots on hostile substrates"
 
-# hostile_boot SHAPE ARM-CHECK EXTRA-FLAG... — one shape, from a fresh volume,
-# asked one question.
+# The uid:gid the IMAGE gives /data, READ OUT OF THE IMAGE rather than spelled.
+# Every shape but the arbitrary-uid one runs as the baked user, so this is the
+# ownership their storage must carry — and writing `100:101` here would be a
+# second copy of a Dockerfile fact, silently wrong the day `adduser -S` picks
+# another number.
+IMAGE_DATA_OWNER="$(docker run --rm --entrypoint sh "$GRAPPA_IMAGE" -c 'stat -c "%u:%g" /data')"
+[ -n "$IMAGE_DATA_OWNER" ] \
+    || die "could not read /data's owner out of $GRAPPA_IMAGE — every shape below would then hand its volume to nobody in particular"
+
+# The arbitrary uid shape 4 runs as. 65534 is `nobody` on every distro and the
+# number Kubernetes' own `runAsUser:` examples use, but the POINT is that it is
+# not the image's: see the guard on that below.
+HOSTILE_UID=65534
+
+# hostile_boot SHAPE ARM-CHECK DATA-OWNER EXTRA-FLAG... — one shape, from a
+# fresh volume, asked one question.
 #
 # ARM-CHECK is a `docker inspect` format string that must come back `true`:
 # the proof that the hostile condition is actually IN FORCE. Without it a flag
@@ -556,12 +576,37 @@ say "probe 8: the candidate boots where the cwd is hostile"
 # probe 7's canary exists to refuse, and the reason each shape carries its own
 # rather than one shared assertion.
 #
+# DATA-OWNER is the `uid:gid` the /data volume is handed to before the boot,
+# and it is REQUIRED of every shape rather than defaulted, because it is the
+# storage contract that shape's operator has to satisfy — stating it is half of
+# what the shape means. Three of the four pass the image's own owner, which
+# makes the chown a no-op and keeps ONE code path with no branch in it.
+#
+# WHY A MARKER FILE RIDES WITH THE CHOWN, and it is a measurement about docker
+# rather than a trick: docker re-seeds an EMPTY named volume from the image on
+# every mount, ownership included. Measured — create a volume, `chown 65534`
+# it from a helper, and the NEXT container reads the image's owner back. One
+# file inside is enough to make the volume non-empty, and then the ownership
+# sticks. The negative control is the shape without it: a virgin volume under
+# `--user 65534` dies with `mkdir: can't create directory '/data/uploads':
+# Permission denied`. The file is zero bytes, is not grappa state, and is what
+# a real arbitrary-uid deployment provides for itself — a Kubernetes `fsGroup`,
+# or an operator's `chown` on the host path.
+#
 # Each shape gets a FIRST boot of its own: one that only works because the
 # previous shape already created the state is not the shape an operator meets.
 hostile_boot() {
-    local shape="$1" arm_check="$2"; shift 2
+    local shape="$1" arm_check="$2" data_owner="$3"; shift 3
     docker rm -f "$HOSTILE" >/dev/null 2>&1 || true
     docker volume rm "$HOSTILE_VOLUME" >/dev/null 2>&1 || true
+
+    # `--user 0:0` because chown is root's; `--entrypoint sh` because nothing
+    # must boot here. The owner arrives as an ARGUMENT, never interpolated into
+    # the `-c` string.
+    docker run --rm --user 0:0 -v "${HOSTILE_VOLUME}:/data" --entrypoint sh \
+        "$GRAPPA_IMAGE" -c 'touch /data/.hostile-fixture && chown -R "$1" /data' \
+        sh "$data_owner" >/dev/null \
+        || die "the '$shape' substrate: could not hand /data to $data_owner, so the boot below would be testing the wrong storage"
 
     docker run -d --name "$HOSTILE" -e PHX_HOST=localhost \
         -v "${HOSTILE_VOLUME}:/data" "$@" "$GRAPPA_IMAGE" >/dev/null \
@@ -588,7 +633,7 @@ hostile_boot() {
 # bootstrap; `--read-only --tmpfs /tmp` boots. `/app/tmp` is NOT in the recipe
 # because the release never writes there — which is the same fact probe 7
 # measures from the other side, an empty container layer.
-hostile_boot 'read-only rootfs' '{{.HostConfig.ReadonlyRootfs}}' \
+hostile_boot 'read-only rootfs' '{{.HostConfig.ReadonlyRootfs}}' "$IMAGE_DATA_OWNER" \
     --read-only --tmpfs /tmp:rw,mode=1777
 
 # ── shape 2: a working directory the process did not choose ─────────────────
@@ -609,7 +654,112 @@ hostile_boot 'read-only rootfs' '{{.HostConfig.ReadonlyRootfs}}' \
 # The arm check is `.Config.WorkingDir` and not a `docker exec pwd`: the
 # interesting failures here EXIT, and a shape that has to be alive to prove it
 # was applied cannot report on the boot that died.
-hostile_boot 'cwd the process did not choose (/)' '{{eq .Config.WorkingDir "/"}}' \
+hostile_boot 'cwd the process did not choose (/)' '{{eq .Config.WorkingDir "/"}}' "$IMAGE_DATA_OWNER" \
     --workdir /
+
+# ── shape 3: a volume mounted OVER the release root ─────────────────────────
+#
+# The release lives at /app, and this shape mounts a named volume there. It is
+# not a hypothetical: it is what a Kubernetes PVC pointed one path to the left
+# does, and what a compose file that "persists the app" does.
+#
+# THE SHAPE IS CONSTRUCTIBLE AND IT BOOTS, and that took measuring rather than
+# reasoning, because the obvious reading — mounting over /app hides the release,
+# so there is nothing left to test — is TRUE OF A BIND MOUNT AND FALSE OF A
+# NAMED VOLUME. Docker copies the image's content into an empty named volume at
+# first mount (the release, its permissions, the setgid bit on /app), so the
+# container comes up; an empty bind mount gets no copy and cannot even be
+# created. The non-coverage list at the top of this file carries that second
+# reading, since only one of the two has an application in it.
+#
+# 🔴 A GREEN HERE DOES NOT MEAN THE SHAPE IS SUPPORTED, and the difference is
+# measured: the copy-up happens ONCE, while the volume is empty. Pull a new
+# image, recreate the container, and the volume still holds the OLD release —
+# `docker inspect` reports the new tag and /api/config reports the old version.
+# This probe boots on a volume it created seconds earlier, which is the only
+# state in which the shape is honest.
+#
+# WHAT IT ASSERTS BEYOND /healthz, and why it must: `docker diff` — probe 7's
+# oracle for "the boot wrote nothing outside /data" — is blind by construction
+# under a mount, and reports ZERO LINES for this container even when the boot
+# wrote into the release root. Measured on v1.5.0, whose #1945 defect creates
+# `runtime/peer_avatars` relative to the cwd: `docker diff` says nothing, and
+# the VOLUME grows an eighth entry. So the same property is read through the
+# window this shape leaves open — the release root after the boot must be
+# exactly the release root the image ships.
+hostile_boot 'a volume mounted over the release root (/app)' \
+    '{{range .Mounts}}{{if eq .Destination "/app"}}true{{end}}{{end}}' \
+    "$IMAGE_DATA_OWNER" \
+    -v "${HOSTILE_APP_VOLUME}:/app"
+
+# The container is gone; the /app volume it booted from is not, which is what
+# makes this readable at all. `ls -1A` on both sides: hidden entries count,
+# since a boot is as free to write `/app/.state` as `/app/runtime`.
+app_shipped="$SMOKE_HOME/app-root-shipped.list"
+app_after="$SMOKE_HOME/app-root-after-boot.list"
+docker run --rm --entrypoint sh "$GRAPPA_IMAGE" -c 'ls -1A /app | sort' > "$app_shipped" \
+    || die "could not list the release root the image ships"
+docker run --rm -v "${HOSTILE_APP_VOLUME}:/mnt/app" --entrypoint sh "$GRAPPA_IMAGE" \
+    -c 'ls -1A /mnt/app | sort' > "$app_after" \
+    || die "could not list the release root the '/app volume' boot left behind"
+
+# The anti-hollow-green guard, before the comparison rather than after: two
+# empty listings compare EQUAL, and that is exactly what a mount that silently
+# resolved nowhere would produce.
+[ -s "$app_shipped" ] \
+    || die "the image ships an EMPTY /app — the listing is blind and the comparison below cannot fail"
+
+if ! cmp -s "$app_shipped" "$app_after"; then
+    printf '\n----- release root: shipped vs after the boot -----\n' >&2
+    diff "$app_shipped" "$app_after" >&2 || true
+    die "the boot wrote into the RELEASE ROOT, which on this substrate is a mounted volume and therefore invisible to probe 7's docker diff. On v1.5.0 the extra entry was 'runtime', #1945 exactly."
+fi
+
+# POSITIVE control, and the only thing between the reading above and a hollow
+# green: the same two listings, with #1945's own path planted in the volume.
+# `--user 0:0` because the volume root belongs to the image's user, and this
+# helper is writing into it from outside.
+docker run --rm --user 0:0 -v "${HOSTILE_APP_VOLUME}:/mnt/app" --entrypoint sh \
+    "$GRAPPA_IMAGE" -c 'mkdir -p /mnt/app/runtime/peer_avatars' >/dev/null \
+    || die "could not plant the release-root canary — shape 3's own control cannot run"
+app_canary="$SMOKE_HOME/app-root-canary.list"
+docker run --rm -v "${HOSTILE_APP_VOLUME}:/mnt/app" --entrypoint sh "$GRAPPA_IMAGE" \
+    -c 'ls -1A /mnt/app | sort' > "$app_canary" \
+    || die "could not re-list the release root after planting the canary"
+if cmp -s "$app_shipped" "$app_canary"; then
+    die "a directory planted in the /app volume does not show up in the listing — the comparison is BLIND, and the equality above proved nothing"
+fi
+pass "the '/app volume' boot left the release root exactly as the image ships it, and a planted runtime/ is still seen"
+docker volume rm "$HOSTILE_APP_VOLUME" >/dev/null 2>&1 || true
+
+# ── shape 4: an arbitrary non-root uid ──────────────────────────────────────
+#
+# `--user 65534` — a Kubernetes `runAsUser:`, a hardened compose `user:`, an
+# OpenShift project that assigns a uid nobody chose. The image bakes its own
+# `grappa` user and every other probe here runs as it, so this is the one shape
+# that asks whether anything depends on being THAT user rather than merely
+# being a user with writable storage.
+#
+# MEASURED, and it is the strongest red in this file because it is #1945
+# verbatim rather than a cousin of it. Identical fixture, identical flags, the
+# two releases apart:
+#
+#   v1.5.1   running/0, /healthz in 2s
+#   v1.5.0   exited/1
+#            ** (File.Error) could not make directory (with -p)
+#               "runtime/peer_avatars": permission denied
+#                   (grappa 1.5.0) lib/grappa/avatars/reaper.ex:79
+#
+# Note the path in that error is RELATIVE. /app is writable by the baked user
+# and by nobody else, which is why the same defect is silent on every other
+# docker shape and fatal here. The control that makes the pair mean something:
+# v1.5.0 on this SAME image with the baked user and an ordinary volume boots
+# healthy, so the red belongs to the uid and not to the release.
+[ "${HOSTILE_UID}:${HOSTILE_UID}" != "$IMAGE_DATA_OWNER" ] \
+    || die "the image's own /data owner IS ${HOSTILE_UID}:${HOSTILE_UID} — this shape would be an ordinary boot wearing a --user flag, and would assert nothing"
+hostile_boot "an arbitrary non-root uid (--user ${HOSTILE_UID})" \
+    "{{eq .Config.User \"${HOSTILE_UID}:${HOSTILE_UID}\"}}" \
+    "${HOSTILE_UID}:${HOSTILE_UID}" \
+    --user "${HOSTILE_UID}:${HOSTILE_UID}"
 
 say "release image $GRAPPA_IMAGE deployed and answered every probe 🎉"

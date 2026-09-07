@@ -335,17 +335,48 @@ is DELETE-then-write, never append-only:
   **"remove NUDO, e riportami rc e output testuale"**: con `--force` la prova sparisce e resta solo
   la tua parola contro una status line. **Se la status line del pane e la tua misura si
   contraddicono, quell'`rc` è l'arbitro: chiedilo PRIMA di dichiarare che non si è perso niente.**
-  🔴🔴 **MA NON LEGGERE L'INVERSO: `rc=128` NON VUOL DIRE "SPORCA". CI SONO ALMENO DUE CAUSE, E LA
-  SECONDA È LA NORMA IN QUESTO REPO** — falsificata da w2 **40 minuti** dopo che avevo scritto la
-  regola: `fatal: working trees containing submodules cannot be moved or removed`, su una worktree
+  🔴🔴 **MA NON LEGGERE L'INVERSO: `rc=128` NON VUOL DIRE "SPORCA". CI SONO ALMENO DUE CAUSE** —
+  falsificata da w2 **40 minuti** dopo che avevo scritto la regola:
+  `fatal: working trees containing submodules cannot be moved or removed`, su una worktree
   **PULITA** (`porcelain` vuoto anche con `--ignore-submodules=none`, con controllo positivo che
   stampa ` M cicchetto/e2e/infra` sul repo principale). ⇒ **`rc=128` obbliga a LEGGERE IL TESTO**:
   *"contains modified or untracked files"* = sporca, **fermati**; *"containing submodules"* = il trip
-  già documentato in CLAUDE.md, dove `--force` è lecito **solo dopo** aver provato pulizia E
+  documentato in CLAUDE.md, dove `--force` è lecito **solo dopo** aver provato pulizia E
   atterraggio. 🪞 **Perché la mia prova non l'aveva vista: il repo usa-e-getta NON AVEVA
   SOTTOMODULI**, cioè non somigliava a quello vero. **Un meccanismo provato su un modello che manca
   della feature decisiva è provato per metà** — e la metà mancante è esattamente quella che si
   incontra sul campo.
+  🔴🔴 **CORREZIONE A ME STESSA (w1, 2026-09-07): AVEVO SCRITTO CHE IL RAMO SUBMODULE È «LA NORMA IN
+  QUESTO REPO». NON LO È — IL TRIP CAPITA MA NON È GARANTITO.** Due worktree consecutive, stessa
+  macchina, stesso repo, stessa sera: `w2-1988` → `rc=128 fatal: working trees containing submodules
+  cannot be moved or removed`; `w2-1767` → **`rc=0`, output vuoto, rimossa senza `--force`**.
+  🥇 **E LA CAUSA È MISURATA, NON IPOTIZZATA — È L'`--init`, NON LA PRESENZA DEL SUBMODULE
+  NELL'INDEX (w1, 2026-09-08, esperimento a due bracci su worktree usa-e-getta mie, git 2.50.1).**
+  `w2-1877`, il terzo `rc=0` che avevo a memoria, **non esiste più: quel caso singolo è
+  irriproducibile** — perciò ho misurato il MECCANISMO al suo posto. Due worktree `--detach` da
+  `origin/main`, identiche in tutto (stesso HEAD, `porcelain` 0 righe con `--ignore-submodules=none`,
+  con pos ctrl ` M cicchetto/e2e/infra` sul checkout principale), **unica variabile un
+  `git submodule update --init cicchetto/e2e/infra`**. Predizioni scritte PRIMA, entrambe tornate:
+  - **A, submodule NON inizializzati** → `remove` NUDO **`rc=0`, output vuoto**, worktree rimossa.
+  - **B, un submodule inizializzato** (11 file) → `remove` NUDO **`rc=128`
+    `fatal: working trees containing submodules cannot be moved or removed`**, worktree RESTA.
+  ⇒ **Il rifiuto segue l'inizializzazione, non la dichiarazione in `.gitmodules`** (che è identica
+  nei due bracci): con lo stesso index, la stessa pulizia e lo stesso commit, l'esito si ribalta
+  sull'`--init` e su nient'altro. 🔎 E la variabile varia davvero sul campo: sulle 18 worktree vive di
+  voyager, **11 hanno almeno un submodule inizializzato e 7 nessuno** (`.gitmodules` ne dichiara
+  **tre** — `cicchetto/e2e/infra`, `vendor/bats-core`, `frontends/shottino/vendor/libdatachannel` —,
+  e il terzo non è inizializzato in nessuna). **Non misurato, e resta tale:** se BASTI un submodule
+  qualsiasi o se il numero conti (il braccio B ne aveva uno solo), e quale sia il predicato esatto
+  dentro git. ⚠️ *Nota di riproducibilità:* l'`--init` locale vuole
+  `-c protocol.file.allow=always` (default `never` per i submodule dopo CVE-2022-39253), altrimenti
+  muore con `fatal: transport 'file' not allowed` e **il braccio B non si arma affatto**.
+  🥇 **Conseguenza operativa, ed è il motivo per cui la riga andava corretta invece di lasciarla
+  passare per pignoleria: si prova SEMPRE il `remove` NUDO per primo, sperando nell'`rc=0`.** Scritta
+  come "norma", quella riga fa **aspettare** il rifiuto e invita a prendere `--force` per abitudine —
+  cioè esattamente la mossa che il resto della sezione vieta, e che cancella la prova migliore che
+  esista. Se il trip non è garantito, allora **quell'`rc=0` è disponibile più spesso di quanto il
+  file lasciasse credere**. **`--force` solo dopo aver LETTO il testo dell'rc=128, e solo sul ramo
+  submodule**; sul ramo *"contains modified or untracked files"* ci si FERMA, invariato.
   🥇 **E la worker che incontra il caso NON previsto dal tuo ordine, ragiona, agisce e lo DICHIARA
   con le misure, ha fatto la cosa giusta: dillo.** (Aveva verificato pulizia *e* `--is-ancestor`
   contro `origin/main`, con lo strumento reso discriminante — contro il main LOCALE stantio risponde
@@ -1442,6 +1473,15 @@ DN di main, **entrambi rc=1**) + l'**aritmetica PREDETTA PRIMA** (`2704015 + 590
 misurato `2709917`). ⇒ **Nei brief chiedi «porta un controllo che DISCRIMINA su QUESTA forma»**, e
 accetta che la forma decida quale controllo e' quello vivo. *Un controllo negativo che non puo'
 fallire e' un controllo che non c'e'.*
+🔴 **E LA META' SPECULARE, MISURATA IL 2026-09-07: ANCHE IL CONTROLLO **POSITIVO** PUO' ESSERE MORTO
+— e allora il negativo non prova NIENTE.** Per stabilire che un *"upstream vuoto"* discriminasse, la
+worker aveva pescato come positivo **un ramo che l'upstream non ce l'ha nemmeno lui**: due vuoti
+identici, letti come "il comando funziona e la risposta e' vuota". Rifatto pescando il positivo dal
+mondo — `git config --get-regexp 'branch\..*\.merge'`, **75 rami configurati**, e il suo non fra
+quelli — il vuoto e' diventato un vuoto VERO. 🥇 **Il positivo non si sceglie perche' *dovrebbe*
+rispondere SI: si sceglie DIMOSTRANDO che risponde SI**, e la dimostrazione sta nella stessa cattura
+del negativo, non in un'altra sessione e non nella tua testa. *Un controllo positivo che non puo'
+riuscire e' un controllo che non c'e' — esattamente come il negativo che non puo' fallire.*
 🔴 **`_Deploy:` NON E' UN CHECK, e' INERTE** — non citarlo, o dichiaralo inerte.
 ⚠️ Il gate "forma al confine" e' **VACUO** quando il merge non tocca `DESIGN_NOTES`: **dichiaralo vacuo.**
 🥇 **Un FF PURO (`ahead=N behind=0`, ref PATCH-ato via `gh api`) rende la ricetta vacua PER COSTRUZIONE** —

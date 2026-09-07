@@ -48137,4 +48137,21 @@ the run (`export const senderPrefix` back in `nickColor.ts`, its call back in
 `prefixFor`) and proven gone after it, with a positive control showing the
 same grep finds the helper in the pre-cure blob.
 
+The same displacement was run on the STACK, because jsdom proves the renderer
+discriminates and only the live stack proves it through the reload door:
+
+| tree | `issue1950-record-row-no-live-glyph.spec.ts` |
+|---|---|
+| pre-cure mutant | both tests **RED**, on the glyph assertion |
+| cured | both tests **GREEN** (5.6 s, 5.1 s) |
+
+The red is the one that had to be checked, and it is the right red: `:73:1`
+fails at line 130 with `.nick-prefix` expected 0, **got 2** (both join rows
+re-prefixed), and `:181:1` at line 234 with expected 0, **got 1**. That second
+number is also the proof the SAMODE path works end to end — the assertion one
+line above it, `expect(modeRow).toHaveCount(1)`, PASSED, so the row
+`sets mode +o <staff>` was really created, relayed and persisted by the very
+sequence the fixture now issues. A cure that had not worked would have failed
+earlier, as a `samode`/`umode` timeout, and the red would have proven nothing.
+
 _Deploy: **cic bundle only** — no server module, no migration, no wire change._

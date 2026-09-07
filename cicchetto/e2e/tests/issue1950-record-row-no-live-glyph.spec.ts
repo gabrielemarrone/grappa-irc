@@ -166,7 +166,18 @@ test("issue 1950 — a historical join/part row keeps no glyph after the nick is
 // chanop, so a setter who lacks the grade cannot normally produce the row at
 // all. The reporter could because he is Azzurra staff — the earlier field
 // line shows `mezmerize@staff.azzurra.chat`. The testnet is the SAME ircd
-// (bahamut), so the spec buys the same standing the same way, with /OPER.
+// (bahamut), so the spec buys the same standing the same way, out of band.
+//
+// 🔴 THE JOIN ORDER IS MATERIAL — do not "fix" a red here by making `staff`
+// join first. Sixteen of the suite's seventeen `.mode()` sites have their
+// peer join first because that is how a peer gets chanop on this testnet
+// (auto-op, `NO_CHANOPS_WHEN_SPLIT` deleted from the image), and copying
+// that shape here would silently delete the scenario: a `staff` who joined
+// first ALREADY holds `@` when the row is written, and the row would then be
+// bare-vs-decorated for a reason the reporter's line is not about. The
+// assertion is not "a mode row is bare"; it is "a mode row is bare EVEN
+// WHEN its setter demonstrably could not have held the glyph at the time".
+// Joining second is what makes the second clause true, so it stays.
 test("issue 1950 — the mode row that grants an op renders its setter bare", async ({ page }) => {
   const suffix = crypto.randomUUID().slice(0, 5);
   const channel = `#m1950-${suffix}`;
@@ -194,10 +205,18 @@ test("issue 1950 — the mode row that grants an op renders its setter bare", as
     await staff.join(channel);
     await expect(scrollbackLine(page, "join", staffNick)).toHaveCount(1, { timeout: 15_000 });
 
-    // The self-op. `IrcPeer.mode` awaits this peer's OWN echo, so a refused
-    // override fails as a named MODE timeout rather than a silent skip.
+    // The self-op, through the only door bahamut leaves open to a member
+    // who is not chanop. Plain MODE is NOT that door and never can be:
+    // `m_mode` gates override on `(IsSAdmin || IsAdmin) && !MyClient(sptr)`,
+    // and a peer connected to this very leaf IS MyClient — so /OPER alone
+    // earns a 482 and a fixture timeout. SAMODE has no such conjunct; it
+    // wants `IsPrivileged` (the /OPER) plus `IsAdmin` (umode `+A`, which
+    // sticks because the leaf's O: line carries the `A` oflag). All three
+    // steps await their own echo, so whichever one a config change breaks
+    // fails by name instead of surfacing as a mystery MODE timeout.
     await staff.oper(OPER_NAME, OPER_PASS);
-    await staff.mode(channel, "+o", staffNick);
+    await staff.umode("+A");
+    await staff.samode(channel, "+o", staffNick);
 
     // POSITIVE CONTROL — the members store really did take the `@`. Without
     // it the absence below would be the absence of nothing. The members pane

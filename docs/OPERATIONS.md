@@ -5407,8 +5407,9 @@ The handler folds **three** signal families:
   against the baseline.
 - **the D1 write-path spans** into `send_privmsg` / `persist` / `contention`
   rows.
-- **`[:grappa, :repo, :lock_stall, :detected | :resolved | :unattributed]`**
-  (#1420, #1687) into the bounded `lock stalls` ring — the WRITE-LOCK HOLDER.
+- **`[:grappa, :repo, :lock_stall, :detected | :resolved]`**
+  (#1420, #1687, #1901, issue 1960) into the bounded `lock stalls` ring — the
+  WRITE-LOCK HOLDER.
 
 ### Reading a write-lock stall (#1420)
 
@@ -5419,16 +5420,42 @@ its victims — the 30.1 s `busy_timeout` rows of everybody queued behind it.
 `Grappa.Repo.LockWatch` reads at the `BEGIN IMMEDIATE` seam instead, which
 separates the **holder** from the **waiters**.
 
-A **named** stall is reported only when a holder has held past
-`:lock_watch, :stall_threshold_ms` **with at least one waiter queued behind
-it** — a slow uncontended write is not a stall. It appears twice: a `detected`
-row carrying the holder's sampled **stacktrace** plus the queue, and a
-`resolved` row carrying the total hold.
+🔴 **One prefix, one field — read `attribution=` first (issue 1960).** There
+used to be four log literals (`db lock stall`, `… UNATTRIBUTED`,
+`… NIF CENSUS`, `… RESOLVED`) for one phenomenon, which an operator had to
+correlate by timestamp. There are now two: `db lock stall:` opens an episode
+and `db lock stall RESOLVED:` closes it, and the opening line carries
+`attribution=` saying how far the instrument could go towards naming the
+holder:
 
-An **`unattributed`** row (#1687) is a queue past the threshold that named
-nobody — every autocommit single-statement write takes the same file lock and
-registers no holder here. It carries the WAITERS' stacks and explicit nils
-where a holder would be, and gets no `resolved` bracket: there is no hold to
+| `attribution=` | what the line's SUBJECT is | what it does NOT claim |
+|---|---|---|
+| `named` | the holder the seam registered, past the threshold | — |
+| `none` | the longest WRITER queued at the seam | that anybody held; a wait is pool checkout **plus** `busy_timeout` |
+| `cohort` | the longest process parked inside `Exqlite.Sqlite3NIF` | which of the cohort holds the lock — nothing BEAM-visible separates them |
+
+The word **`has held RESERVED`** appears on `attribution=named` and nowhere
+else. If you are reading it, a hold was measured.
+
+**Every line then carries the same three seam numbers, in the same order** —
+`H holder(s) / W waiter(s) registered at the seam, P process(es) parked inside
+Exqlite.Sqlite3NIF` — and the roster whenever `P > 0`. That is the contention
+evidence, and it is what replaced the old gate.
+
+🔴 **The gate that is gone, and why (issue 1960).** A named stall used to be
+reported only **with at least one waiter queued behind it**. That is not a
+contention test: the watch table has ONE producer, so it means "no waiter that
+went through `Repo.immediate_transaction/1`", and this system's dominant
+writer is an autocommit `Repo.insert`. Measured on 2026-09-06 (jail
+`grappa-new`, 1.5.0): nine stall episodes, **two** announced while holding,
+**five** closed carrying `NEVER announced while it held` — each with the
+holder's pid and write path already in hand. The closing bracket had never
+required a queue (#1888); the opening line was the asymmetry. **So an
+uncontended hold past the threshold now prints a line saying `0 waiter(s)`,
+instead of printing nothing** — the reader sees the absence of contention
+rather than inferring it from the absence of a line.
+
+An `attribution=none` episode gets no `resolved` bracket: there is no hold to
 total.
 
 Two doors, and for an incident they answer different questions:
@@ -5453,7 +5480,12 @@ are deliberately different words for different facts:
 | block | when it is sampled | what it names |
 |-------|--------------------|---------------|
 | `holder at …` | while the holder is still parked | the frame it PAUSED in |
+| `longest waiter at …` | while it is still queued | the frame it is BLOCKED in |
+| `longest parked at …` | while it is inside the NIF | the NIF call it is executing |
 | `write path …` | as the transaction is released | the caller that OPENED it |
+
+The first three are the same block under three labels, chosen by
+`attribution` — a `bin/grappa db-latency` row never calls a waiter a holder.
 
 So a `write path` block answers *who was writing*, never *where it stuck* —
 do not read a release-time frame as a pause site. Every row also carries
@@ -5467,9 +5499,9 @@ a `DBConnection` checkout frame means a pool-topology deadlock; anything else
 is a third answer nobody has predicted yet. That distinction is the whole
 reason the instrument exists — before it, both looked identical from the logs.
 
-### The `nif_census` row (#1901) — the only one taken without the seam
+### `attribution=cohort` (#1901) — the verdict taken without the seam
 
-Both phases above read the watch table, and that table has ONE producer
+Both verdicts above read the watch table, and that table has ONE producer
 (`Repo.immediate_transaction/1`). Measured on the live node, `messages insert`
 — an autocommit single statement — is 324 679 writes while every source the
 seam covers is in the thousands, so the instrument was watching the rare tail
@@ -5477,13 +5509,14 @@ of the write load. That is why all four episodes of #1888 produced zero lines:
 `grep -h "db lock stall" runtime/log/erlang.log.*` returned 0 while six
 victims timed out at ~31 s.
 
-The `nif_census` phase does not read the table. Every tick it walks
-`Process.list/0` and keeps whoever is inside `Exqlite.Sqlite3NIF`, timed from
-the first tick that saw them there. Its log line is
-`db lock stall NIF CENSUS:` and it is counted as `lockstall_nif` by
-`scripts/log-gap-scan.awk` — the ONLY lock counter that can be non-zero while
-`lockstall`, `lockstall_resolved` and `lockstall_unattributed` are all zero,
-which is the shape every #1888 episode had.
+The cohort verdict does not read the table. Every tick walks `Process.list/0`
+and keeps whoever is inside `Exqlite.Sqlite3NIF`, timed from the first tick
+that saw them there. It is counted as `lockstall_nif` by
+`scripts/log-gap-scan.awk` (which since issue 1960 keys on
+`attribution=cohort`, the same counter under a different door) — the ONLY lock
+counter that can be non-zero while `lockstall`, `lockstall_resolved` and
+`lockstall_unattributed` are all zero, which is the shape every #1888 episode
+had.
 
 🔴 **It names the cohort, never the holder, and the difference is the whole
 reading.** exqlite's busy handler sleeps INSIDE the same dirty-IO NIF the
@@ -5496,12 +5529,29 @@ BEAM-visible separates them. So the row carries:
 | `parked=N` | N processes were inside the SQLite NIF past the threshold |
 | `registered=Hh/Ww` | how many of those N the seam could already name |
 | the roster | every pid, its elapsed and its frame |
-| `holder=unattributed` | the instrument declines to pick one, deliberately |
+| `attribution=cohort` | the instrument declines to pick one, deliberately |
 
 `registered=0h/0w` is the #1901 finding in one field: the writer holding the
-lock never touched the seam. `waiters=not counted` sits next to `parked=N` on
-purpose — a census counted no queue, and reading the roster length as a queue
-would assert N blocked writers where nobody measured one.
+lock never touched the seam. `waiters=0` sits next to `parked=N` on purpose —
+the cohort counted no queue, and reading the roster length as a queue would
+assert N blocked writers where nobody measured one.
+
+🔴 **The roster is VERIFIED, and an empty one prints nothing (issue 1960).**
+The sweep that decides who is inside the NIF and the sample that prints them
+are two instants. Measured on 2026-09-06: 8 of 11 census lines carried a
+headline about `Exqlite.Sqlite3NIF` over a roster whose own frames said
+`:gen_statem.loop_hibernate/3` (32 s) and `DBConnection.Holder.checkout_call/5`
+(2.1 s) — processes that had already left. Each entry is now re-read at sample
+time and dropped if it is no longer in the NIF, so **a cohort that has entirely
+left produces no line at all.** If you see a `cohort` line, everything in its
+roster was inside the NIF when the roster was built. Note this is *not* a
+threshold change: the arm is silent because there is nothing true left to say.
+
+🔴 **The roster rides EVERY verdict, not only this one.** If a `named` or
+`none` line reports `P > 0` parked processes, it carries the same roster. The
+parked population is the contention evidence that survives the seam being
+blind, so withholding it from the verdicts where the seam knows MORE would be
+backwards.
 
 **How to get the holder out of it anyway.** Cross the roster against the
 `fault=busy_locked` terminals in the same window: those name the VICTIMS, and

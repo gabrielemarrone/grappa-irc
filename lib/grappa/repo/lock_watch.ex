@@ -57,15 +57,43 @@ defmodule Grappa.Repo.LockWatch do
 
   ## What it reports, and when
 
-  A watchdog tick scans the table and reports a NAMED stall only when a
-  holder has held for at least `stall_threshold_ms` **AND at least one
-  waiter is queued behind it**. A slow-but-uncontended transaction is not a
-  stall, and reporting one would bury the signal it exists to find.
+  🔴 **One phenomenon, one prefix, one report (issue 1960).** A tick emits at
+  most one kind of line, `db lock stall:`, and an `attribution=` field says how
+  far the instrument could go towards naming the holder — `named`, `none` or
+  `cohort`, in that order of claim strength (see `t:attribution/0`). Before
+  that fold there were four literals (`db lock stall`, `… UNATTRIBUTED`,
+  `… NIF CENSUS`, `… RESOLVED`) which an operator had to correlate by
+  timestamp, and the arm was chosen by attributability, so consecutive ticks
+  could describe one episode under two different words.
 
-  ### The unattributed arm (#1687)
+  ### The gate that made a named holder silent (issue 1960)
 
-  A queue past the threshold that named nobody is reported too, as its own
-  line. This arm exists because the first one is blind by construction:
+  🔴 A holder past `stall_threshold_ms` used to be reported only **with at
+  least one waiter queued behind it**, on the reasoning that a
+  slow-but-uncontended transaction is not a stall. **Measured in prod on
+  2026-09-06 (jail `grappa-new`, 1.5.0), that gate is not a contention test at
+  all.** The watch table has ONE producer, so the only writers it can see are
+  the rare tail of this system's write load; every autocommit writer queued
+  behind that holder is invisible to it. Nine stall episodes that day produced
+  **two** announcements while holding, and five closed carrying
+  `NEVER announced while it held` — each of them with the holder's pid and
+  write path already in hand (`Vhosts.record_client_source/2`,
+  `Session.Server.init/1`), printed only at release, i.e. exactly when the
+  operator no longer needs it.
+
+  The closing bracket had already settled the question in the other direction:
+  since #1888 it fires on `announced or past_threshold?`, with no waiter
+  conjunct. **The opening line requiring a queue was the asymmetry**, and one
+  threshold policy over both edges is what removes it. What replaces the gate
+  is not silence but honesty: the line always states the three seam numbers —
+  holders registered, waiters registered, processes parked in the NIF — so a
+  reader sees the contention evidence (or its absence) instead of inferring it
+  from whether a line exists.
+
+  ### The `:none` verdict (#1687)
+
+  A queue past the threshold that named nobody is reported too. This verdict
+  exists because the first one is blind by construction:
   `observe/1` has a single producer, so ONLY a writer that went through
   `Grappa.Repo.immediate_transaction/1` can ever be tagged `:holding`. Every
   autocommit single-statement write — `Grappa.Scrollback.persist_row/1`
@@ -94,9 +122,11 @@ defmodule Grappa.Repo.LockWatch do
   blocked on the lock, one inside `DBConnection.Holder` is queued for a
   connection. Asserting a cause the frame never measured is the exact defect
   `terminal_message/3` in `Grappa.Repo.BusyRetry` was twice rewritten to
-  stop committing (#1420, #1421); this arm does not re-commit it here.
+  stop committing (#1420, #1421); this verdict does not re-commit it here, and
+  since issue 1960 neither does the shared line template — `subject_clause/3`
+  is where the arm's honest verb lives, and only `:named` may say "held".
 
-  ### One report per episode, on either arm
+  ### One report per episode, on every verdict
 
   The row's `reported?` flag arms on the first report and disarms on release
   — otherwise a 30 s stall prints 30 times. Release emits a second,
@@ -127,24 +157,24 @@ defmodule Grappa.Repo.LockWatch do
   What it carries is a `t:caller/0` and NOT a `t:sample/0` — see that type for
   why the two must not be folded together.
 
-  Both arms share that one flag, and the unattributed arm arms it on WAITER
-  rows rather than a holder's. So `acquired/0` CLEARS it on promotion: a pid
+  Both seam verdicts share that one flag, and `:none` arms it on WAITER rows
+  rather than a holder's. So `acquired/0` CLEARS it on promotion: a pid
   reported once while queued would otherwise carry an armed flag into its own
-  hold and never be reportable as the holder it went on to become. An
-  unattributed episode gets no closing bracket — there was no hold to total,
-  and inventing one is the claim this arm exists to avoid.
+  hold and never be reportable as the holder it went on to become. A `:none`
+  episode gets no closing bracket — there was no hold to total, and inventing
+  one is the claim this verdict exists to avoid.
 
-  ### The NIF census (#1901)
+  ### The `:cohort` verdict (#1901)
 
-  🔴 **Both arms above read the watch TABLE, and the table has one producer,
-  so between them they observe the RARE tail of this system's write load.**
+  🔴 **Both verdicts above read the watch TABLE, and the table has one
+  producer, so between them they observe the RARE tail of this write load.**
   Measured on the live node (`Grappa.Operator.db_latency_text!/0`, cumulative
   since boot): `messages insert` — `Grappa.Scrollback.persist_row/1`, an
   autocommit single statement — is **324 679** writes, while every source the
   seam does cover (auth, settings, themes, push, reap) is in the thousands.
   The dominant writer of this system has never owned a row here.
 
-  So the third arm does not read the table at all. At each tick it walks
+  So the third verdict does not read the table at all. Each tick walks
   `Process.list/0` and keeps the processes whose `current_function` is inside
   `Exqlite.Sqlite3NIF`, timing them from the first tick that saw them there.
   That reaches any writer, registered or not, because the property it reads is
@@ -158,25 +188,37 @@ defmodule Grappa.Repo.LockWatch do
   same physics that makes the cohort visible makes it INDIVISIBLE: the writer
   holding the lock and the writers blocked behind it are all inside
   `Exqlite.Sqlite3NIF`, all reading `status: :running`, and nothing
-  BEAM-visible separates them. This arm therefore reports the COHORT — every
-  parked process, its elapsed, its `current_function` and the longest one's
-  stack — plus how many of them the seam already knows as holders and as
-  waiters. Naming the holder outright is what registering the autocommit
-  writes (#1901 axis 2, deliberately deferred) would buy, and asserting it
-  from here is the class of claim `terminal_message/3` in
-  `Grappa.Repo.BusyRetry` was twice rewritten to stop making.
+  BEAM-visible separates them. So it reports the COHORT — every parked
+  process, its elapsed, its `current_function` and the longest one's stack —
+  plus how many of them the seam already knows as holders and as waiters.
+  Naming the holder outright is what registering the autocommit writes (#1901
+  axis 2, deliberately deferred) would buy, and asserting it from here is the
+  class of claim `terminal_message/3` in `Grappa.Repo.BusyRetry` was twice
+  rewritten to stop making.
+
+  🔴 **The roster is VERIFIED at sample time (issue 1960).** The sweep that
+  decides who is inside the NIF and the sample that prints them are two
+  instants, and in prod the gap between them was wide enough to matter:
+  measured on 2026-09-06, 8 of 11 census lines printed a headline about
+  `Exqlite.Sqlite3NIF` over a roster whose own frames said
+  `:gen_statem.loop_hibernate/3` (at 32 s) and
+  `DBConnection.Holder.checkout_call/5` (at 2.1 s) — processes that had left.
+  `nif_sample/2` now decides from the SAME read it builds the sample from, and
+  a cohort that has entirely left produces NO line. That is why the noise cure
+  is not a bigger threshold: the arm is silent because there is nothing true
+  left to say, which is a different fact from being under a threshold.
 
   Two further limits, stated so a later reader does not have to rediscover
   them:
 
     * a transaction parked BETWEEN statements is not inside a NIF, so this
-      arm cannot see it. That case is the FIRST arm's, and it is covered
+      verdict cannot see it. That case is `:named`'s, and it is covered
       exactly when the writer went through the seam;
     * `elapsed` is measured from the first TICK that saw the process there,
       never from its real entry into the NIF, so it is a LOWER bound
       understated by up to one `tick_ms`. A census that wanted the true
       instant would have to instrument the write path, which is the cost this
-      arm exists to avoid.
+      verdict exists to avoid.
 
   Readers park in the same NIF, so a slow `SELECT` is in the cohort too. That
   is deliberate: the arm reports what it observed, and a reader holding a long
@@ -258,6 +300,17 @@ defmodule Grappa.Repo.LockWatch do
   @depth_key {__MODULE__, :depth}
   @stack_frames 12
 
+  # issue 1960 — ONE `Process.info/2` read per sample, and `:current_stacktrace`
+  # rides in it rather than costing a second signal. That is not only cheaper:
+  # the two reads used to be able to disagree, so a printed frame could belong
+  # to a different instant than the `current_function` above it — the same race
+  # the census fix below is about, one level down.
+  @sample_keys [:current_function, :status, :message_queue_len, :dictionary, :current_stacktrace]
+
+  @detected_event [:grappa, :repo, :lock_stall, :detected]
+  @resolved_event [:grappa, :repo, :lock_stall, :resolved]
+  @events [@detected_event, @resolved_event]
+
   # #1901 — the module every SQLite call in this system passes through, and
   # the census's whole discriminator. A literal and not a config knob: it is
   # not an operator choice, it is which driver `Grappa.Repo` is built on, and
@@ -268,6 +321,19 @@ defmodule Grappa.Repo.LockWatch do
 
   @typedoc "Role of a row in the watch table."
   @type role :: :waiting | :holding
+
+  @typedoc """
+  A telemetry event name this module emits.
+
+  Spelled as the concrete atom union and not `[atom(), ...]` on Dialyzer's
+  instruction: `@events` is a compile-time constant, so the success typing IS
+  this union and a wider spec is an `:underspecs` warning. The checker is
+  right — a reader of `[atom(), ...]` learns strictly less than the function
+  already promises, and the pin in `db_latency_test.exs` derives the sink's
+  attached set from this list, so the two events being visible in the type is
+  the point rather than an accident.
+  """
+  @type event :: [:grappa | :repo | :lock_stall | :detected | :resolved, ...]
 
   @typedoc "One watch-table row: who, in which role, since when, already reported?"
   @type row :: {pid(), role(), integer(), boolean()}
@@ -313,47 +379,65 @@ defmodule Grappa.Repo.LockWatch do
         }
 
   @typedoc """
-  A detected stall: one holder, the queue behind it, and the instant it was
-  observed (#1888 — the ring row it becomes is otherwise impossible to line up
-  against `erlang.log`, which is the only artefact that dates a freeze).
+  Where the SUBJECT of a report came from, i.e. how far the instrument can go
+  towards naming whoever holds the write lock (issue 1960).
+
+    * `:named`  — the seam registered a holder past the threshold. This is the
+      only value under which the record claims a HOLD.
+    * `:none`   — no holder past the threshold, but registered WRITERS are
+      queued past it. They are provably ours and their stacks separate a
+      lock-wait from a pool-wait; who blocks them is not attributable here.
+    * `:cohort` — nothing registered at the seam at all, only processes parked
+      inside `Exqlite.Sqlite3NIF`. The population is physical and indivisible.
+
+  🔴 The ORDER is `named > none > cohort`, and it is a claim-strength ordering,
+  not a preference. A registered waiter is a writer we KNOW is blocked and can
+  tell apart from a pool queue by its own frame; a NIF resident is a physical
+  observation that may equally be a healthy two-millisecond write. Nothing is
+  lost by the ordering: the roster rides EVERY report, so the cohort is
+  reported whichever arm supplied the subject.
+  """
+  @type attribution :: :named | :none | :cohort
+
+  @typedoc """
+  One report — the single record all three former arms fold into (issue 1960).
+
+  🔴 There is no `holder` key, and its absence is what lets one type carry
+  three verdicts without a nil in sight. `t:unattributed/0` refused the key
+  because no holder was observed and `t:nif_census/0` refused it because one
+  certainly WAS in `parked` and could not be singled out; a union of the two
+  would have had to carry it as `nil` and re-open both questions. `subject`
+  plus `attribution` is total instead: `attribution` says what the subject IS,
+  so a record claims a hold exactly when it measured one.
+
+  `elapsed_ms` lives on the subject and is deliberately NOT called `held_ms` —
+  the #1687 ruling, generalised: on `:none` it is a WAIT and on `:cohort` a
+  time parked in a NIF, and reusing the hold field would smuggle back through
+  the schema the claim the prose is careful to leave out.
+
+  `holders` counts the holders the seam has registered at ANY elapsed, which
+  is how a reader tells "the seam saw nobody" (`0`) from "the seam saw a holder
+  that has not crossed the threshold" (positive) on a `:none` report.
+  `registered_holders` / `registered_waiters` qualify `parked` and only
+  `parked`: how many of THOSE the seam could already name.
+
+  ## The two populations, and the one threshold over both
+
+    * `waiters` — every registered waiter, sampled. The count is the whole
+      queue and is NOT threshold-filtered: a waiter queued for five
+      milliseconds is still blocked behind the holder, and filtering it out
+      would understate the contention the line exists to evidence. The
+      threshold selects who may be a SUBJECT, never who counts as contention.
+    * `parked` — the NIF cohort past the threshold, VERIFIED: each entry was
+      re-read at sample time and still inside `Exqlite.Sqlite3NIF`. Entries
+      that had left are dropped rather than printed under a NIF headline.
   """
   @type stall :: %{
           observed_at: String.t(),
-          holder: sample(),
+          attribution: attribution(),
+          subject: sample(),
+          holders: non_neg_integer(),
           waiters: [sample()],
-          waiter_count: non_neg_integer()
-        }
-
-  @typedoc """
-  A queue nobody can be blamed for (#1687): writers past the threshold with
-  no holder this instrument can name. `holders_registered` is the honesty
-  field — `0` says the seam saw no holder at all (the autocommit case),
-  a positive value says one is registered but has not crossed the
-  threshold. There is deliberately no `holder` key: a record cannot carry a
-  field for a thing that was never observed.
-  """
-  @type unattributed :: %{
-          observed_at: String.t(),
-          waiters: [sample()],
-          holders_registered: non_neg_integer()
-        }
-
-  @typedoc """
-  A census of the processes parked INSIDE `Exqlite.Sqlite3NIF` past the
-  threshold (#1901) — the arm that reaches the autocommit writers the seam
-  cannot see.
-
-  🔴 There is deliberately no `holder` key, and the reason is stronger than
-  the one `t:unattributed/0` gives for its own absence. There, no holder was
-  observed. Here one certainly IS in `parked`, and the instrument cannot say
-  WHICH: exqlite's busy handler sleeps inside the same dirty-IO NIF the writer
-  holding the lock is executing in, so the holder and its victims are one
-  indistinguishable cohort from the BEAM's side. `registered_holders` and
-  `registered_waiters` are the honesty fields — how many of these the seam
-  could already name — and the remainder is the population #1901 is about.
-  """
-  @type nif_census :: %{
-          observed_at: String.t(),
           parked: [sample()],
           registered_holders: non_neg_integer(),
           registered_waiters: non_neg_integer()
@@ -416,32 +500,29 @@ defmodule Grappa.Repo.LockWatch do
   end
 
   @doc """
-  One detection pass at the given threshold. The watchdog's tick calls this;
-  it is public so an operator (or a test) can take the reading on demand
-  instead of waiting for a tick.
-  """
-  @spec scan(non_neg_integer()) :: :ok
-  def scan(stall_threshold_ms) when is_integer(stall_threshold_ms) and stall_threshold_ms >= 0 do
-    detect(now_ms(), stall_threshold_ms)
-  end
+  One detection pass at the given threshold, and the ONLY one (issue 1960 —
+  it is what `scan/1` and `census/2` folded into).
 
-  @doc """
-  One NIF-census pass (#1901): report the processes that have been inside
-  `Exqlite.Sqlite3NIF` for at least `stall_threshold_ms`, and return the clock
-  to hand the NEXT pass.
+  The two used to be separate calls in a fixed order, because the census had
+  to run second so a pid the seam had just named counted as registered rather
+  than as a writer nobody could see. One pass makes that ordering constraint
+  disappear instead of documenting it, reads the watch table ONCE where the
+  census used to re-read it through `lock_roles/0`, and is what lets a single
+  report carry both populations.
 
-  Public for the same reason `scan/1` is — an operator, or a test, can take
-  the reading on demand instead of waiting for a tick — but unlike `scan/1` it
-  is not idempotent in its argument: the returned map IS the elapsed
-  measurement. Calling it with a fresh `%{}` every time restarts every clock
-  at zero, so nothing can ever cross a non-zero threshold. The watchdog
+  Public so an operator (or a test) can take the reading on demand instead of
+  waiting for a tick. It is NOT idempotent in its argument, and that is
+  inherited from `census/2`: the returned map IS the elapsed measurement for
+  the NIF cohort. Calling it with a fresh `%{}` every time restarts every
+  clock at zero, so nothing can ever cross a non-zero threshold. The watchdog
   threads it through `handle_info/2`; a caller driving it by hand must thread
   it too.
   """
-  @spec census(nif_watch(), non_neg_integer()) :: nif_watch()
-  def census(seen, stall_threshold_ms)
+  @spec scan(nif_watch(), non_neg_integer()) :: nif_watch()
+  def scan(seen, stall_threshold_ms)
       when is_map(seen) and is_integer(stall_threshold_ms) and stall_threshold_ms >= 0 do
     now = now_ms()
+    {holders, waiters} = partition(rows(), now)
 
     # `Map.get(seen, pid, {now, false})` is the whole state machine: a pid
     # already being watched keeps its original instant AND its reported flag,
@@ -449,15 +530,21 @@ defmodule Grappa.Repo.LockWatch do
     # simply absent from the rebuilt map. No deletion path, so none to leak.
     carried = Map.new(parked_in_nif(), &{&1, Map.get(seen, &1, {now, false})})
 
-    due =
-      for {pid, {since, false}} <- carried, now - since >= stall_threshold_ms, do: {pid, now - since}
-
-    report_nif_census(due)
-
-    Enum.reduce(due, carried, fn {pid, _}, acc ->
-      Map.update!(acc, pid, fn {since, _} -> {since, true} end)
-    end)
+    detect(now, holders, waiters, carried, stall_threshold_ms)
   end
+
+  @doc """
+  The telemetry events this module emits.
+
+  Exposed for the same reason `Grappa.DbLatency.attached_events/0` is, and it
+  is the other half of that pin: that sink's `fold/4` has NO catch-all, so an
+  event it attaches with no emitter left folds NOTHING, IN SILENCE — the
+  failure mode #1901 hit while it was being built. Deriving the sink's
+  lock-stall set from THIS list is what turns a pruned emitter into a red
+  test instead of a ring that quietly stops filling.
+  """
+  @spec emitted_events() :: [event(), ...]
+  def emitted_events, do: @events
 
   # Entering `BEGIN IMMEDIATE`. The caller is a WAITER until `acquired/0`.
   #
@@ -584,7 +671,7 @@ defmodule Grappa.Repo.LockWatch do
     )
 
     :telemetry.execute(
-      [:grappa, :repo, :lock_stall, :resolved],
+      @resolved_event,
       %{held_ms: held_ms},
       %{observed_at: now_iso8601(), holder_pid: caller.pid, caller: caller, announced: announced}
     )
@@ -707,15 +794,14 @@ defmodule Grappa.Repo.LockWatch do
     {:ok, state}
   end
 
-  # `scan/1` FIRST, and the order is not cosmetic: it is the arm that can NAME
-  # a holder, and a pid it reports in this tick is one the census then counts
-  # as already-registered rather than as a writer nobody can see. Running the
-  # census first would report the same episode as unattributable one tick
-  # before the instrument attributed it.
+  # ONE pass (issue 1960). This used to be `scan/1` then `census/2`, in that
+  # order and for a reason — the naming arm had to run first so a pid it
+  # reported counted as registered rather than as a writer nobody could see.
+  # A single pass reads one instant for both populations, so there is no
+  # ordering left to get wrong.
   @impl GenServer
   def handle_info(:tick, state) do
-    scan(state.stall_threshold_ms)
-    nif_watch = census(state.nif_watch, state.stall_threshold_ms)
+    nif_watch = scan(state.nif_watch, state.stall_threshold_ms)
     Process.send_after(self(), :tick, state.tick_ms)
     {:noreply, %{state | nif_watch: nif_watch}}
   end
@@ -771,144 +857,294 @@ defmodule Grappa.Repo.LockWatch do
 
   ## ----- Detection -----------------------------------------------------
 
-  # A NAMED stall is a holder past the threshold WITH a queue behind it.
-  # Neither half alone qualifies: a lone slow transaction blocks nobody.
+  # 🔴 ONE report, three verdicts, and the fork is the SAME one the three arms
+  # used to make between them — only now it chooses a field instead of a
+  # prefix (issue 1960).
   #
-  # The `else` is the #1687 arm, and it is a fallback rather than a second
-  # independent test on purpose — the two are mutually exclusive, so a real
-  # stall is reported once, by its own name, and never also as an anonymous
-  # queue. It fires in both shapes the first arm walks away from: no holder
-  # registered at all (the autocommit case that produced the prod episode),
-  # and a holder registered but still under the threshold while the queue
-  # behind it is already past it. Both are the same defect — writers
-  # demonstrably stuck, instrument silent — so they get the same cure and one
-  # metadata field tells them apart.
-  @spec detect(integer(), non_neg_integer()) :: :ok
-  defp detect(now, threshold_ms) do
-    {holders, waiters} = partition(rows(), now)
+  # The ladder is claim strength: a holder the seam named, else writers the
+  # seam knows are queued, else the physical NIF population. See
+  # `t:attribution/0` for why a registered waiter outranks a NIF resident.
+  #
+  # 🔴 Each rung forks on ATTRIBUTABLE, not on "did we print something", and
+  # that split is load-bearing exactly as it was before the fold. Choosing the
+  # rung by the REPORTABLE set instead would make an already-announced episode
+  # fall through to the next rung on the very next tick and describe a holder
+  # that is past the threshold as an unattributable queue — the instrument
+  # lying in the act of being more talkative. Nameable-at-all and
+  # not-yet-named-this-episode are two different questions, and only the first
+  # one chooses the rung.
+  #
+  # 🔴 Known limit, deliberate: while a named episode is armed the cohort gets
+  # no line of its own, so victims that pile into the NIF AFTER the announcing
+  # tick are not enumerated until the closing bracket. That is the price of one
+  # report per episode, and the alternative — a second line about an episode
+  # already announced — is the correlate-by-timestamp reading this issue exists
+  # to remove.
+  @spec detect(integer(), [{pid(), non_neg_integer()}], [{pid(), non_neg_integer()}], nif_watch(), non_neg_integer()) ::
+          nif_watch()
+  defp detect(now, holders, waiters, carried, threshold_ms) do
+    parked_due = due(carried, now, threshold_ms)
 
-    # 🔴 The fork is ATTRIBUTABLE, not "did we print something". Splitting on
-    # the reportable set instead would make an already-announced episode fall
-    # through to the second arm on the very next tick and print "none past
-    # the threshold" about a holder that is past it — the instrument lying in
-    # the act of being more talkative. Nameable-at-all and
-    # not-yet-named-this-episode are two different questions, and only the
-    # first one chooses the arm.
-    if attributable(holders, threshold_ms) == [] do
-      report_unattributed(unreported_past(waiters, threshold_ms), length(holders))
-    else
-      report_stalls(unreported_past(holders, threshold_ms), waiters)
+    cond do
+      past(holders, threshold_ms) != [] ->
+        report_each(:named, unreported_past(holders, threshold_ms), holders, waiters, parked_due, carried)
+
+      past(waiters, threshold_ms) != [] ->
+        report_each(:none, unreported_past(waiters, threshold_ms), holders, waiters, parked_due, carried)
+
+      true ->
+        report_cohort(fresh(carried, now, threshold_ms), holders, waiters, carried)
     end
-
-    :ok
   end
 
-  # Holders past the threshold, whether or not this episode already named
-  # them. This is the "can anyone be blamed at all?" question.
-  @spec attributable([{pid(), non_neg_integer()}], non_neg_integer()) :: [{pid(), non_neg_integer()}]
-  defp attributable(holders, threshold_ms) do
-    Enum.filter(holders, fn {_, elapsed} -> elapsed >= threshold_ms end)
-  end
+  # Rows past the threshold, whether or not this episode already named them.
+  # This is the "can anyone be blamed at all?" question.
+  @spec past([{pid(), non_neg_integer()}], non_neg_integer()) :: [{pid(), non_neg_integer()}]
+  defp past(rows, threshold_ms), do: Enum.filter(rows, fn {_, elapsed} -> elapsed >= threshold_ms end)
 
   # Rows past the threshold that this episode has not reported yet — the
-  # "what is left to say?" question. Shared by both arms so they cannot
+  # "what is left to say?" question. Shared by both seam rungs so they cannot
   # drift on either half of the predicate.
   @spec unreported_past([{pid(), non_neg_integer()}], non_neg_integer()) :: [{pid(), non_neg_integer()}]
   defp unreported_past(rows, threshold_ms) do
     Enum.filter(rows, fn {pid, elapsed} -> elapsed >= threshold_ms and unreported?(pid) end)
   end
 
-  @spec report_stalls([{pid(), non_neg_integer()}], [{pid(), non_neg_integer()}]) :: :ok
-  defp report_stalls([], _), do: :ok
-  defp report_stalls(_, []), do: :ok
-
-  defp report_stalls(stalled, waiters) do
-    waiter_samples = Enum.map(waiters, fn {pid, elapsed} -> sample(pid, elapsed) end)
-    Enum.each(stalled, &report(&1, waiter_samples))
+  # The NIF cohort past the threshold — every member, reported or not, because
+  # the roster rides EVERY report and an already-reported parked process is
+  # still part of the population the line evidences.
+  @spec due(nif_watch(), integer(), non_neg_integer()) :: [{pid(), non_neg_integer()}]
+  defp due(carried, now, threshold_ms) do
+    for {pid, {since, _}} <- carried, now - since >= threshold_ms, do: {pid, now - since}
   end
 
-  @spec report({pid(), non_neg_integer()}, [sample()]) :: :ok
-  defp report({pid, elapsed}, waiter_samples) do
-    # Arm the flag BEFORE emitting: an emit that raced the next tick would
-    # double-report the same episode.
-    _ = :ets.update_element(@table, pid, [{4, true}])
+  # The subset of `due/3` this episode has not reported — what decides whether
+  # the cohort rung has anything left to say.
+  @spec fresh(nif_watch(), integer(), non_neg_integer()) :: [{pid(), non_neg_integer()}]
+  defp fresh(carried, now, threshold_ms) do
+    for {pid, {since, false}} <- carried, now - since >= threshold_ms, do: {pid, now - since}
+  end
 
-    holder = sample(pid, elapsed)
+  # A seam rung: one line per subject that has not been announced yet, or
+  # silence when this episode has already spoken. Sampling happens ONLY on the
+  # emitting path — an armed episode costs nothing per tick.
+  #
+  # The attribution is narrowed to the two SEAM verdicts rather than the full
+  # `t:attribution/0`, on Dialyzer's instruction and correctly: `:cohort` reads
+  # no table, has exactly one subject, and must verify its roster BEFORE it may
+  # fire at all — three differences that are why it has `report_cohort/4` of
+  # its own instead of a third caller here.
+  @spec report_each(
+          :named | :none,
+          [{pid(), non_neg_integer()}],
+          [{pid(), non_neg_integer()}],
+          [{pid(), non_neg_integer()}],
+          [{pid(), non_neg_integer()}],
+          nif_watch()
+        ) :: nif_watch()
+  defp report_each(_, [], _, _, _, carried), do: carried
 
+  defp report_each(attribution, subjects, holders, waiters, parked_due, carried) do
+    parked = sample_parked(parked_due)
+    waiter_samples = sample_all(waiters)
+
+    Enum.each(subjects, fn {pid, elapsed} ->
+      # Arm the flag BEFORE emitting: an emit that raced the next tick would
+      # double-report the same episode. A ~170s prod episode at
+      # `tick_ms: 1_000` would otherwise print ~170 identical warnings, which
+      # an operator reads exactly the way they read none.
+      _ = :ets.update_element(@table, pid, [{4, true}])
+      report(attribution, sample(pid, elapsed), length(holders), waiter_samples, parked)
+    end)
+
+    mark_parked_reported(carried, parked)
+  end
+
+  # The cohort rung — the one that reads no table at all (#1901).
+  #
+  # 🔴 The roster is VERIFIED before it is allowed to trigger anything, and
+  # that ordering is the cure for defect 2 of issue 1960. `sample_parked/1`
+  # drops every entry whose own read no longer lands inside the NIF, so a
+  # cohort that has entirely left produces NO line rather than a headline about
+  # `Exqlite.Sqlite3NIF` over a roster of `:gen_statem.loop_hibernate/3` and
+  # `DBConnection.Holder.checkout_call/5` frames — which is what 8 of the 11
+  # census lines measured in prod on 2026-09-06 actually were.
+  @spec report_cohort(
+          [{pid(), non_neg_integer()}],
+          [{pid(), non_neg_integer()}],
+          [{pid(), non_neg_integer()}],
+          nif_watch()
+        ) ::
+          nif_watch()
+  defp report_cohort([], _, _, carried), do: carried
+
+  defp report_cohort(candidates, holders, waiters, carried) do
+    case sample_parked(candidates) do
+      [] ->
+        carried
+
+      [longest | _] = parked ->
+        # The registered waiters are all UNDER the threshold on this rung, so
+        # their stacks are not the payload — but their COUNT is contention
+        # evidence, and the seam clause carries the same three numbers on every
+        # verdict. Sampling them keeps `waiters` meaning one thing across the
+        # three, and the population the seam can see is small by construction
+        # (that is #1901's whole finding).
+        report(:cohort, longest, length(holders), sample_all(waiters), parked)
+        mark_parked_reported(carried, parked)
+    end
+  end
+
+  @spec sample_all([{pid(), non_neg_integer()}]) :: [sample()]
+  defp sample_all(rows), do: Enum.map(rows, fn {pid, elapsed} -> sample(pid, elapsed) end)
+
+  # A parked process that appeared in a roster we PRINTED has been reported,
+  # whichever rung printed it — otherwise the cohort rung would describe the
+  # same processes again on the next tick under its own verdict.
+  @spec mark_parked_reported(nif_watch(), [sample()]) :: nif_watch()
+  defp mark_parked_reported(carried, parked) do
+    printed = MapSet.new(parked, & &1.pid)
+
+    Map.new(carried, fn
+      {pid, {since, reported?}} ->
+        {pid, {since, reported? or MapSet.member?(printed, inspect(pid))}}
+    end)
+  end
+
+  # The one door, for all three verdicts. Same prefix, same three seam numbers
+  # in the same order on every line, and the SUBJECT clause carries the arm's
+  # honest verb — only `:named` says a hold was observed.
+  #
+  # `status` rides in the PROSE, next to `current_function`, and not in the
+  # metadata beside the measurements: those are numbers an operator
+  # aggregates, while these two are one answer split in half — WHERE the
+  # subject is, and whether it is running there at all. Separating them across
+  # the message/metadata line is what made the reading hard.
+  @spec report(attribution(), sample(), non_neg_integer(), [sample()], [sample()]) :: :ok
+  defp report(attribution, subject, holders, waiters, parked) do
     stall = %{
       observed_at: now_iso8601(),
-      holder: holder,
-      waiters: waiter_samples,
-      waiter_count: length(waiter_samples)
+      attribution: attribution,
+      subject: subject,
+      holders: holders,
+      waiters: waiters,
+      parked: parked,
+      registered_holders: registered(parked, :holders),
+      registered_waiters: registered(parked, :waiters)
     }
 
-    # `status` rides in the PROSE, next to `current_function`, and not in the
-    # metadata beside `held_ms`/`waiters`: those two are measurements an
-    # operator aggregates, while these two are one answer split in half —
-    # WHERE the holder is, and whether it is running there at all. Separating
-    # them across the message/metadata line is what made the reading hard.
     Logger.warning(
-      "db lock stall: holder #{holder.pid} has held RESERVED for #{holder.elapsed_ms}ms " <>
-        "with #{stall.waiter_count} waiter(s) queued — holder status=#{inspect(holder.status)} " <>
-        "at #{holder.current_function}, stack: #{Enum.join(holder.stacktrace, " <- ")}",
-      held_ms: holder.elapsed_ms,
-      waiters: stall.waiter_count
+      "db lock stall: attribution=#{attribution}, #{subject_clause(attribution, subject, holders)} — " <>
+        "#{seam_clause(holders, length(waiters), length(parked))}" <>
+        "#{roster_tail(parked, stall)}; subject #{subject.pid} " <>
+        "status=#{inspect(subject.status)} at #{subject.current_function}, " <>
+        "stack: #{Enum.join(subject.stacktrace, " <- ")}",
+      attribution: attribution,
+      elapsed_ms: subject.elapsed_ms,
+      waiters: length(waiters),
+      parked: length(parked)
     )
 
     :telemetry.execute(
-      [:grappa, :repo, :lock_stall, :detected],
-      %{held_ms: holder.elapsed_ms, waiter_count: stall.waiter_count},
+      @detected_event,
+      %{elapsed_ms: subject.elapsed_ms, waiter_count: length(waiters), parked_count: length(parked)},
       stall
     )
   end
 
-  # #1687 — the queue nobody can be blamed for. Same two doors as `report/2`,
-  # and deliberately the same SHAPE of line, so an operator scanning the log
-  # reads them as one instrument with two verdicts rather than two tools.
+  # The arm's honest verb, and the ONE place a hold may be claimed.
   #
-  # It carries the LONGEST waiter's stack for the same reason `report/2`
-  # carries the holder's: it is the one frame that says which of the two
-  # topologies this is. The measurement is named `longest_wait_ms` and not
-  # `held_ms` — nothing here observed a hold, and reusing the hold field
-  # would smuggle the claim back in through the schema after the prose had
-  # been careful to leave it out.
-  @spec report_unattributed([{pid(), non_neg_integer()}], non_neg_integer()) :: :ok
-  defp report_unattributed([], _), do: :ok
-
-  defp report_unattributed(queued, holders_registered) do
-    # Arm BEFORE emitting, exactly as `report/2` does: a 170-second prod
-    # episode at `tick_ms: 1_000` would otherwise print the same warning ~170
-    # times, which an operator reads the same way as never printing it.
-    Enum.each(queued, fn {pid, _} -> :ets.update_element(@table, pid, [{4, true}]) end)
-
-    samples = Enum.map(queued, fn {pid, elapsed} -> sample(pid, elapsed) end)
-    longest = Enum.max_by(samples, & &1.elapsed_ms)
-    report = %{observed_at: now_iso8601(), waiters: samples, holders_registered: holders_registered}
-
-    Logger.warning(
-      "db lock stall UNATTRIBUTED: #{length(samples)} writer(s) queued past the threshold, " <>
-        "longest #{longest.elapsed_ms}ms — #{holder_clause(holders_registered)}, so the holder is " <>
-        "NOT attributable at the BEGIN IMMEDIATE seam; longest waiter #{longest.pid} " <>
-        "status=#{inspect(longest.status)} at #{longest.current_function}, " <>
-        "stack: #{Enum.join(longest.stacktrace, " <- ")}",
-      waiters: length(samples),
-      longest_wait_ms: longest.elapsed_ms
-    )
-
-    :telemetry.execute(
-      [:grappa, :repo, :lock_stall, :unattributed],
-      %{waiter_count: length(samples), longest_wait_ms: longest.elapsed_ms},
-      report
-    )
+  # 🔴 `:none` and `:cohort` must never reach the word "held": the victims'
+  # elapsed decomposes into pool checkout PLUS `busy_timeout` (#1687, measured
+  # in prod), so a wait is not evidence of anybody's hold, and on `:cohort`
+  # exqlite's busy handler sleeping inside the same dirty-IO NIF as the writer
+  # holding the lock makes the population indivisible from the BEAM's side.
+  # Asserting a cause the frame never measured is the defect
+  # `terminal_message/3` in `Grappa.Repo.BusyRetry` was twice rewritten to stop
+  # committing; the fold does not re-commit it in a shared template.
+  @spec subject_clause(attribution(), sample(), non_neg_integer()) :: String.t()
+  defp subject_clause(:named, subject, _) do
+    "holder #{subject.pid} has held RESERVED for #{subject.elapsed_ms}ms"
   end
 
-  # The two sub-cases, named apart because they call for different next
-  # moves: `0` means the writer holding the lock never passed the seam (widen
-  # coverage, or accept the blindness knowingly), while a positive count
-  # means the seam DID see a holder and the queue is simply older than it.
+  defp subject_clause(:none, subject, holders) do
+    "longest writer queued at the seam for #{subject.elapsed_ms}ms — #{holder_clause(holders)}, " <>
+      "so the holder is NOT attributable at the BEGIN IMMEDIATE seam"
+  end
+
+  defp subject_clause(:cohort, subject, _) do
+    "longest process parked inside #{inspect(@nif_module)} for #{subject.elapsed_ms}ms — " <>
+      "nothing registered at the seam, and nothing BEAM-visible says which of the cohort holds the lock"
+  end
+
+  # The two sub-cases of an unattributable queue, named apart because they call
+  # for different next moves: `0` means the writer holding the lock never
+  # passed the seam (widen coverage, or accept the blindness knowingly), while
+  # a positive count means the seam DID see a holder and the queue is simply
+  # older than it.
   @spec holder_clause(non_neg_integer()) :: String.t()
   defp holder_clause(0), do: "no holder registered"
   defp holder_clause(n), do: "#{n} holder(s) registered, none past the threshold"
+
+  # The three seam numbers, in the same order on every line whatever the
+  # verdict — this is what replaces correlating three prefixes by timestamp.
+  @spec seam_clause(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: String.t()
+  defp seam_clause(holders, waiters, parked) do
+    "#{holders} holder(s) / #{waiters} waiter(s) registered at the seam, " <>
+      "#{parked} process(es) parked inside #{inspect(@nif_module)}"
+  end
+
+  # 🔴 The roster is why the cohort line is longer than its siblings, and it is
+  # the deliverable rather than verbosity (#1901). The acceptance test is that
+  # the log NAMES the process holding the lock; this verdict cannot label which
+  # of the cohort that is, so it names every one of them — pid, elapsed and
+  # frame — and pays the full twelve-frame stack only for the longest. An
+  # operator who has the roster can cross it against the `fault=busy_locked`
+  # terminals the victims emit and read the holder off the difference; an
+  # operator with one sample cannot.
+  #
+  # 🔴 It rides on whether the cohort EXISTS, not on which verdict was
+  # reached, and that is deliberate: the parked population is the contention
+  # evidence that survives the seam being blind, so a `:named` line that
+  # happens to have twenty victims in the NIF should name them too. Keying it
+  # on `:cohort` would have made the roster available exactly when the seam
+  # knows least, which is backwards. On a healthy node the list is empty and
+  # the tail costs a pattern match.
+  @spec roster_tail([sample()], stall()) :: String.t()
+  defp roster_tail([], _), do: ""
+
+  defp roster_tail(parked, stall) do
+    "; #{seam_roster_clause(stall.registered_holders, stall.registered_waiters, length(parked))}" <>
+      "; roster: #{roster(parked)}"
+  end
+
+  # How much of the PARKED roster the seam could already name — a different
+  # question from `seam_clause/3`'s, which counts the whole registered
+  # population. All-zero is the #1901 finding in one phrase: this system's
+  # dominant writer holds the file lock without ever touching the seam, so
+  # widening coverage is the only thing that would name it. A positive count
+  # says the seam DID see some of them, and the remainder is what it missed.
+  @spec seam_roster_clause(non_neg_integer(), non_neg_integer(), pos_integer()) :: String.t()
+  defp seam_roster_clause(0, 0, total) do
+    "none of them registered at the BEGIN IMMEDIATE seam, so all #{total} are writers it cannot name"
+  end
+
+  defp seam_roster_clause(holders, waiters, total) do
+    "#{holders} holder(s) and #{waiters} waiter(s) of them registered at the BEGIN IMMEDIATE " <>
+      "seam, #{total - holders - waiters} not"
+  end
+
+  # How many of the parked cohort the seam already knows, in the named role.
+  # Reads the table through `lock_roles/0`, which shares `rows/0`'s dead-row
+  # reaping with every other reader.
+  @spec registered([sample()], :holders | :waiters) :: non_neg_integer()
+  defp registered([], _), do: 0
+
+  defp registered(parked, role) do
+    pids = MapSet.new(parked, & &1.pid)
+
+    lock_roles() |> Map.fetch!(role) |> Enum.count(&MapSet.member?(pids, inspect(&1)))
+  end
 
   ## ----- The NIF census (#1901) -----------------------------------------
 
@@ -930,73 +1166,38 @@ defmodule Grappa.Repo.LockWatch do
         do: pid
   end
 
-  # Same two doors and the same SHAPE of line as the other two arms, so an
-  # operator scanning `erlang.log` reads three verdicts from one instrument
-  # rather than three tools. The prefix is `db lock stall NIF CENSUS:` and it
-  # is LOAD-BEARING for the same reason theirs are: `scripts/log-gap-scan.awk`
-  # counts the #1429 census off these literals and
-  # `test/scripts/log_gap_scan_test.bats` pins them verbatim.
+  # 🔴 The roster, VERIFIED — defect 2 of issue 1960, and the sample IS the
+  # verification. `parked_in_nif/0`'s sweep and this read are two instants, and
+  # in prod the gap between them was wide enough that 8 of 11 census lines
+  # printed a cohort whose frames contradicted their own headline:
+  # `:gen_statem.loop_hibernate/3` at 32 s, `DBConnection.Holder.checkout_call/5`
+  # at 2.1 s. `nif_sample/2` decides from the SAME read it builds the sample
+  # from, so a process that has left is DROPPED rather than printed — and the
+  # decision can never disagree with the frame that gets printed, which a third
+  # read would let it do.
   #
-  # 🔴 The ROSTER is why this line is longer than its siblings, and it is the
-  # deliverable rather than verbosity. #1901's acceptance test is that the log
-  # NAMES the process holding the lock; this arm cannot label which of the
-  # cohort that is, so it names every one of them — pid, elapsed and frame —
-  # and pays the full twelve-frame stack only for the longest. An operator who
-  # has the roster can cross it against the `fault=busy_locked` terminals the
-  # victims emit and read the holder off the difference; an operator with one
-  # sample cannot.
-  @spec report_nif_census([{pid(), non_neg_integer()}]) :: :ok
-  defp report_nif_census([]), do: :ok
-
-  defp report_nif_census(due) do
-    samples =
-      due |> Enum.map(fn {pid, elapsed} -> sample(pid, elapsed) end) |> Enum.sort_by(& &1.elapsed_ms, :desc)
-
-    longest = hd(samples)
-    %{holders: holders, waiters: waiters} = lock_roles()
-    due_pids = MapSet.new(due, &elem(&1, 0))
-    registered_holders = Enum.count(holders, &MapSet.member?(due_pids, &1))
-    registered_waiters = Enum.count(waiters, &MapSet.member?(due_pids, &1))
-
-    report = %{
-      observed_at: now_iso8601(),
-      parked: samples,
-      registered_holders: registered_holders,
-      registered_waiters: registered_waiters
-    }
-
-    Logger.warning(
-      "db lock stall NIF CENSUS: #{length(samples)} process(es) parked inside " <>
-        "#{inspect(@nif_module)} past the threshold, longest #{longest.elapsed_ms}ms — " <>
-        "#{seam_clause(registered_holders, registered_waiters, length(samples))}; " <>
-        "roster: #{roster(samples)}; longest #{longest.pid} status=#{inspect(longest.status)} " <>
-        "at #{longest.current_function}, stack: #{Enum.join(longest.stacktrace, " <- ")}",
-      parked: length(samples),
-      longest_parked_ms: longest.elapsed_ms
-    )
-
-    :telemetry.execute(
-      [:grappa, :repo, :lock_stall, :nif_census],
-      %{parked_count: length(samples), longest_parked_ms: longest.elapsed_ms},
-      report
-    )
+  # An empty result is a real and frequent outcome (the whole cohort left), and
+  # its caller answers it with silence. That is the noise cure: the line is not
+  # suppressed by a bigger threshold, it is suppressed by having nothing true
+  # left to say.
+  @spec sample_parked([{pid(), non_neg_integer()}]) :: [sample()]
+  defp sample_parked(candidates) do
+    candidates
+    |> Enum.map(fn {pid, elapsed} -> nif_sample(pid, elapsed) end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort_by(& &1.elapsed_ms, :desc)
   end
 
-  # The two sub-cases, named apart because they call for different next moves
-  # — the same split `holder_clause/1` makes one arm up. All-zero is the #1901
-  # finding in one phrase: this system's dominant writer holds the file lock
-  # without ever touching the seam, so widening coverage (axis 2) is the only
-  # thing that would name it. A positive count says the seam DID see some of
-  # them, and the remainder is what it missed.
-  @spec seam_clause(non_neg_integer(), non_neg_integer(), pos_integer()) :: String.t()
-  defp seam_clause(0, 0, total) do
-    "none of them registered at the BEGIN IMMEDIATE seam, so all #{total} are writers it cannot name"
+  @spec nif_sample(pid(), non_neg_integer()) :: sample() | nil
+  defp nif_sample(pid, elapsed_ms) do
+    case Process.info(pid, @sample_keys) do
+      nil -> nil
+      info -> if in_nif?(info), do: build_sample(pid, elapsed_ms, info), else: nil
+    end
   end
 
-  defp seam_clause(holders, waiters, total) do
-    "#{holders} holder(s) and #{waiters} waiter(s) of them registered at the BEGIN IMMEDIATE " <>
-      "seam, #{total - holders - waiters} not"
-  end
+  @spec in_nif?(keyword()) :: boolean()
+  defp in_nif?(info), do: match?({@nif_module, _, _}, Keyword.get(info, :current_function))
 
   # Pid, elapsed and frame for every parked process — no stacks, which ride
   # the telemetry door in full. The frame is in because it is the one field
@@ -1054,9 +1255,14 @@ defmodule Grappa.Repo.LockWatch do
   # here (the holder can die between the scan and the sample), so it folds
   # to an explicit empty sample rather than crashing the watchdog.
   @spec sample(pid(), non_neg_integer()) :: sample()
-  defp sample(pid, elapsed_ms) do
-    info = Process.info(pid, [:current_function, :status, :message_queue_len, :dictionary])
+  defp sample(pid, elapsed_ms), do: build_sample(pid, elapsed_ms, Process.info(pid, @sample_keys))
 
+  # ONE read, every field (issue 1960). The stacktrace used to cost a second
+  # `Process.info/2`, so the frame printed under `at …` and the frames printed
+  # after `stack:` were sampled at two different instants and could describe
+  # two different places. They cannot now.
+  @spec build_sample(pid(), non_neg_integer(), keyword() | nil) :: sample()
+  defp build_sample(pid, elapsed_ms, info) do
     %{
       pid: inspect(pid),
       elapsed_ms: elapsed_ms,
@@ -1064,23 +1270,21 @@ defmodule Grappa.Repo.LockWatch do
       status: info && Keyword.get(info, :status),
       message_queue_len: info && Keyword.get(info, :message_queue_len),
       initial_call: format_mfa(initial_call(info)),
-      stacktrace: stacktrace(pid)
+      stacktrace: format_frames(frames(info))
     }
   end
+
+  # `nil` for a dead pid folds to no frames, exactly as the dedicated
+  # `Process.info(pid, :current_stacktrace)` call it replaces did.
+  @spec frames(keyword() | nil) :: [tuple()]
+  defp frames(nil), do: []
+  defp frames(info), do: Keyword.get(info, :current_stacktrace, [])
 
   @spec initial_call(keyword() | nil) :: mfa() | nil
   defp initial_call(nil), do: nil
 
   defp initial_call(info) do
     info |> Keyword.get(:dictionary, []) |> Keyword.get(:"$initial_call")
-  end
-
-  @spec stacktrace(pid()) :: [String.t()]
-  defp stacktrace(pid) do
-    case Process.info(pid, :current_stacktrace) do
-      {:current_stacktrace, frames} -> format_frames(frames)
-      nil -> []
-    end
   end
 
   # #1888 — the release-time identity, read from the releasing process's OWN

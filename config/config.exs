@@ -135,10 +135,14 @@ config :grappa, :session, connection_stable_ms: 60_000
 #
 #   * enabled — arms both the watchdog timer and the write-path seam. OFF
 #     costs one :persistent_term read per write transaction and nothing more.
-#   * stall_threshold_ms — how long a holder must hold, WITH a queue behind
-#     it, before it is reported. Well under the 30_000 busy_timeout so the
-#     report lands while the stall is happening, not after the victims have
-#     already timed out.
+#   * stall_threshold_ms — how long a holder must hold before it is reported.
+#     🔴 There is no "WITH a queue behind it" any more (issue 1960): the watch
+#     table has one producer, so "no waiter registered" meant "no waiter that
+#     went through `Repo.immediate_transaction/1`" and silenced five of the
+#     nine prod stalls of 2026-09-06. ONE threshold now governs both edges of
+#     an episode and all three verdicts. Well under the 30_000 busy_timeout so
+#     the report lands while the stall is happening, not after the victims
+#     have already timed out.
 #   * tick_ms — watchdog scan cadence.
 config :grappa, :lock_watch,
   enabled: true,
@@ -411,22 +415,27 @@ config :logger, :console,
     # many writers are queued behind it. Without these two keys the backend
     # drops the structured half of a stall report, leaving only the prose —
     # and the log line IS the door that reaches CI container logs.
+    # `:held_ms` is now the CLOSING bracket's alone (issue 1960) — it is the
+    # one edge where a hold is the thing measured.
     :held_ms,
     :waiters,
-    # #1687 — the unattributed arm's own measurement. Deliberately NOT
-    # `:held_ms`: nothing in that report observed a hold, and reusing the key
-    # would smuggle the claim back into the structured half after the prose
-    # was written to leave it out. An operator aggregating `held_ms` must not
-    # find waits mixed into it.
-    :longest_wait_ms,
-    # #1901 — the NIF census's own two, and neither reuses a key above for the
-    # same reason #1687 refused `:held_ms`. `:waiters` counts writers PROVABLY
-    # blocked; a census counted no queue, it photographed a cohort of which
-    # one member is the holder. `:longest_wait_ms` names a WAIT; the longest
-    # parked process may be the writer that was never waiting at all. An
-    # operator aggregating either key must not find census rows mixed in.
+    # 🔴 issue 1960 — the opening line's own two, and the pair replaces
+    # `:longest_wait_ms` + `:longest_parked_ms`. The reason those existed is
+    # the #1687 ruling: nothing in an unattributed report observed a hold, so
+    # reusing `:held_ms` would have smuggled the claim back into the
+    # structured half after the prose was written to leave it out. ONE folded
+    # line cannot solve that with three keys — it solves it with a key that
+    # claims nothing (`:elapsed_ms`) plus the key that says what it measured
+    # (`:attribution`). An operator aggregating `elapsed_ms` MUST filter on
+    # `attribution`, which is exactly the discipline the three keys enforced
+    # by being separate, now stated instead of implied.
+    :attribution,
+    :elapsed_ms,
+    # #1901 — how many processes were inside the SQLite NIF past the
+    # threshold. Still its own key and NOT folded into `:waiters`: that one
+    # counts writers PROVABLY blocked at the seam, while this counts a cohort
+    # of which one member is the holder and none can be singled out.
     :parked,
-    :longest_parked_ms,
     :pid,
     :unexpected,
     # Bootstrap summary: how many credentials we enumerated and how

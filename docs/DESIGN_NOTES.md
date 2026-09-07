@@ -47446,3 +47446,169 @@ them to contrast had the second silently eat the first.
 _Deploy: **cold** — `infra/docker/release-entrypoint.sh` is baked into the
 release image, so it reaches an operator only through a new image. The m42
 jail runs `mix release` and does not read it; nothing else here leaves CI._
+<!-- entry #1960 -->
+
+---
+
+## 2026-09-07 — #1960: one prefix for one phenomenon, and the holder named WHILE it holds
+
+`Grappa.Repo.LockWatch` printed four literals for one lock — `db lock stall`,
+`… UNATTRIBUTED`, `… NIF CENSUS`, `… RESOLVED` — and picked the arm by
+attributability, so consecutive ticks could describe one episode under two
+different words and an operator had to correlate them by timestamp. Worse, it
+was **silent while the lock was held** on exactly the episodes that hurt.
+
+Measured on prod (jail `grappa-new`, 1.5.0, all rotations of
+`runtime/log/erlang.log*`), 2026-09-06: `2` named-while-holding, `4`
+UNATTRIBUTED, `11` NIF CENSUS, `7` RESOLVED — **two** announcements against
+nine stall episodes, and **five** RESOLVED lines carrying
+`NEVER announced while it held` with holds of 31.0 s, 31.3 s, 31.3 s, 62.7 s
+and 94.1 s. Each already knew its write path
+(`UserSocket.detach_client_source_capture/2` → `Vhosts.record_client_source/2`;
+`Session.Server.init/1` → `apply_effects/2`). The 22:09–22:12 pair is the run
+that starved the pool and preceded the 22:13 shutdown.
+
+### The gate was never a contention test
+
+`report_stalls(_, [])` returned `:ok` for a holder past the threshold whenever
+no WAITER was registered, on the reasoning that a slow uncontended transaction
+is not a stall. That reasoning is sound and the gate does not implement it: the
+watch table has ONE producer (`Repo.immediate_transaction/1`), so "no waiter
+registered" means "no waiter that went through the seam", and this system's
+dominant writer is an autocommit `Repo.insert` — 324 679 `messages insert`
+against thousands for everything the seam covers (#1901's own measurement).
+The gate reads a 0.1 % sample and calls it silence.
+
+🔴 **The decisive argument is that the codebase had already ruled the other
+way and only on one edge.** #1888 made the CLOSING bracket fire on
+`announced or past_threshold?` — no waiter conjunct. So a 31 s uncontended
+hold already printed a RESOLVED line and refused to print an opening one. The
+asymmetry was the defect; ONE threshold policy over both edges is the fix, and
+"remove the short circuit" is #1960's own smallest-change proposal.
+
+What replaces the gate is not "print more", it is the line stating what it
+observed: every report now carries `H holder(s) / W waiter(s) registered at
+the seam, P process(es) parked inside Exqlite.Sqlite3NIF`. An uncontended hold
+prints `0 waiter(s)` instead of printing nothing — the reader SEES the absence
+of contention rather than inferring it from the absence of a line, which is
+the log-honesty rule applied to a fast path that was skipping the work.
+
+### The ladder, and why `none` outranks `cohort`
+
+One event, one prefix, one `attribution` field: `:named` (the seam registered a
+holder past the threshold) > `:none` (registered WRITERS queued past it, holder
+not attributable) > `:cohort` (nothing at the seam, only processes parked
+inside the NIF). The order is claim strength, not preference. A registered
+waiter is a writer we KNOW is blocked and whose own frame separates a lock-wait
+from a pool-wait — measured live while building this: a `:none` subject
+sampled at `DBConnection.Holder.checkout_call/5`, which is the #1687
+decomposition visible in one frame. A NIF resident is a physical observation
+that may equally be a healthy two-millisecond write.
+
+🔴 **Nothing is lost by the ordering, because the ROSTER rides every verdict.**
+Keying the roster on `:cohort` would have made it available exactly when the
+seam knows LEAST, which is backwards. Measured on the real fixture: a `:none`
+line with `parked=1` prints the full roster and the
+`0 holder(s) and 1 waiter(s) of them registered at the BEGIN IMMEDIATE seam`
+clause. This is why `lock_watch_test.exs`'s "a writer the seam DOES know is
+counted as such" moved from the census verdict to `:none` and kept every one
+of its assertions.
+
+🔴 **The honest verb is per-arm and lives in ONE place** (`subject_clause/3`).
+`has held RESERVED` appears on `:named` and nowhere else. A shared template
+with a shared verb is precisely how a fold re-commits the claim
+`terminal_message/3` in `Grappa.Repo.BusyRetry` was twice rewritten to stop
+making, so the template carries the arm's verb rather than a neutral one.
+
+### The census noise was a race, and the sample IS the cure
+
+8 of the 11 census lines reported a longest-parked between 2.0 s and 3.1 s —
+normal write latency at `stall_threshold_ms: 2_000`, not a stall — and their
+rosters named processes that were not in the NIF at all:
+`#PID<0.2456.0> 32024ms :gen_statem.loop_hibernate/3`,
+`#PID<0.3110.0> 2120ms DBConnection.Holder.checkout_call/5`. The sweep matched
+on `current_function` and `sample/2` re-read the process later; between the two
+reads it had left, so the census printed a cohort whose frames contradicted its
+own headline.
+
+`nif_sample/2` now decides from the SAME `Process.info/2` read it builds the
+sample from, so the decision can never disagree with the frame that gets
+printed — a third read would let it. **An entirely-departed cohort produces NO
+line.** That is the noise cure and it is deliberately not a bigger threshold:
+the arm is silent because there is nothing true left to say, which is a
+different fact from being under a threshold, and only one of the two is worth
+an operator's trust.
+
+One level down, `sample/2` folded `:current_stacktrace` into the same read.
+The frame under `at …` and the frames under `stack:` used to come from two
+signals and could describe two different instants — the same race, one layer
+in.
+
+### The output contract of the #1429 census does NOT move
+
+`scripts/log-gap-scan.awk` keeps `lockstall`, `lockstall_unattributed` and
+`lockstall_nif` as SUMMARY fields and re-keys their INPUT onto
+`attribution=named|none|cohort`. The discrimination those three counters exist
+to express — a holder was NAMED, versus a queue measured with nobody to blame,
+versus neither established and a cohort photographed — is exactly what the
+field spells out, so the census keeps counting and nothing downstream of the
+summary line has to learn a new name.
+
+The three `sig()` samples and the three bats pins were replaced with lines
+**captured from real emissions** through the production path, not composed by
+hand: the awk's own doc requires verbatim call-site copies, and a pin that
+merely satisfies the regex is a fiction that passes.
+
+### Verified, not cited: the #1715 Logger cache key is PER MODULE
+
+The cure adds `Logger.warning` call sites inside `Grappa.Repo.LockWatch`, and
+rule #1715 says a module that may log DURING a write-lock wait must buy its
+Logger cache key at boot or the observer becomes the first casualty of the wait
+it observes. That the key is per MODULE and not per CALL SITE was asserted in a
+comment; a guard comment can be factually wrong and the price of being wrong
+here is the whole instrument, so it was measured instead — diffing the entire
+`persistent_term` keyspace around each call, MIX_ENV=test, OTP 28:
+
+| call | new keys |
+|---|---|
+| `A.site_one` | `+1` — `{:logger_config, Probe1960.A}` |
+| `A.site_two` (same module, different call site) | **`+0`** |
+| `A.site_one` again | `+0` |
+| `B.site_one` (different module) | `+1` |
+| `C.prime` — `Logger.debug(fn -> "" end)`, the prime's own call | `+1` |
+| `C.real` — `Logger.warning` AFTER that debug prime | **`+0`** |
+
+So the key is `{logger_config, Module}`, the existing
+`prime_logger_module_cache/0` covers any number of new call sites in this
+module, and — the second row that mattered — the prime's `debug` writes the
+same key a later `warning` would, so it is not purged into a no-op in this
+build. No new priming, and the conclusion now rests on a measurement.
+
+### Known limits, stated so they are not rediscovered as bugs
+
+* **While a named episode is armed the cohort gets no line of its own**, so
+  victims that pile into the NIF after the announcing tick are not enumerated
+  until the closing bracket. That is the price of one report per episode; the
+  alternative is a second line about an episode already announced, which is
+  the correlate-by-timestamp reading this issue removes.
+* **The parked count is threshold-filtered like everything else.** A `:named`
+  line during the first seconds of a stall can read `0 process(es) parked`
+  while victims are already in the NIF but under `stall_threshold_ms`. One
+  threshold policy was the requirement; a second, lower one for the count
+  would be a knob nobody asked for.
+* **A pid that is both a registered waiter and parked in the NIF is sampled
+  twice** on a firing tick, under two different clocks (seam elapsed vs NIF
+  elapsed). Deduplicating would mean lying about one of the two measurements.
+  The per-tick SWEEP — the cost #1767 bounded at 0.7–2 µs per process — is
+  untouched; this is on the emitting path only, behind the threshold.
+* **`lock_stall_row.elapsed_ms` is a hold ONLY on `:resolved` and on
+  `:detected` with `attribution: :named`.** It is a WAIT on `:none` and a time
+  parked in a NIF on `:cohort`. That is the #1687 ruling generalised: never
+  name the column `held_ms`, and make `phase` + `attribution` total so the
+  pair disambiguates it.
+
+### Refused
+
+Touching the threshold, `busy_timeout`, the pool or the `BEGIN IMMEDIATE`
+posture — 1767 and 1888 are open and are vjt's calls. This is the
+OBSERVABILITY face and it does not cure the stall it reports.

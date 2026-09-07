@@ -961,6 +961,21 @@ block as the dispatch send-keys; `strip status:*` rides the SAME turn as process
   `workflow_dispatch`.** Use it when a settled run went red on a diagnosed-transient cause — it beats pushing an
   empty commit (no history pollution) and beats close/reopen (which does nothing). The "no manual lever" rule above
   applies ONLY when no run exists to re-run.
+  🔴🔴 **BUT A RERUN REUSES THE ORIGINAL `refs/pull/N/merge` — IT DOES *NOT* PICK UP A MAIN THAT MOVED
+  SINCE (orch, 2026-09-07, measured; a worker doubted it and the worker was right).** I merged the fix
+  for a main-wide red at 19:57:54Z and rrerun the inherited-red job on a PR to spare four in-flight
+  `integration` shards; **attempt 2 started at 19:58:38Z — after the merge — and failed on the exact
+  same line**, with the log showing `HEAD is now at 00f1531f`, i.e. the merge commit computed for the
+  ORIGINAL run. The proof needs no ref archaeology: **Credo still saw `_line`, a string that no longer
+  exists on the healed main**, so the checkout provably predates it.
+  ⚠️ **This is the boundary of the started_at rule directly below, and reading that rule as covering
+  reruns is the trap**: a fix on main turns the job green for a check-run created by a **NEW EVENT**
+  (a push recomputes the merge ref), never for a **REPLAY** of an old one. *Same clock, two different
+  questions.*
+  🥇 **So: a red INHERITED from a broken main is cured by a rebase + force-push, and by nothing
+  cheaper.** Take the shard cost; the rerun shortcut buys nothing here and costs a full extra cycle
+  plus the worker's time re-deriving why the "fix" did not land. `rerun` stays right for a genuinely
+  transient failure (runner/registry death), where the merge ref is not what changed.
 - 🥇 **THE SAME JOB GREEN ON ONE PR AND RED ON ANOTHER, WITH THE SAME COMMITS, IS NOT A FLAKE — CHECK THE CLOCK.**
   A PR's CI builds `refs/pull/N/merge`, i.e. the branch merged with main **as of when that check-run STARTED**. So a
   fix landing on main silently turns the job green for every check-run started afterwards, while older runs keep

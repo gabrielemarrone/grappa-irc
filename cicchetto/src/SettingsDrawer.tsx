@@ -9,6 +9,7 @@ import {
   Show,
 } from "solid-js";
 import AliasSettings from "./AliasSettings";
+import BundleReadout from "./BundleReadout";
 import DeleteAccountModal from "./DeleteAccountModal";
 import InlineConfirmButton from "./InlineConfirmButton";
 import { windowCandidates } from "./lib/activeWindows";
@@ -1393,6 +1394,19 @@ const SettingsDrawer: Component<Props> = (props) => {
               who built this, and out of what
             </span>
           </button>
+
+          {/* Issue 1974 — running bundle vs deployed bundle. UNGATED on vjt's
+            ruling: the person served a stale service-worker cache is an
+            ordinary PWA user, so the readout cannot live behind the admin
+            gate in `AdminDebugTab`. This is the drawer's only ungated,
+            always-reachable surface that is not an easter egg.
+
+            Below `credits` and not among the nav rows, because it is neither
+            an entry nor a setting: it PUSHES nothing and it CHANGES nothing.
+            The #1773 contract that credits is "LAST of the drawer's own
+            entries" is untouched — a readout is not an entry, and the two sit
+            together on purpose as the drawer's "about this build" tail. */}
+          <BundleReadout />
 
           {/* UX-4 bucket L — bottom "done" button. Same close verb as
             the top × — mobile thumb-reach surface. Sits below logout

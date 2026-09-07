@@ -3,6 +3,7 @@ import {
   __resetBundleHashForTests,
   bootBundleHashAccessor,
   bootBundleVersionAccessor,
+  bundleSkew,
   formatRefreshBanner,
   performRefresh,
   serverBundleHash,
@@ -45,6 +46,38 @@ describe("bundleHash", () => {
     }
     setServerBundleHash("definitely-different-hash-xxx");
     expect(shouldShowRefreshBanner()).toBe(true);
+  });
+
+  // Issue 1974 — the three-way verdict the readout renders. Pure, so every
+  // arm is reachable here; `shouldShowRefreshBanner` above can only ever
+  // observe the "skewed" one, which is why it could be a boolean and this
+  // cannot.
+  describe("bundleSkew (issue 1974)", () => {
+    it("is 'aligned' when the two hashes are the same", () => {
+      expect(bundleSkew("DyH3fZLf", "DyH3fZLf")).toBe("aligned");
+    });
+
+    it("is 'skewed' when the two hashes differ", () => {
+      expect(bundleSkew("DyH3fZLf", "Ab12Cd34")).toBe("skewed");
+    });
+
+    it("is 'unknown' — NOT 'aligned' — when either side is null", () => {
+      // Both null is the state every page is in before the user-topic join
+      // lands its `bundle_hash`. Collapsing that into "aligned" would let the
+      // readout claim agreement between a value and nothing.
+      expect(bundleSkew(null, "Ab12Cd34")).toBe("unknown");
+      expect(bundleSkew("DyH3fZLf", null)).toBe("unknown");
+      expect(bundleSkew(null, null)).toBe("unknown");
+    });
+
+    it("is exactly what shouldShowRefreshBanner tests for (one comparison, not two)", () => {
+      // The banner predicate is now defined as `bundleSkew(...) === "skewed"`.
+      // Pinned because the failure mode of re-inlining the comparison is a
+      // readout and a banner that disagree about whether this tab is stale.
+      setServerBundleHash("definitely-different-hash-xxx");
+      const boot = bootBundleHashAccessor();
+      expect(shouldShowRefreshBanner()).toBe(bundleSkew(boot, serverBundleHash()) === "skewed");
+    });
   });
 
   describe("bundle version signals (#292)", () => {

@@ -48239,3 +48239,165 @@ _Deploy: **HOT** on all three substrates — measured via
 `Preflight.classify_paths/2` over the changed paths: `{:hot, []}` for `:docker`,
 `:jail` and `:linux`. Positive control: `VERSION` answers
 `{:cold, [version: ["VERSION"]]}` on jail and linux._
+<!-- entry #1982 -->
+
+---
+
+## 2026-09-07 — #1982: the same tap, and the other three scrims
+
+A user on a Samsung phone reported that a bare `/notify` sent with the compose
+SEND BUTTON clears the draft and opens nothing, while the same verb sent with
+the keyboard's Enter opens the settings drawer as designed. That is issue 1831,
+again, on an overlay 1831 did not reach.
+
+### What was measured, and it is the whole point of the slice
+
+The mechanism was already established and is not re-litigated here: a command
+that reaches its opener with no `await` ahead of it mounts a full-region scrim
+while the finger is still down; a touch's compat mouse events are synthesised
+after the touch ends and hit-tested against the layout as it stands THEN, so
+the click lands on the scrim and a dismiss-on-any-click fires inside the
+gesture that opened the overlay. `lib/backdropDismiss.ts` carries that
+reasoning and the cure.
+
+What had never been written down is the SET. Grepping every overlay opener
+referenced from `lib/commands/` and `lib/compose.ts` closes it at five:
+
+| opener | overlay | state before this entry |
+|---|---|---|
+| `openBanlistModal` | BanlistModal | cured by #1831 |
+| `openModeModal` | ModeModal | cured by #1831 |
+| `openUmodeModal` | UmodeModal | **defective** |
+| `openServiceModal` | ServiceModal | **defective** |
+| `requestOpenSettings` | SettingsDrawer | **defective** — reported as #1982 |
+
+#1831 cured two of five. The remaining three carried the identical defect for
+anyone who tapped instead of pressing Enter, and #1982 is simply the first of
+them a user happened to hit. All three are confirmed synchronous: `openSettings
+Command` and `umodeViewCommand` call their opener as the first statement, and
+`serviceModalCommand` opens FIRST and awaits `sendBodyLines` after — an
+ordering #1518 pinned as load-bearing, so that one cannot be defused by moving
+the await instead.
+
+The drawer differs from the four modals in one respect worth recording: it is
+the only site reached through a signal rather than an `open*Modal`. The verb
+bumps `settingsOpenTick`, Shell's effect runs `setSettingsOpen(true)` in the
+same turn, and `.settings-drawer-backdrop.open` takes `pointer-events: auto`
+with NO transition of its own (`themes/default.css`) while the opacity fade is
+200 ms. So the drawer opened and closed without ever painting — which is
+exactly the reported "nothing happens", and is why no overlay appeared in the
+reporter's frame-by-frame.
+
+### Why the cure is #1831's helper, and not either candidate in the issue body
+
+The issue proposed widening the send button's #925 click swallow to a
+document-level one-shot capture listener, or holding a freshly-opened
+backdrop's `pointer-events` off until its transition starts. Both were
+declined, and the reasons are not stylistic.
+
+The document-level swallow deletes nothing; it moves the orphan click's victim.
+It also defends only overlays opened by that ONE button, when the property
+wanted is about the scrim: an overlay that appears under a finger mid-gesture
+must not be dismissed by that gesture, whoever opened it. The `pointer-events`
+delay is worse on its own terms — it makes correctness depend on a transition
+race, and #1059 already ruled on precisely that shape for the twin problem on
+the button ("deferring the guard by a frame makes the guard timing-dependent,
+which is the shape of the bug, not of its remedy"). A press-armed dismiss is
+structural: a backdrop that never received the pointerdown beginning the
+interaction cannot be dismissed by its click, whatever the timing.
+
+So the cure is three call sites of an existing helper and no new mechanism.
+That is also the honest reading of "fix the class, not the example": the class
+was already fixed once, and what #1982 exposes is a migration that stopped at
+two of five.
+
+### The oracle
+
+Unit, on the three components' own suites — the two arms that encode the cure
+fail before it, the arm that encodes the PRESERVED dismiss passes on both
+sides, which is what makes the red discriminating rather than merely red:
+
+| tree | `SettingsDrawer` + `UmodeModal` + `ServiceModal` |
+|---|---|
+| pre-cure | 6 failed / 139 passed, rc 1 |
+| cured | 145 passed / 0 failed, rc 0 |
+
+`SettingsDrawer.test.tsx` had a case named "backdrop click fires onClose" that
+asserted a BARE click dismisses. That is the defect written down as a
+requirement — the exact click a press-armed dismiss must ignore. It was
+replaced by the press-armed trio, not deleted: the dismiss itself must keep
+working, and two of the three new cases exist to prove it does.
+
+`e2e/tests/issue1982-tap-send-overlay-survives.spec.ts` puts the platform half
+of the question to an engine, `@touch` and only `@touch`: `chromium-pixel-touch`
+is the sole project whose `tap()` produces the compat mouse events a real tap
+produces, and a `@webkit` twin would pass without touching the defect. Two
+verbs through two parsers onto two sub-pages — `/notify` (as reported) and
+`/alias`, which is not in the watch family and is parsed by `parseAlias` — each
+with an Enter control alongside its tap, because one verb would only have shown
+that one string had been patched. Against the pre-cure tree both taps fail and
+both Enters pass (2 failed / 2 passed, rc 1); with the cure the four are green.
+
+### The false green that had to be thrown away
+
+The first draft of that spec used `/umode` → UmodeModal as its second arm,
+which would have been the stronger claim: a different command module, a
+different opener, a different scrim. It PASSED against the pre-cure tree — an
+arm that cannot fail, which is worth less than no arm at all. A document-level
+capture probe on that same tree says why, and the reason is geometry rather
+than mechanism:
+
+    /notify   pointerdown -> polygon                          (the send glyph)
+              click       -> div.settings-drawer-backdrop.open
+              drawer.open=0        the defect, on an engine
+
+    /umode    pointerdown -> polygon
+              click       -> div.mode-modal-body              (the DIALOG)
+              umode-modal=1        survives
+
+On a Pixel 7 the umode toggle list is tall enough that the centred dialog
+covers the point the send button occupied, so the synthesised click never
+reaches a scrim: the dialog's own `stopPropagation` eats it first. UmodeModal
+is still defective by construction — its scrim dismissed on a bare click, and a
+network advertising few umodes yields a short dialog that leaves the scrim
+exposed — but that is not reproducible at this viewport, and the arm was
+deleted rather than kept as decoration. The probe output is quoted in the spec
+header so the next reader does not spend a stack cycle rediscovering it.
+
+Worth stating plainly because it nearly shipped: the arm was green, on the
+right project, exercising the right verb, against code that still had the bug.
+Only running it against the MUTANT exposed it. A spec that has never been shown
+to fail has not been shown to test anything.
+
+### What this does not claim
+
+Only ONE of the three cured sites has engine evidence. SettingsDrawer was
+measured red-then-green on `chromium-pixel-touch`; UmodeModal cannot be
+reproduced at that viewport (above) and ServiceModal cannot be driven there at
+all, since a bare `/ns` needs services this testnet does not run. Both are
+cured on the strength of being the same construction — a scrim dismissing on a
+bare click, reached synchronously from the compose line — and both carry unit
+arms, but neither has been shown to fail on an engine. Curing them anyway is a
+deliberate call: leaving two of five uncured is precisely the half-migration
+that produced this issue eight months after #1831.
+
+The engine is Blink with `isMobile` + `hasTouch`. The reported device runs
+Chrome, the same engine family — a closer match than #1831 had, whose report
+was Android Firefox — but this is still not "Android coverage".
+
+The eighteen other backdrops in cic are out of scope and are NOT asserted safe
+by omission. The argument for leaving them is that an overlay opened from an
+`onClick` handler activates AT the click, so no orphan click exists to be
+retargeted; that argument is reasoning, not measurement. The context menu is
+the one adjacent case where it was not even attempted: it opens from
+`contextmenu` (long-press), a gesture whose trailing-click behaviour was not
+measured here.
+
+The keyboard staying up over the opened drawer was reported in the same session
+and is split out as issue 1983; nothing here addresses it.
+
+_Deploy: cic bundle only — every changed source file is under `cicchetto/`,
+plus this entry. `Preflight.classify_paths/2` was deliberately NOT run: it
+needs the shared `_build` and the COMPILE lane was held by another worker, and
+a classification quoted without running it would be a guess wearing a
+measurement's clothes._

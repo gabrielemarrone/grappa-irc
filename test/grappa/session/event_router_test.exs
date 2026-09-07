@@ -590,7 +590,7 @@ defmodule Grappa.Session.EventRouterTest do
       body = <<0x01, "USERINFO", 0x01>>
       m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
 
-      assert {:cont, _, [{:reply, line}, {:persist, :notice, attrs}]} =
+      assert {:cont, _, [{:reply, line, :event_router_reply}, {:persist, :notice, attrs}]} =
                EventRouter.route(m, state)
 
       assert IO.iodata_to_binary(line) ==
@@ -603,6 +603,32 @@ defmodule Grappa.Session.EventRouterTest do
                "CTCP USERINFO query → Age=30; Gender=X; Location=Italy; Languages=it, en; here for the vibes"
     end
 
+    # #1988 — every CTCP path emitted a 2-tuple `{:reply, line}` while
+    # `Session.Server.apply_effects/2` has had a single 3-arity `:reply`
+    # clause since #1390 slice 6. The router tests asserted the 2-tuple, so
+    # CI stayed green while an inbound CTCP USERINFO/AVATAR from ANY nick
+    # killed the victim's session GenServer with a `function_clause` and
+    # dropped their socket. Pin the arity here, at the producer, for every
+    # CTCP path at once: a `:reply` effect that is not `{:reply, line,
+    # origin}` is not routable, whatever it says.
+    test "every CTCP reply effect carries an origin (#1988 — apply_effects takes only the 3-tuple)" do
+      state =
+        base_state(%{
+          avatar_url: "https://grappa.example/uploads/abc123.png",
+          profile: %{age: 30, gender: :nonbinary, location: "Italy", languages: "it, en", custom: nil}
+        })
+
+      for ctcp <- ["USERINFO", "AVATAR"] do
+        m = msg(:privmsg, ["vjt", <<0x01>> <> ctcp <> <<0x01>>], {:nick, "alice", "u", "h"})
+        assert {:cont, _, effects} = EventRouter.route(m, state)
+
+        for effect <- effects, elem(effect, 0) == :reply do
+          assert {:reply, _line, origin} = effect
+          assert origin in [:event_router_reply, :ghost_recovery, :recover_identity]
+        end
+      end
+    end
+
     test "PRIVMSG carrying CTCP USERINFO query still replies (empty) when no profile is configured" do
       state =
         base_state(%{
@@ -612,7 +638,7 @@ defmodule Grappa.Session.EventRouterTest do
       body = <<0x01, "USERINFO", 0x01>>
       m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
 
-      assert {:cont, _, [{:reply, line}, {:persist, :notice, _}]} =
+      assert {:cont, _, [{:reply, line, :event_router_reply}, {:persist, :notice, _}]} =
                EventRouter.route(m, state)
 
       assert IO.iodata_to_binary(line) == "NOTICE alice :\x01USERINFO \x01"
@@ -628,7 +654,7 @@ defmodule Grappa.Session.EventRouterTest do
         body = <<0x01, "USERINFO", 0x01>>
         m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
 
-        assert {:cont, _, [{:reply, line}, _]} = EventRouter.route(m, state)
+        assert {:cont, _, [{:reply, line, :event_router_reply}, _]} = EventRouter.route(m, state)
         assert IO.iodata_to_binary(line) == "NOTICE alice :\x01USERINFO Gender=#{letter}\x01"
       end
     end
@@ -639,7 +665,7 @@ defmodule Grappa.Session.EventRouterTest do
       body = <<0x01, "AVATAR", 0x01>>
       m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
 
-      assert {:cont, _, [{:reply, line}, {:persist, :notice, attrs}]} =
+      assert {:cont, _, [{:reply, line, :event_router_reply}, {:persist, :notice, attrs}]} =
                EventRouter.route(m, state)
 
       assert IO.iodata_to_binary(line) ==
@@ -2277,10 +2303,10 @@ defmodule Grappa.Session.EventRouterTest do
 
       assert {:cont, new_state, effects} = EventRouter.route(m, state)
 
-      assert Enum.any?(effects, &match?({:reply, "PRIVMSG alice :\x01USERINFO\x01"}, &1))
+      assert Enum.any?(effects, &match?({:reply, "PRIVMSG alice :\x01USERINFO\x01", :event_router_reply}, &1))
       # M3b — the AVATAR query is a second, independent lazy query fired
       # alongside USERINFO for the same "first seen this session" nick.
-      assert Enum.any?(effects, &match?({:reply, "PRIVMSG alice :\x01AVATAR\x01"}, &1))
+      assert Enum.any?(effects, &match?({:reply, "PRIVMSG alice :\x01AVATAR\x01", :event_router_reply}, &1))
       # Marked eagerly so a second sighting this session never re-queries.
       assert new_state.peer_profile_cache == %{"alice" => %{gender: nil, avatar_slug: nil}}
     end
@@ -2290,7 +2316,7 @@ defmodule Grappa.Session.EventRouterTest do
       m = msg(:join, ["#italia"], {:nick, "alice", "u", "h"})
 
       assert {:cont, new_state, effects} = EventRouter.route(m, state)
-      refute Enum.any?(effects, &match?({:reply, _}, &1))
+      refute Enum.any?(effects, &match?({:reply, _, _}, &1))
       assert new_state.peer_profile_cache == %{}
     end
 
@@ -2309,7 +2335,7 @@ defmodule Grappa.Session.EventRouterTest do
       m = msg(:join, ["#italia"], {:nick, "alice", "u", "h"})
 
       assert {:cont, new_state, effects} = EventRouter.route(m, state)
-      refute Enum.any?(effects, &match?({:reply, _}, &1))
+      refute Enum.any?(effects, &match?({:reply, _, _}, &1))
       # Untouched — a real answer isn't clobbered by a re-trigger no-op.
       assert new_state.peer_profile_cache == %{"alice" => %{gender: :female, avatar_slug: "existingslug"}}
     end
@@ -2319,7 +2345,7 @@ defmodule Grappa.Session.EventRouterTest do
       m = msg(:join, ["#italia"], {:nick, "vjt", "u", "h"})
 
       assert {:cont, new_state, effects} = EventRouter.route(m, state)
-      refute Enum.any?(effects, &match?({:reply, _}, &1))
+      refute Enum.any?(effects, &match?({:reply, _, _}, &1))
       assert new_state.peer_profile_cache == %{}
     end
   end

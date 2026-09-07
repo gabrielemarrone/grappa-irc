@@ -3218,7 +3218,7 @@ defmodule Grappa.Session.EventRouter do
         sender_meta(msg)
       )
 
-    {:cont, state2, [{:reply, reply}, persist_eff]}
+    {:cont, state2, [{:reply, reply, :event_router_reply}, persist_eff]}
   end
 
   # M3a — KVIrc-era CTCP AVATAR: unlike USERINFO, an UNSET avatar gets
@@ -3257,7 +3257,7 @@ defmodule Grappa.Session.EventRouter do
         sender_meta(msg)
       )
 
-    {:cont, state2, [{:reply, reply}, persist_eff]}
+    {:cont, state2, [{:reply, reply, :event_router_reply}, persist_eff]}
   end
 
   # Composes the KVIrc-shaped `Age=…; Gender=…; Location=…; Languages=…;
@@ -3469,7 +3469,7 @@ defmodule Grappa.Session.EventRouter do
       :ok ->
         existing = Map.get(cache, nick_key, %{})
         new_cache = Map.put(cache, nick_key, Map.put(existing, :gender, nil))
-        {%{state | peer_profile_cache: new_cache}, [{:reply, "PRIVMSG #{nick} :\x01USERINFO\x01"}]}
+        {%{state | peer_profile_cache: new_cache}, [{:reply, "PRIVMSG #{nick} :\x01USERINFO\x01", :event_router_reply}]}
 
       {:error, :rate_limited} ->
         {state, []}
@@ -3514,7 +3514,7 @@ defmodule Grappa.Session.EventRouter do
       :ok ->
         existing = Map.get(cache, nick_key, %{})
         new_cache = Map.put(cache, nick_key, Map.put(existing, :avatar_slug, nil))
-        {%{state | peer_profile_cache: new_cache}, [{:reply, "PRIVMSG #{nick} :\x01AVATAR\x01"}]}
+        {%{state | peer_profile_cache: new_cache}, [{:reply, "PRIVMSG #{nick} :\x01AVATAR\x01", :event_router_reply}]}
 
       {:error, :rate_limited} ->
         {state, []}

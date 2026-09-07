@@ -45,9 +45,17 @@ import { createSignal } from "solid-js";
 // blocks in SettingsDrawer (their signals live in its body) rather than
 // separate components, but they share the same `settingsPage` routing + the
 // deep-link machinery below, so they belong in this union.
+// issue 1993 — "profile" is the first NESTED sub-page: its nav row lives on
+// the general page, not on the main index, and its back button returns to
+// general. The routing needs nothing new for that — the signal is flat and
+// the back target is a parameter now — but a deep-link straight to "profile"
+// therefore lands somewhere the index cannot reach in one tap. Nothing does
+// that today; a future launcher that wants to should send the user to
+// "general" unless it means to strand them one level in.
 export type SettingsSubPage =
   | "main"
   | "general"
+  | "profile"
   | "security"
   | "display"
   | "vhost"

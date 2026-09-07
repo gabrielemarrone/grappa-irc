@@ -79,6 +79,12 @@ vi.mock("../lib/api", () => ({
     realname: "Real Name",
     auth_method: "none",
   }),
+  // issue 1993 — the NickServ password rides the SAME apply button as
+  // identity now, so a merged apply reaches `lib/lifecycle`'s
+  // `updateNetworkPassword` → `api.putNetworkPassword`. This mock lists its
+  // exports explicitly: without the entry the first merged apply dies on
+  // "No putNetworkPassword export is defined on the mock".
+  putNetworkPassword: vi.fn().mockResolvedValue(undefined),
   // The drawer imports ApiError for the identity-save catch (instanceof
   // narrowing). A minimal class stand-in keeps the import resolvable.
   ApiError: class ApiError extends Error {},
@@ -1948,12 +1954,17 @@ describe("SettingsDrawer (#476/#478 — per-network identity, both subjects)", (
     expect((screen.getByLabelText(/real name/i) as HTMLInputElement).value).toBe("Real B");
 
     // Apply PATCHes the SELECTED network's slug (libera), not the first.
+    // issue 1993 — the merged apply only calls an endpoint whose value CHANGED
+    // (one gesture must not cost more reconnects than the two buttons it
+    // replaced), so the edit below is what makes this apply reach the wire at
+    // all. What it proves is unchanged: the PATCH carries `libera`.
+    fireEvent.input(nick, { target: { value: "nick-b2" } });
     const applyBtn = screen.getByTestId("settings-identity-apply");
     fireEvent.click(applyBtn);
     fireEvent.click(applyBtn);
     await waitFor(() => {
       expect(api.updateNetworkIdentity).toHaveBeenCalledWith("test-bearer", "libera", {
-        nick: "nick-b",
+        nick: "nick-b2",
         ident: "id-b",
         realname: "Real B",
       });
@@ -2206,5 +2217,279 @@ describe("SettingsDrawer — auto-away debounce (#348)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("auto-away-error")).toHaveTextContent("out_of_range");
     });
+  });
+});
+
+// issue 1993 — the general sub-page rework. Three axes, all of them about
+// what the page SAYS about itself: the network-scoped block is grouped under
+// the selector that governs it (1); identity and the NickServ password apply
+// as ONE gesture (2); the write-once profile fields left for a sub-page (3).
+// The copy pass (6) is guarded as a shape rule, not as a string pin.
+describe("SettingsDrawer (issue 1993 — general sub-page rework)", () => {
+  const userMe = {
+    kind: "user" as const,
+    id: "u1",
+    name: "alice",
+    is_admin: false,
+    inserted_at: "2026-06-29T00:00:00Z",
+  };
+
+  const netRow = (id: number, slug: string, nick: string) => ({
+    kind: "user" as const,
+    id,
+    slug,
+    nick,
+    ident: "grp" as string | null,
+    realname: "Real Name" as string | null,
+    connection_state: "connected" as const,
+    connection_state_reason: null as string | null,
+    connection_state_changed_at: null as string | null,
+    inserted_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  });
+
+  const seedUser = (rows: ReturnType<typeof netRow>[]) => {
+    meHolder.current = userMe;
+    subjectHolder.current = { kind: "user", id: "u1", name: "alice" };
+    networksHolder.current = rows;
+  };
+
+  const openGeneral = () => {
+    wrap(true);
+    openSub("general-settings-entry");
+  };
+
+  // ── (1) the selector governs a VISIBLE group ──────────────────────────
+  it("lifts the network selector out of the identity card, above the group it governs", () => {
+    seedUser([netRow(1, "azzurra", "nick-a"), netRow(2, "libera", "nick-b")]);
+    openGeneral();
+
+    const group = screen.getByTestId("settings-network-scope");
+    const select = screen.getByTestId("settings-identity-network-select");
+    const identity = screen.getByTestId("settings-section-identity");
+
+    // The selector is IN the group and NO LONGER inside the identity card —
+    // the burial this issue reports.
+    expect(group.contains(select)).toBe(true);
+    expect(identity.contains(select)).toBe(false);
+    // …and it precedes the card whose scope it decides.
+    expect(
+      select.compareDocumentPosition(identity) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(group.contains(identity)).toBe(true);
+  });
+
+  it("keeps the one-option picker hidden (#497) and still groups the card", () => {
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    // #497's ruling survives the regroup: a single network renders no picker.
+    expect(screen.queryByTestId("settings-identity-network-select")).toBeNull();
+    const group = screen.getByTestId("settings-network-scope");
+    expect(group.contains(screen.getByTestId("settings-section-identity"))).toBe(true);
+  });
+
+  it("leaves the account-scoped knobs OUTSIDE the network-scoped group", () => {
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    const group = screen.getByTestId("settings-network-scope");
+    expect(group.contains(screen.getByTestId("upload-ttl-select"))).toBe(false);
+    expect(group.contains(screen.getByTestId("auto-away-select"))).toBe(false);
+  });
+
+  // ── (2) one apply for identity + NickServ password ────────────────────
+  it("moves the password into the identity card under its real name, with no save button of its own", () => {
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    const identity = screen.getByTestId("settings-section-identity");
+    const pw = screen.getByTestId("settings-network-password-input");
+    expect(identity.contains(pw)).toBe(true);
+    // "Network password" was the wrong name for a NickServ secret.
+    expect(screen.getByLabelText(/nickserv password/i)).toBe(pw);
+    // The rival apply is gone — one button, one confirm.
+    expect(screen.queryByTestId("settings-password-apply")).toBeNull();
+    expect(screen.queryByTestId("settings-section-password")).toBeNull();
+  });
+
+  it("applies identity AND password from the single apply", async () => {
+    const api = await import("../lib/api");
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    fireEvent.input(screen.getByLabelText(/^nick$/i), { target: { value: "nick-a2" } });
+    const pw = screen.getByTestId("settings-network-password-input") as HTMLInputElement;
+    fireEvent.input(pw, { target: { value: "s3cret" } });
+
+    const applyBtn = screen.getByTestId("settings-identity-apply");
+    fireEvent.click(applyBtn); // arm
+    fireEvent.click(applyBtn); // confirm
+
+    await waitFor(() => {
+      expect(api.putNetworkPassword).toHaveBeenCalledWith("test-bearer", "azzurra", "s3cret");
+    });
+    await waitFor(() => {
+      expect(api.updateNetworkIdentity).toHaveBeenCalledWith("test-bearer", "azzurra", {
+        nick: "nick-a2",
+        ident: "grp",
+        realname: "Real Name",
+      });
+    });
+    // The field clears on a stored secret — the only readback a write-only
+    // value can offer.
+    await waitFor(() => expect(pw.value).toBe(""));
+  });
+
+  it("never sends a blank password (leave-blank-to-keep survives the merge)", async () => {
+    const api = await import("../lib/api");
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    fireEvent.input(screen.getByLabelText(/^nick$/i), { target: { value: "nick-a2" } });
+    const applyBtn = screen.getByTestId("settings-identity-apply");
+    fireEvent.click(applyBtn);
+    fireEvent.click(applyBtn);
+
+    await waitFor(() => expect(api.updateNetworkIdentity).toHaveBeenCalledTimes(1));
+    expect(api.putNetworkPassword).not.toHaveBeenCalled();
+  });
+
+  it("does not re-apply an untouched identity just because a password was typed", async () => {
+    const api = await import("../lib/api");
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    fireEvent.input(screen.getByTestId("settings-network-password-input"), {
+      target: { value: "s3cret" },
+    });
+    const applyBtn = screen.getByTestId("settings-identity-apply");
+    fireEvent.click(applyBtn);
+    fireEvent.click(applyBtn);
+
+    await waitFor(() => expect(api.putNetworkPassword).toHaveBeenCalledTimes(1));
+    // One reconnect, not two: the identity door is not knocked on for a
+    // value that did not change.
+    expect(api.updateNetworkIdentity).not.toHaveBeenCalled();
+  });
+
+  it("a refused password aborts the apply before the identity reconnect", async () => {
+    const api = await import("../lib/api");
+    vi.mocked(api.putNetworkPassword).mockRejectedValueOnce(new Error("too short"));
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    fireEvent.input(screen.getByLabelText(/^nick$/i), { target: { value: "nick-a2" } });
+    fireEvent.input(screen.getByTestId("settings-network-password-input"), {
+      target: { value: "x" },
+    });
+    const applyBtn = screen.getByTestId("settings-identity-apply");
+    fireEvent.click(applyBtn);
+    fireEvent.click(applyBtn);
+
+    await waitFor(() => expect(screen.getByTestId("settings-password-error")).toBeInTheDocument());
+    // Fail fast: bouncing the session for the half of the gesture that DID
+    // work would leave the operator guessing which half landed.
+    expect(api.updateNetworkIdentity).not.toHaveBeenCalled();
+  });
+
+  it("says nothing was applied instead of bouncing an unchanged card", async () => {
+    const api = await import("../lib/api");
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    const applyBtn = screen.getByTestId("settings-identity-apply");
+    fireEvent.click(applyBtn);
+    fireEvent.click(applyBtn);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-identity-ok")).toHaveTextContent(/no changes/i),
+    );
+    expect(api.updateNetworkIdentity).not.toHaveBeenCalled();
+    expect(api.putNetworkPassword).not.toHaveBeenCalled();
+  });
+
+  // ── (3) profile / avatar / peer-profiles behind a sub-page ────────────
+  it("moves profile, avatar and the peer-profiles opt-in off the general page", () => {
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    expect(screen.queryByTestId("settings-section-profile")).toBeNull();
+    expect(screen.queryByTestId("settings-section-avatar")).toBeNull();
+    expect(screen.queryByTestId("show-peer-profiles-toggle")).toBeNull();
+    expect(screen.getByTestId("profile-settings-entry")).toBeInTheDocument();
+  });
+
+  it("the profile row opens the sub-page; back returns to general, not to the index", () => {
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+
+    fireEvent.click(screen.getByTestId("profile-settings-entry"));
+    expect(screen.getByTestId("profile-subpage")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-section-profile")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-section-avatar")).toBeInTheDocument();
+    expect(screen.getByTestId("show-peer-profiles-toggle")).toBeInTheDocument();
+    // The general page is replaced while the sub-page is up.
+    expect(screen.queryByTestId("settings-section-identity")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("profile-back"));
+    expect(screen.getByTestId("general-subpage")).toBeInTheDocument();
+    expect(screen.queryByTestId("profile-subpage")).toBeNull();
+    // …and NOT the index: the row that opened it lives one level in.
+    expect(screen.queryByTestId("themes-settings-entry")).toBeNull();
+  });
+
+  it("the sub-page carries the same network scope its cards are keyed to", () => {
+    seedUser([netRow(1, "azzurra", "nick-a"), netRow(2, "libera", "nick-b")]);
+    openGeneral();
+    fireEvent.click(screen.getByTestId("profile-settings-entry"));
+
+    const group = screen.getByTestId("settings-network-scope");
+    const select = screen.getByTestId("settings-identity-network-select");
+    expect(group.contains(select)).toBe(true);
+    expect(group.contains(screen.getByTestId("settings-section-profile"))).toBe(true);
+    expect(group.contains(screen.getByTestId("settings-section-avatar"))).toBe(true);
+    // The opt-in is ACCOUNT-scoped (issue 1993 point 4 is NOT in this slice),
+    // so it must not sit inside a group that claims a network.
+    expect(group.contains(screen.getByTestId("show-peer-profiles-toggle"))).toBe(false);
+  });
+
+  it("keeps the account-scoped opt-in reachable with no networks at all", () => {
+    meHolder.current = userMe;
+    subjectHolder.current = { kind: "user", id: "u1", name: "alice" };
+    networksHolder.current = [];
+    openGeneral();
+
+    fireEvent.click(screen.getByTestId("profile-settings-entry"));
+    expect(screen.getByTestId("show-peer-profiles-toggle")).toBeInTheDocument();
+    // Nothing network-scoped to show, so no group claiming one.
+    expect(screen.queryByTestId("settings-network-scope")).toBeNull();
+  });
+
+  // ── (6) the blurbs ────────────────────────────────────────────────────
+  // A length pin would rot on the first reword; what the issue asks for is a
+  // SHAPE — one sentence per control. Counting terminators is the objective
+  // form of "one short line", and it fails the 2-3 sentence paragraphs the
+  // issue measured without freezing a single word of the replacement.
+  it.each([
+    ["general", "general-subpage", "general-settings-entry"],
+    ["profile", "profile-subpage", "profile-settings-entry"],
+  ])("every %s blurb is one sentence", (_name, pageTestId, entryTestId) => {
+    seedUser([netRow(1, "azzurra", "nick-a")]);
+    openGeneral();
+    if (entryTestId === "profile-settings-entry") {
+      fireEvent.click(screen.getByTestId(entryTestId));
+    }
+    const page = screen.getByTestId(pageTestId);
+    const blurbs = Array.from(
+      page.querySelectorAll(".settings-section-blurb, .settings-identity-hint"),
+    );
+    expect(blurbs.length).toBeGreaterThan(0);
+    for (const blurb of blurbs) {
+      const text = (blurb.textContent ?? "").trim();
+      expect(text.length).toBeGreaterThan(0);
+      const sentences = (text.match(/\./g) ?? []).length;
+      expect(sentences, `too many sentences in: ${text}`).toBeLessThanOrEqual(1);
+    }
   });
 });

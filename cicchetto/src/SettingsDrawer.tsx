@@ -307,14 +307,19 @@ const SettingsDrawer: Component<Props> = (props) => {
   const [realnameText, setRealnameText] = createSignal("");
   const [identitySaving, setIdentitySaving] = createSignal(false);
   const [identityError, setIdentityError] = createSignal<string | null>(null);
-  const [identitySaved, setIdentitySaved] = createSignal(false);
+  // issue 1993 — what the ONE apply did, as a closed set rather than a
+  // boolean: "unchanged" is a real outcome now that the button no longer
+  // bounces a card nobody edited, and a silent no-op after two taps reads as
+  // a broken button.
+  const [applyResult, setApplyResult] = createSignal<"applied" | "unchanged" | null>(null);
   // Two-tap arm for the apply button (parent owns the flag per
   // InlineConfirmButton's contract) — the reconnect is disruptive
   // (session bounces), so it arms rather than firing on the first tap. #986
   // retired the settings copies of this control for the LIFECYCLE verbs only
   // — as a per-row apply gate it is unchanged, here and at its ~20 other
-  // call sites.
-  const [identityArmed, setIdentityArmed] = createSignal(false);
+  // call sites. issue 1993 renamed it off `identity`: it now arms the
+  // password write too.
+  const [applyArmed, setApplyArmed] = createSignal(false);
 
   // KVIrc-style CTCP USERINFO profile (age/gender/location/languages/a free
   // custom field). Targets the SAME selected network the identity editor
@@ -338,16 +343,21 @@ const SettingsDrawer: Component<Props> = (props) => {
   const [avatarUploading, setAvatarUploading] = createSignal(false);
   const [avatarError, setAvatarError] = createSignal<string | null>(null);
 
-  // #124 — the per-network PASSWORD field. Its own signals and its own save,
-  // NOT folded into the identity form above: the password is write-only and
-  // leave-blank-to-keep, while the identity fields round-trip and treat a
-  // blank as "clear to default". One Save over both would make an untouched
-  // password field indistinguishable from "clear my password".
+  // #124 — the per-network PASSWORD field: write-only, leave-blank-to-keep.
+  //
+  // issue 1993 folded its SAVE into the identity apply above, reversing what
+  // #124 wrote here ("NOT folded into the identity form … one Save over both
+  // would make an untouched password field indistinguishable from 'clear my
+  // password'"). That objection is answered rather than overruled: the
+  // blank-keeps rule lives in `onApply` on the PASSWORD leg, which simply
+  // does not call the endpoint for `""`, so a blank still cannot clear
+  // anything. What made two buttons wrong is that both bounce the session,
+  // so a user changing nick AND password paid two reconnects for one
+  // intention. The signals stay separate because the two CALLS are separate
+  // (distinct endpoints, distinct failures); only the gesture merged.
   const [passwordText, setPasswordText] = createSignal("");
   const [passwordSaving, setPasswordSaving] = createSignal(false);
   const [passwordError, setPasswordError] = createSignal<string | null>(null);
-  const [passwordSaved, setPasswordSaved] = createSignal(false);
-  const [passwordArmed, setPasswordArmed] = createSignal(false);
 
   // Default the editor's target ONCE per open-session: the currently-focused
   // network (if it resolves to one of the subject's rows), else the first
@@ -377,8 +387,13 @@ const SettingsDrawer: Component<Props> = (props) => {
       setNickText(net.nick);
       setIdentText(net.ident ?? "");
       setRealnameText(net.realname ?? "");
-      setIdentityArmed(false);
-      setIdentitySaved(false);
+      // issue 1993 — a typed password belongs to the network it was typed
+      // FOR. The field now shares the identity card's target, so carrying it
+      // across a switch would write one network's secret to another.
+      setPasswordText("");
+      setPasswordError(null);
+      setApplyArmed(false);
+      setApplyResult(null);
       setIdentityError(null);
       setProfileAge(net.age ?? "");
       setProfileGender(net.gender ?? "");
@@ -448,57 +463,95 @@ const SettingsDrawer: Component<Props> = (props) => {
     }
   };
 
-  const onSaveIdentity = async () => {
-    setIdentityArmed(false);
-    setIdentityError(null);
-    setIdentitySaved(false);
+  // Whether the three identity shadows still say what the server row says.
+  // The apply skips an unchanged identity, so this is what decides whether
+  // the PATCH (and its reconnect) happens at all.
+  const identityDirty = (): boolean => {
     const net = selectedIdentityNetwork();
-    if (!net) return;
-    setIdentitySaving(true);
-    try {
-      // Send all three fields; blank ident/realname clears back to the
-      // server default (ident → nick, realname → the subject default). Empty
-      // string is a legitimate "unset" intent here — the settings editor is
-      // the canonical edit surface, so it owns the full value including
-      // clear. Nick is required (the credential can't be nickless).
-      await updateIdentity(net.slug, {
-        nick: nickText(),
-        ident: identText(),
-        realname: realnameText(),
-      });
-      setIdentitySaved(true);
-    } catch (err) {
-      setIdentityError(
-        err instanceof ApiError ? friendlyApiError(err) : "Couldn't apply identity. Try again.",
-      );
-    } finally {
-      setIdentitySaving(false);
-    }
+    if (!net) return false;
+    return (
+      nickText() !== net.nick ||
+      identText() !== (net.ident ?? "") ||
+      realnameText() !== (net.realname ?? "")
+    );
   };
 
-  const onSavePassword = async () => {
-    setPasswordArmed(false);
+  // issue 1993 — ONE apply over two endpoints. `PUT /password` and
+  // `PATCH /identity` are distinct calls (see the signals above) and BOTH
+  // live-apply by bouncing the upstream session, which is what made two
+  // buttons the wrong shape: the user's intention is "apply my changes to
+  // this network", not "reconnect once per field group".
+  //
+  // 🔴 It cannot be ONE bounce when BOTH changed, and pretending otherwise
+  // would be the lie: each endpoint reconnects server-side, so two writes
+  // are two reconnect requests back to back. What this DOES guarantee is
+  // that the merge never costs MORE than the two buttons it replaced — each
+  // leg is skipped unless it has something to write, so the single-axis
+  // cases (the common ones) are exactly one bounce, and an untouched card is
+  // zero. A genuinely single bounce needs a combined server verb; that is a
+  // server-side scope change and deliberately not in this slice.
+  //
+  // Password FIRST, and fail-fast on its refusal: a rejected secret (too
+  // short, services would refuse it) must not cost a reconnect for the half
+  // of the gesture that would have worked, leaving the operator to guess
+  // which half landed.
+  const onApply = async () => {
+    setApplyArmed(false);
+    setIdentityError(null);
     setPasswordError(null);
-    setPasswordSaved(false);
+    setApplyResult(null);
     const net = selectedIdentityNetwork();
     if (!net) return;
+
+    let applied = false;
+
     // Leave-blank-to-keep lives HERE: an empty input is "I did not touch
     // this", never "clear my password". The server 400s a blank precisely so
     // this can never be an accident.
     const pw = passwordText();
-    if (pw === "") return;
-    setPasswordSaving(true);
-    try {
-      await updateNetworkPassword(net.slug, pw);
-      setPasswordText("");
-      setPasswordSaved(true);
-    } catch (err) {
-      setPasswordError(
-        err instanceof ApiError ? friendlyApiError(err) : "Couldn't save the password. Try again.",
-      );
-    } finally {
-      setPasswordSaving(false);
+    if (pw !== "") {
+      setPasswordSaving(true);
+      try {
+        await updateNetworkPassword(net.slug, pw);
+        setPasswordText("");
+        applied = true;
+      } catch (err) {
+        setPasswordError(
+          err instanceof ApiError
+            ? friendlyApiError(err)
+            : "Couldn't save the password. Try again.",
+        );
+        return;
+      } finally {
+        setPasswordSaving(false);
+      }
     }
+
+    if (identityDirty()) {
+      setIdentitySaving(true);
+      try {
+        // Send all three fields; blank ident/realname clears back to the
+        // server default (ident → nick, realname → the subject default). Empty
+        // string is a legitimate "unset" intent here — the settings editor is
+        // the canonical edit surface, so it owns the full value including
+        // clear. Nick is required (the credential can't be nickless).
+        await updateIdentity(net.slug, {
+          nick: nickText(),
+          ident: identText(),
+          realname: realnameText(),
+        });
+        applied = true;
+      } catch (err) {
+        setIdentityError(
+          err instanceof ApiError ? friendlyApiError(err) : "Couldn't apply identity. Try again.",
+        );
+        return;
+      } finally {
+        setIdentitySaving(false);
+      }
+    }
+
+    setApplyResult(applied ? "applied" : "unchanged");
   };
 
   // The drawer stays mounted across open/close (CSS .open toggle, not a
@@ -515,9 +568,14 @@ const SettingsDrawer: Component<Props> = (props) => {
       // stale "applied"/error banner. Reset the seed latch + selected target
       // so the next open re-defaults to the (now-current) focused network and
       // re-seeds the fields from its /networks row.
-      setIdentityArmed(false);
-      setIdentitySaved(false);
+      setApplyArmed(false);
+      setApplyResult(null);
       setIdentityError(null);
+      // issue 1993 — the password rides the same apply, so it clears with
+      // the rest of the transient state: a secret typed but not applied must
+      // not sit in the DOM waiting for the next person to open the drawer.
+      setPasswordText("");
+      setPasswordError(null);
       setIdentitySeeded(false);
       setSelectedIdentitySlug(null);
       // #282 — clear a stale reconnect error so a reopened drawer that
@@ -1067,23 +1125,58 @@ const SettingsDrawer: Component<Props> = (props) => {
     return parts.join(" and ");
   };
 
-  // #460 — shared back-header for the INLINE sub-pages (general / display /
-  // push), mirroring the AliasSettings / WatchlistsSettings convention so
-  // every sub-page presents one consistent "‹ back" affordance. Local (not a
-  // component) so it stays inside the signal scope without prop threading.
-  const subpageHeader = (title: string, backTestId: string) => (
+  // #460 — shared back-header for the INLINE sub-pages (general / profile /
+  // display / push), mirroring the AliasSettings / WatchlistsSettings
+  // convention so every sub-page presents one consistent "‹ back" affordance.
+  // Local (not a component) so it stays inside the signal scope without prop
+  // threading.
+  //
+  // issue 1993 — `backTo` is an explicit parameter, not a default of "main":
+  // the profile page is entered from GENERAL, so a hard-coded "main" would
+  // drop the user two levels for one tap of back. Passed at every call site
+  // (CLAUDE.md: no defaulted arguments — a default here is exactly the silent
+  // wrong-target path).
+  const subpageHeader = (title: string, backTestId: string, backTo: SettingsSubPage) => (
     <header class="settings-subpage-header">
       <button
         type="button"
         class="settings-back"
         data-testid={backTestId}
         aria-label="back to settings"
-        onClick={() => setSettingsPage("main")}
+        onClick={() => setSettingsPage(backTo)}
       >
         ‹ back
       </button>
       <h3>{title}</h3>
     </header>
+  );
+
+  // issue 1993 — the picker that decides WHICH network the cards below are
+  // keyed to. Lifted out of the identity card (where #497 left it) so it sits
+  // at the top of the network-scoped group instead of inside one of the four
+  // things it governs. Shared by the general and profile pages: those two are
+  // mutually exclusive `<Show>` blocks, so `id="settings-identity-network"`
+  // is still unique in the DOM, and both read the SAME signal — switching on
+  // one page is already switched on the other.
+  //
+  // Still hidden on a single network (#497's ruling, unchanged: a one-option
+  // picker is noise, and the group's own heading says the scope).
+  const networkScopePicker = () => (
+    <Show when={identityNetworks().length > 1}>
+      <label for="settings-identity-network">Network</label>
+      {/* Lock the target while an apply is in flight — the save captured a
+          specific network; switching mid-reconnect would surface its result
+          banner under the wrong row. */}
+      <select
+        id="settings-identity-network"
+        data-testid="settings-identity-network-select"
+        disabled={identitySaving() || passwordSaving()}
+        value={selectedIdentityNetwork()?.slug ?? ""}
+        onChange={(e) => setSelectedIdentitySlug(e.currentTarget.value)}
+      >
+        <For each={identityNetworks()}>{(net) => <option value={net.slug}>{net.slug}</option>}</For>
+      </select>
+    </Show>
   );
 
   // issue 1982 — the scrim dismisses on the press it began, not on any click
@@ -1460,354 +1553,173 @@ const SettingsDrawer: Component<Props> = (props) => {
           <TotpSettings onBack={() => setSettingsPage("main")} />
         </Show>
 
-        {/* #460 — general sub-page: upload retention (host-gated) + visitor
-            identity (visitor-gated). Both blocks moved VERBATIM from the old
-            flat main page. */}
+        {/* #460 — general sub-page. issue 1993 reshaped it: the NETWORK-scoped
+            block (the selector, then the identity + NickServ-password card,
+            then the door to the profile page) comes FIRST as one visibly
+            grouped unit, and the ACCOUNT-scoped knobs (upload retention,
+            auto-away) follow it. Before the rework the two scopes were
+            interleaved and the selector governing half of them was buried
+            inside one of the four cards it governs. */}
         <Show when={settingsPage() === "general"}>
           <section class="settings-subpage general-subpage" data-testid="general-subpage">
-            {subpageHeader("general", "general-back")}
+            {subpageHeader("general", "general-back", "main")}
 
             {/* #476 / #478 — per-network identity editor, both subjects. It
               targets the SELECTED network row (focused-network default), with a
               picker when the subject holds more than one — the retired lowest-id
-              anchor is gone. Saving PATCHes /networks/:slug/identity which
+              anchor is gone. Applying PATCHes /networks/:slug/identity which
               live-applies via internal reconnect (the session bounces +
-              rejoins). The confirm-armed save communicates the reconnect cost;
+              rejoins). The confirm-armed apply communicates the reconnect cost;
               a 422 renders inline. Gated on hasNetworks() — you can't edit
-              identity for a network you don't hold. */}
-            {/* #335 — identity sits inside a titled .settings-section card. */}
+              identity for a network you don't hold, and an empty group would
+              claim a scope that has no members. */}
             <Show when={hasNetworks()}>
-              <div
-                class="settings-section settings-section-card"
-                data-testid="settings-section-identity"
-              >
-                <h4 class="settings-section-heading">identity</h4>
-                <div class="settings-identity" data-testid="settings-identity">
-                  {/* #497 — the network this identity edits. Shown ONLY when
-                      the subject holds more than one network: a one-option
-                      picker is noise (a single network is the common visitor
-                      case), so the whole Network row is hidden there — the
-                      nick/realname/ident fields self-evidently target the sole
-                      network. The `for` always associates with the rendered
-                      <select> now (no dangling-label a11y branch). */}
-                  <Show when={identityNetworks().length > 1}>
-                    <label for="settings-identity-network">Network</label>
-                    {/* Lock the target while an apply is in flight — the save
-                        captured a specific network; switching mid-reconnect
-                        would surface its result banner under the wrong row. */}
-                    <select
-                      id="settings-identity-network"
-                      data-testid="settings-identity-network-select"
-                      disabled={identitySaving()}
-                      value={selectedIdentityNetwork()?.slug ?? ""}
-                      onChange={(e) => setSelectedIdentitySlug(e.currentTarget.value)}
-                    >
-                      <For each={identityNetworks()}>
-                        {(net) => <option value={net.slug}>{net.slug}</option>}
-                      </For>
-                    </select>
-                  </Show>
+              <section class="settings-network-scope" data-testid="settings-network-scope">
+                {/* The heading names the SCOPE, not the network: #497 hides
+                    the picker on a single network, so on that (common) path
+                    this line is the only thing saying what the cards below
+                    are keyed to. */}
+                <h4 class="settings-section-heading">per-network</h4>
+                {networkScopePicker()}
 
-                  <label for="settings-nick">Nick</label>
-                  <input
-                    id="settings-nick"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={nickText()}
-                    onInput={(e) => setNickText(e.currentTarget.value)}
-                  />
+                {/* #335 — identity sits inside a titled .settings-section card. */}
+                <div
+                  class="settings-section settings-section-card"
+                  data-testid="settings-section-identity"
+                >
+                  <h4 class="settings-section-heading">identity</h4>
+                  <div class="settings-identity" data-testid="settings-identity">
+                    <label for="settings-nick">Nick</label>
+                    <input
+                      id="settings-nick"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={nickText()}
+                      onInput={(e) => setNickText(e.currentTarget.value)}
+                    />
 
-                  <label for="settings-realname">Real name</label>
-                  <input
-                    id="settings-realname"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={realnameText()}
-                    onInput={(e) => setRealnameText(e.currentTarget.value)}
-                  />
+                    <label for="settings-realname">Real name</label>
+                    <input
+                      id="settings-realname"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={realnameText()}
+                      onInput={(e) => setRealnameText(e.currentTarget.value)}
+                    />
 
-                  <label for="settings-ident">Ident</label>
-                  <input
-                    id="settings-ident"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={identText()}
-                    onInput={(e) => setIdentText(e.currentTarget.value)}
-                  />
-                  <p class="settings-identity-hint">
-                    Applying reconnects your session — you'll briefly drop and rejoin your channels.
-                  </p>
+                    <label for="settings-ident">Ident</label>
+                    <input
+                      id="settings-ident"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={identText()}
+                      onInput={(e) => setIdentText(e.currentTarget.value)}
+                    />
 
-                  <InlineConfirmButton
-                    idleLabel={identitySaving() ? "applying…" : "apply identity"}
-                    confirmLabel="apply — this reconnects"
-                    testId="settings-identity-apply"
-                    armed={identityArmed()}
-                    onArm={() => setIdentityArmed(true)}
-                    onConfirm={() => {
-                      void onSaveIdentity();
-                    }}
-                  />
-
-                  <Show when={identityError()}>
-                    {(msg) => (
-                      <p
-                        role="alert"
-                        class="settings-identity-error"
-                        data-testid="settings-identity-error"
-                      >
-                        {msg()}
-                      </p>
-                    )}
-                  </Show>
-                  <Show when={identitySaved()}>
-                    <p class="settings-identity-ok" data-testid="settings-identity-ok">
-                      Identity applied.
+                    {/* #124 — THE one place this secret is editable: it is the
+                      credential password, the value `$nickserv_pass` expands
+                      to, and for a visitor the credential you log into grappa
+                      with. issue 1993 moved it INTO this card and renamed it:
+                      "Network password" reads as the server PASS (#1044's
+                      distinct secret, which has its own door), and what this
+                      writes is what identifies you to NickServ. */}
+                    <label for="settings-network-password">NickServ password</label>
+                    <input
+                      id="settings-network-password"
+                      type="password"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      placeholder="leave blank to keep"
+                      value={passwordText()}
+                      data-testid="settings-network-password-input"
+                      onInput={(e) => {
+                        setPasswordText(e.currentTarget.value);
+                        setApplyResult(null);
+                      }}
+                    />
+                    <p class="settings-identity-hint">
+                      A blank password keeps the stored one, and applying reconnects your session.
                     </p>
-                  </Show>
+
+                    <InlineConfirmButton
+                      idleLabel={identitySaving() || passwordSaving() ? "applying…" : "apply"}
+                      confirmLabel="apply — this reconnects"
+                      testId="settings-identity-apply"
+                      armed={applyArmed()}
+                      onArm={() => setApplyArmed(true)}
+                      onConfirm={() => {
+                        void onApply();
+                      }}
+                    />
+
+                    {/* Two calls, two failures: which door refused is the
+                        first thing the operator needs, so the banners stay
+                        separate even though the gesture merged. */}
+                    <Show when={passwordError()}>
+                      {(msg) => (
+                        <p
+                          role="alert"
+                          class="settings-identity-error"
+                          data-testid="settings-password-error"
+                        >
+                          {msg()}
+                        </p>
+                      )}
+                    </Show>
+                    <Show when={identityError()}>
+                      {(msg) => (
+                        <p
+                          role="alert"
+                          class="settings-identity-error"
+                          data-testid="settings-identity-error"
+                        >
+                          {msg()}
+                        </p>
+                      )}
+                    </Show>
+                    <Show when={applyResult()}>
+                      {(result) => (
+                        <p class="settings-identity-ok" data-testid="settings-identity-ok">
+                          {result() === "applied" ? "Applied." : "No changes to apply."}
+                        </p>
+                      )}
+                    </Show>
+                  </div>
                 </div>
-              </div>
-
-              {/* KVIrc-style CTCP USERINFO profile (age/gender/location/
-                languages/a free custom field), per network — targets the
-                same selected network the identity card above does. Unlike
-                identity, saving does NOT reconnect: these fields never ride
-                the IRC handshake, they only feed the server's CTCP
-                USERINFO auto-reply — so a plain save, no two-tap confirm. */}
-              <div
-                class="settings-section settings-section-card"
-                data-testid="settings-section-profile"
-              >
-                <h4 class="settings-section-heading">profile</h4>
-                <div class="settings-identity" data-testid="settings-profile">
-                  <label for="settings-profile-age">Age</label>
-                  <input
-                    id="settings-profile-age"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={profileAge()}
-                    onInput={(e) => setProfileAge(e.currentTarget.value)}
-                  />
-
-                  <label for="settings-profile-gender">Gender</label>
-                  <select
-                    id="settings-profile-gender"
-                    data-testid="settings-profile-gender"
-                    value={profileGender()}
-                    onChange={(e) => setProfileGender(e.currentTarget.value)}
-                  >
-                    <option value="">unset</option>
-                    <option value="male">male</option>
-                    <option value="female">female</option>
-                    <option value="nonbinary">non-binary</option>
-                  </select>
-
-                  <label for="settings-profile-location">Location</label>
-                  <input
-                    id="settings-profile-location"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={profileLocation()}
-                    onInput={(e) => setProfileLocation(e.currentTarget.value)}
-                  />
-
-                  <label for="settings-profile-languages">Languages</label>
-                  <input
-                    id="settings-profile-languages"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={profileLanguages()}
-                    onInput={(e) => setProfileLanguages(e.currentTarget.value)}
-                  />
-
-                  <label for="settings-profile-custom">Custom</label>
-                  <input
-                    id="settings-profile-custom"
-                    type="text"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    value={profileCustom()}
-                    onInput={(e) => setProfileCustom(e.currentTarget.value)}
-                  />
-                  <p class="settings-identity-hint">
-                    Shown to anyone who sends you a CTCP USERINFO query. Leave a field blank to
-                    clear it.
-                  </p>
-
-                  <button
-                    type="button"
-                    class="settings-identity-apply"
-                    data-testid="settings-profile-apply"
-                    disabled={profileSaving()}
-                    onClick={() => void onSaveProfile()}
-                  >
-                    {profileSaving() ? "saving…" : "save profile"}
-                  </button>
-
-                  <Show when={profileError()}>
-                    {(msg) => (
-                      <p
-                        role="alert"
-                        class="settings-identity-error"
-                        data-testid="settings-profile-error"
-                      >
-                        {msg()}
-                      </p>
-                    )}
-                  </Show>
-                  <Show when={profileSaved()}>
-                    <p class="settings-identity-ok" data-testid="settings-profile-ok">
-                      Profile saved.
-                    </p>
-                  </Show>
-                </div>
-              </div>
-
-              {/* M3a — the own avatar, per network. A permanent, self-hosted
-                upload (same `Grappa.Uploads` pipeline as any other embedded
-                upload, just `expires_at: nil`), served over CTCP AVATAR to
-                whoever asks and — once M3b lands — rendered in peers' WHOIS
-                cards. Never bounces the connection, like /profile above. */}
-              <div
-                class="settings-section settings-section-card"
-                data-testid="settings-section-avatar"
-              >
-                <h4 class="settings-section-heading">avatar</h4>
-                <div class="settings-identity" data-testid="settings-avatar">
-                  <Show when={selectedIdentityNetwork()?.avatar_url}>
-                    {(url) => (
-                      <img
-                        src={url()}
-                        alt="Current avatar"
-                        class="settings-avatar-preview"
-                        width={64}
-                        height={64}
-                      />
-                    )}
-                  </Show>
-
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/gif,image/webp"
-                    data-testid="settings-avatar-file"
-                    disabled={avatarUploading()}
-                    onChange={(e) => {
-                      const file = e.currentTarget.files?.[0];
-                      e.currentTarget.value = "";
-                      if (file) void onUploadAvatar(file);
-                    }}
-                  />
-                  <p class="settings-identity-hint">
-                    Shown to anyone who sends you a CTCP AVATAR query.
-                  </p>
-
-                  <Show when={selectedIdentityNetwork()?.avatar_url}>
-                    <button
-                      type="button"
-                      class="settings-identity-apply"
-                      data-testid="settings-avatar-remove"
-                      disabled={avatarUploading()}
-                      onClick={() => void onDeleteAvatar()}
-                    >
-                      remove avatar
-                    </button>
-                  </Show>
-
-                  <Show when={avatarUploading()}>
-                    <p class="settings-identity-hint" data-testid="settings-avatar-uploading">
-                      uploading…
-                    </p>
-                  </Show>
-                  <Show when={avatarError()}>
-                    {(msg) => (
-                      <p
-                        role="alert"
-                        class="settings-identity-error"
-                        data-testid="settings-avatar-error"
-                      >
-                        {msg()}
-                      </p>
-                    )}
-                  </Show>
-                </div>
-              </div>
-
-              {/* #124 — the per-network password. THE one place this secret is
-                editable: it is the credential password, the value
-                `$nickserv_pass` expands to, and for a visitor the credential
-                you log into grappa with. The perform editor's rival field is
-                gone — two editable homes for one secret was the split brain
-                this cures. Targets the same network the identity card above
-                does, so the picker there governs both. */}
-              <div
-                class="settings-section settings-section-card"
-                data-testid="settings-section-password"
-              >
-                <h4 class="settings-section-heading">password</h4>
-                <div class="settings-identity" data-testid="settings-password">
-                  <label for="settings-network-password">Network password</label>
-                  <input
-                    id="settings-network-password"
-                    type="password"
-                    autocapitalize="none"
-                    autocorrect="off"
-                    spellcheck={false}
-                    placeholder="type a new password (leave blank to keep)"
-                    value={passwordText()}
-                    data-testid="settings-network-password-input"
-                    onInput={(e) => {
-                      setPasswordText(e.currentTarget.value);
-                      setPasswordSaved(false);
-                    }}
-                  />
-                  <p class="settings-identity-hint">
-                    Your NickServ password for this network. Saving reconnects your session so it
-                    can identify with the new value — you'll briefly drop and rejoin your channels.
-                  </p>
-
-                  <InlineConfirmButton
-                    idleLabel={passwordSaving() ? "saving…" : "save password"}
-                    confirmLabel="save — this reconnects"
-                    testId="settings-password-apply"
-                    armed={passwordArmed()}
-                    onArm={() => setPasswordArmed(true)}
-                    onConfirm={() => {
-                      void onSavePassword();
-                    }}
-                  />
-
-                  <Show when={passwordError()}>
-                    {(msg) => (
-                      <p
-                        role="alert"
-                        class="settings-identity-error"
-                        data-testid="settings-password-error"
-                      >
-                        {msg()}
-                      </p>
-                    )}
-                  </Show>
-                  <Show when={passwordSaved()}>
-                    <p class="settings-identity-ok" data-testid="settings-password-ok">
-                      Password saved.
-                    </p>
-                  </Show>
-                </div>
-              </div>
+              </section>
             </Show>
+
+            {/* issue 1993 — profile, avatar and the peer-profiles opt-in are
+                many fields for something set once, so they moved behind this
+                row into their own sub-page (the drawer's existing sub-page
+                mechanism, not a new disclosure idiom). UNGATED on networks,
+                and OUTSIDE the group above, because the page it opens also
+                carries the ACCOUNT-scoped opt-in: gating the door on a
+                network would strand that control for a subject holding
+                none. */}
+            <button
+              type="button"
+              class="settings-nav-row"
+              data-testid="profile-settings-entry"
+              onClick={() => setSettingsPage("profile")}
+            >
+              <span class="settings-nav-row-text">
+                <span class="settings-nav-row-label">profile</span>
+                <span class="settings-nav-row-subtitle">
+                  your CTCP USERINFO fields and avatar, and whether to ask other people for theirs
+                </span>
+              </span>
+              <span class="settings-nav-row-chevron" aria-hidden="true">
+                ›
+              </span>
+            </button>
 
             {/* #497 — upload retention moved BELOW identity: identity is what a
               user looks for; upload duration is a rarely-touched knob.
@@ -1843,15 +1755,18 @@ const SettingsDrawer: Component<Props> = (props) => {
                   </select>
                 </label>
                 {/* #462 — the select alone answers none of the three questions
-                    it raises. The third one is the load-bearing one: the TTL is
-                    read at UPLOAD time (uploadOrchestrator picks the host token
-                    when it posts the file), so this is not a retention setting
-                    over a library — it applies to the next upload and cannot
-                    reach back to the last one. */}
+                    it raises, and the third is load-bearing: the TTL is read at
+                    UPLOAD time (uploadOrchestrator picks the host token when it
+                    posts the file), so this is not a retention setting over a
+                    library — it applies to the next upload and cannot reach
+                    back to the last one. issue 1993 cut the paragraph to one
+                    line; all three facts survive the cut, which is the point —
+                    the copy pass was about LENGTH, not about dropping what
+                    #462 measured a user cannot guess. */}
                 <p class="settings-section-blurb" data-testid="upload-ttl-hint">
-                  The image host deletes an upload when its time is up. This is your own preference
-                  over the site default, and it applies to uploads you make from now on — files you
-                  have already uploaded keep the duration they were sent with.
+                  Your preference over the site default: the host deletes each new upload when its
+                  time is up, and files you have already uploaded keep the duration they were sent
+                  with.
                 </p>
                 <Show when={uploadTtlSavingError() !== null}>
                   <p class="upload-ttl-error" role="alert" data-testid="upload-ttl-error">
@@ -1882,8 +1797,8 @@ const SettingsDrawer: Component<Props> = (props) => {
                     this is a setting is that the confirm was friction for the
                     operators who did not want it. */}
                 <p class="settings-section-blurb" data-testid="upload-confirm-hint">
-                  Off by default. When on, every file you pick, drop, paste or share to Grappa shows
-                  a preview and waits for you to confirm before it is uploaded and its link posted.
+                  Off by default; when on, every file you pick, drop, paste or share to Grappa waits
+                  for you to confirm before it is uploaded and its link posted.
                 </p>
                 <Show when={uploadConfirmSavingError() !== null}>
                   <p class="upload-ttl-error" role="alert" data-testid="upload-confirm-error">
@@ -1914,7 +1829,12 @@ const SettingsDrawer: Component<Props> = (props) => {
                   fieldsets up: the <label> stays as the row's flex box, the
                   name moves onto the control. NOT the <legend> instead — a
                   legend names the GROUP, and a screen reader landing on the
-                  select would still be told nothing. */}
+                  select would still be told nothing.
+
+                  issue 1993 (5) — that leftover <label> is a flex ROW, so the
+                  select inside it was sized by its own option text. The width
+                  rule lives in the sheet, on the class both bare-label
+                  fieldsets share; the markup here is unchanged. */}
               <label>
                 <select
                   aria-label="auto-away delay"
@@ -1954,9 +1874,8 @@ const SettingsDrawer: Component<Props> = (props) => {
                 </label>
               </Show>
               <p class="settings-section-blurb" data-testid="auto-away-hint">
-                When every device of yours is closed or in the background, the bouncer waits this
-                long and then tells the network you are away. It stays connected either way — this
-                only changes what other people see. Pick "never" to keep the away flag off entirely.
+                How long after your last device closes before the bouncer tells the network you are
+                away — it stays connected either way, and "never" keeps the flag off entirely.
               </p>
               <Show when={autoAwaySavingError() !== null}>
                 <p class="auto-away-error" role="alert" data-testid="auto-away-error">
@@ -1964,11 +1883,202 @@ const SettingsDrawer: Component<Props> = (props) => {
                 </p>
               </Show>
             </fieldset>
+          </section>
+        </Show>
+
+        {/* issue 1993 — profile sub-page, entered from the general page (its
+            back button returns THERE, not to the index). Two scopes on one
+            page, kept visibly apart: the CTCP USERINFO fields + the avatar are
+            per-network and sit under the same picker the identity card uses,
+            while the peer-profiles opt-in is account-wide and sits outside the
+            group. The issue floats making that opt-in network-scoped too;
+            that is a server-side change and deliberately NOT in this slice, so
+            the layout states today's truth rather than anticipating it. */}
+        <Show when={settingsPage() === "profile"}>
+          <section class="settings-subpage profile-subpage" data-testid="profile-subpage">
+            {subpageHeader("profile", "profile-back", "general")}
+
+            <Show when={hasNetworks()}>
+              <section class="settings-network-scope" data-testid="settings-network-scope">
+                <h4 class="settings-section-heading">per-network</h4>
+                {networkScopePicker()}
+
+                {/* KVIrc-style CTCP USERINFO profile (age/gender/location/
+                  languages/a free custom field), per network — targets the
+                  same selected network the identity card does. Unlike
+                  identity, saving does NOT reconnect: these fields never ride
+                  the IRC handshake, they only feed the server's CTCP
+                  USERINFO auto-reply — so a plain save, no two-tap confirm,
+                  and no reason to share the identity card's apply. */}
+                <div
+                  class="settings-section settings-section-card"
+                  data-testid="settings-section-profile"
+                >
+                  <h4 class="settings-section-heading">profile</h4>
+                  <div class="settings-identity" data-testid="settings-profile">
+                    <label for="settings-profile-age">Age</label>
+                    <input
+                      id="settings-profile-age"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={profileAge()}
+                      onInput={(e) => setProfileAge(e.currentTarget.value)}
+                    />
+
+                    <label for="settings-profile-gender">Gender</label>
+                    <select
+                      id="settings-profile-gender"
+                      data-testid="settings-profile-gender"
+                      value={profileGender()}
+                      onChange={(e) => setProfileGender(e.currentTarget.value)}
+                    >
+                      <option value="">unset</option>
+                      <option value="male">male</option>
+                      <option value="female">female</option>
+                      <option value="nonbinary">non-binary</option>
+                    </select>
+
+                    <label for="settings-profile-location">Location</label>
+                    <input
+                      id="settings-profile-location"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={profileLocation()}
+                      onInput={(e) => setProfileLocation(e.currentTarget.value)}
+                    />
+
+                    <label for="settings-profile-languages">Languages</label>
+                    <input
+                      id="settings-profile-languages"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={profileLanguages()}
+                      onInput={(e) => setProfileLanguages(e.currentTarget.value)}
+                    />
+
+                    <label for="settings-profile-custom">Custom</label>
+                    <input
+                      id="settings-profile-custom"
+                      type="text"
+                      autocapitalize="none"
+                      autocorrect="off"
+                      spellcheck={false}
+                      value={profileCustom()}
+                      onInput={(e) => setProfileCustom(e.currentTarget.value)}
+                    />
+                    <p class="settings-identity-hint">
+                      Answered to a CTCP USERINFO query, and a blank field clears it.
+                    </p>
+
+                    <button
+                      type="button"
+                      class="settings-identity-apply"
+                      data-testid="settings-profile-apply"
+                      disabled={profileSaving()}
+                      onClick={() => void onSaveProfile()}
+                    >
+                      {profileSaving() ? "saving…" : "save profile"}
+                    </button>
+
+                    <Show when={profileError()}>
+                      {(msg) => (
+                        <p
+                          role="alert"
+                          class="settings-identity-error"
+                          data-testid="settings-profile-error"
+                        >
+                          {msg()}
+                        </p>
+                      )}
+                    </Show>
+                    <Show when={profileSaved()}>
+                      <p class="settings-identity-ok" data-testid="settings-profile-ok">
+                        Profile saved.
+                      </p>
+                    </Show>
+                  </div>
+                </div>
+
+                {/* M3a — the own avatar, per network. A permanent, self-hosted
+                  upload (same `Grappa.Uploads` pipeline as any other embedded
+                  upload, just `expires_at: nil`), served over CTCP AVATAR to
+                  whoever asks and rendered in peers' WHOIS cards. Never
+                  bounces the connection, like /profile above. */}
+                <div
+                  class="settings-section settings-section-card"
+                  data-testid="settings-section-avatar"
+                >
+                  <h4 class="settings-section-heading">avatar</h4>
+                  <div class="settings-identity" data-testid="settings-avatar">
+                    <Show when={selectedIdentityNetwork()?.avatar_url}>
+                      {(url) => (
+                        <img
+                          src={url()}
+                          alt="Current avatar"
+                          class="settings-avatar-preview"
+                          width={64}
+                          height={64}
+                        />
+                      )}
+                    </Show>
+
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/gif,image/webp"
+                      data-testid="settings-avatar-file"
+                      disabled={avatarUploading()}
+                      onChange={(e) => {
+                        const file = e.currentTarget.files?.[0];
+                        e.currentTarget.value = "";
+                        if (file) void onUploadAvatar(file);
+                      }}
+                    />
+                    <p class="settings-identity-hint">Answered to a CTCP AVATAR query.</p>
+
+                    <Show when={selectedIdentityNetwork()?.avatar_url}>
+                      <button
+                        type="button"
+                        class="settings-identity-apply"
+                        data-testid="settings-avatar-remove"
+                        disabled={avatarUploading()}
+                        onClick={() => void onDeleteAvatar()}
+                      >
+                        remove avatar
+                      </button>
+                    </Show>
+
+                    <Show when={avatarUploading()}>
+                      <p class="settings-identity-hint" data-testid="settings-avatar-uploading">
+                        uploading…
+                      </p>
+                    </Show>
+                    <Show when={avatarError()}>
+                      {(msg) => (
+                        <p
+                          role="alert"
+                          class="settings-identity-error"
+                          data-testid="settings-avatar-error"
+                        >
+                          {msg()}
+                        </p>
+                      )}
+                    </Show>
+                  </div>
+                </div>
+              </section>
+            </Show>
 
             {/* M2 — opt-in to grappa querying other people's CTCP USERINFO
                 profile (the member-list gender badge's source). Off by
                 default: nobody gets an outbound CTCP query from this
-                bouncer just for existing in a shared channel. */}
+                bouncer just for existing in a shared channel. ACCOUNT-wide,
+                so it sits outside the per-network group above. */}
             <fieldset class="show-peer-profiles-fieldset">
               <legend>peer profiles</legend>
               <label>
@@ -1983,10 +2093,8 @@ const SettingsDrawer: Component<Props> = (props) => {
                 show other people's profile info (gender badge)
               </label>
               <p class="settings-section-blurb" data-testid="show-peer-profiles-hint">
-                When on, grappa asks other users' clients for their public CTCP USERINFO profile the
-                first time you see them in a channel, and shows a gender badge next to their name
-                when they answer. This sends a small extra message to each new person you meet — off
-                by default.
+                Off by default; when on, grappa asks each new person's client for their public
+                profile and shows a gender badge when they answer.
               </p>
               <Show when={showPeerProfilesSavingError() !== null}>
                 <p
@@ -2005,7 +2113,7 @@ const SettingsDrawer: Component<Props> = (props) => {
             colored-nicklist toggle (#443 section moved VERBATIM). */}
         <Show when={settingsPage() === "display"}>
           <section class="settings-subpage display-subpage" data-testid="display-subpage">
-            {subpageHeader("display", "display-back")}
+            {subpageHeader("display", "display-back", "main")}
 
             {/* #299 — the legacy auto/mirc-light/irssi-dark radio selector was
                 removed. It is superseded by the #75 theme gallery (a themes
@@ -2189,7 +2297,7 @@ const SettingsDrawer: Component<Props> = (props) => {
             prefs + device list). Moved VERBATIM from the old flat main page. */}
         <Show when={settingsPage() === "push"}>
           <section class="settings-subpage push-subpage" data-testid="push-subpage">
-            {subpageHeader("notifications", "push-back")}
+            {subpageHeader("notifications", "push-back", "main")}
 
             <fieldset class="notifications-fieldset">
               <legend>notifications</legend>

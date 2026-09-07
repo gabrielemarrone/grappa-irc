@@ -54,7 +54,9 @@ const VhostSettingsPage: Component<Props> = (props) => {
   // #282 — local two-tap arm for the Reconnect footer button. The sub-page
   // unmounts on ‹ back (it's a `<Show>` branch in SettingsDrawer), so this
   // ephemeral flag auto-resets on leave — no drawer-side disarm needed
-  // (unlike the always-mounted `quitArmed`/`identityArmed`).
+  // (unlike the always-mounted `applyArmed` in SettingsDrawer, which the
+  // drawer's close effect has to disarm by hand; `quitArmed` left with the
+  // lifecycle verbs in #986).
   const [reconnectArmed, setReconnectArmed] = createSignal(false);
   const customizeOn = (): boolean => {
     const o = override();

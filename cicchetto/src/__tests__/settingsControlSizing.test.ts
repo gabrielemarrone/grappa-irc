@@ -100,6 +100,22 @@ describe("#462 — every remaining drawer control clears the tap floor", () => {
   });
 });
 
+// issue 1993 (5) — `.settings-drawer label` is a flex ROW, so a <select> that
+// is the label's whole content is a flex item sized by its own text: the
+// auto-away picker rendered at option width inside a full-width fieldset.
+// Neither `.auto-away-fieldset` nor `.upload-ttl-fieldset` had a rule at all.
+// The guard is on the CLASS — a bare-label wrapper is the #1227/#1766 shape
+// (the visible text was dropped, the label stayed as the box), and BOTH
+// fieldsets that wear it are covered by one rule. The notifications mute
+// picker is deliberately NOT in it: its label still carries visible text that
+// shares the row.
+describe("issue 1993 — a select alone in its label fills the row", () => {
+  it("stretches the bare-label pickers instead of leaving them at content width", () => {
+    const body = ruleBody(":where(.upload-ttl-fieldset, .auto-away-fieldset) > label > select");
+    expect(body).toMatch(/width:\s*100%/);
+  });
+});
+
 describe("#462 — the identity editor has a layout", () => {
   it("stacks the label/field pairs", () => {
     const body = ruleBody(".settings-identity");

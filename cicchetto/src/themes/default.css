@@ -10217,6 +10217,32 @@ button.topic-bar-windows-opener {
   width: 100%;
 }
 
+/* issue 1993 — the NETWORK-scoped block of the general + profile sub-pages.
+ * The cards inside are keyed to whatever the picker at its top selects, and
+ * before this the only thing saying so was the picker's own position INSIDE
+ * one of them. A left rule + inset is the lightest thing that reads as "these
+ * belong together and to that selector": the cards keep their own borders, so
+ * a second box around them would be chrome on chrome. */
+.settings-network-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--border);
+}
+
+/* issue 1993 (5) — `.settings-drawer label` is a flex ROW, so a <select> that
+ * is its label's whole content is a flex item at its own content width: the
+ * auto-away picker rendered at option width inside a full-width fieldset, and
+ * neither fieldset had a rule at all. On the CLASS, not the instance — the
+ * bare-label wrapper is the #1227/#1766 shape (visible text dropped, label
+ * kept as the box) and both fieldsets wearing it want the same answer. The
+ * notifications mute picker is deliberately excluded: its label still carries
+ * visible text sharing the row, so stretching the select would squeeze it. */
+:where(.upload-ttl-fieldset, .auto-away-fieldset) > label > select {
+  width: 100%;
+}
+
 .settings-subpage {
   display: flex;
   flex-direction: column;

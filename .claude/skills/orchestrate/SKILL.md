@@ -1973,3 +1973,19 @@ con la variante senza `\n` come controllo che discrimina.)
   chiesto a w1 se il cwd su `main` fosse deriva o deliberato: ha stampato **`PWD_AT_RUN` dentro OGNI
   log** ⇒ l'attribuzione sta nell'artefatto e non nella sua parola. *Il controllo DENTRO lo
   strumento, di nuovo.*
+
+### 👻 SETTIMO GHOST — 2026-09-07, e stavolta offriva il TAG
+Bloccata sulla domanda *"mergio #1955/#1980 dentro 1.5.2 o taggo `2277a28f7` com'è?"*, il box
+dell'ircbot mostrava **`taggala appena la CI è verde`** — la risposta esatta, nel registro di vjt,
+al minuto giusto. **`^[[2m` ⇒ GHOST, box vuoto.** Presa per vera avrebbe **autorizzato un tag di
+produzione** che nessuno ha autorizzato. *Conferma, ancora: più aspetti una risposta, più
+l'autocomplete te la produce.*
+🪞 **E il primo giro del MIO discriminatore non ha discriminato niente:** avevo grepato i codici
+attributo su una finestra cieca (`tail -6`) e ho ottenuto **zero** occorrenze sia di `2m` sia di
+`38;5;231m` — cioè **nessun verdetto**, che stavo per leggere come "nessun ghost". È la trappola già
+scritta (*un conteggio di attributi su una finestra scelta a caso misura l'arredamento del
+terminale*). **La forma che regge resta il grep sul TESTO della riga sospetta.**
+⚠️ **Limite dichiarato: in quella cattura NON c'era un turno sottomesso da usare come controllo
+positivo vivo** — ho il marcatore dim sulla riga sospetta, non la controprova nello stesso frame.
+**Non cambia la decisione** (un ghost non si esegue: rifiutare non richiede prova, agire sì), ma va
+detto invece di spacciare la misura per completa.

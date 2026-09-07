@@ -48,9 +48,13 @@ defmodule Grappa.Repo.LockWatchReportTest do
 
     await_roles(holder, waiter)
 
-    log = capture_log(fn -> LockWatch.scan(0) end)
+    log = capture_log(fn -> LockWatch.scan(%{}, 0) end)
 
-    assert log =~ "db lock stall: holder #{inspect(holder)}"
+    # issue 1960 — the prefix is now one literal for one phenomenon and the
+    # verdict rides an `attribution=` field. Pinning both is strictly more than
+    # the old `"db lock stall: holder …"`: a mutant that keeps the prose but
+    # mislabels the verdict now dies here too.
+    assert log =~ "db lock stall: attribution=named, holder #{inspect(holder)}"
 
     # A mutant that drops the field — i.e. the message as it stood before
     # #1420b — dies here and nowhere else. The value is `:waiting` and not
@@ -60,15 +64,50 @@ defmodule Grappa.Repo.LockWatchReportTest do
     assert log =~ "status=:waiting"
   end
 
-  test "the UNATTRIBUTED warning refuses to name a holder, and says which kind of silence it is" do
+  # 🔴 issue 1960, defect 1 — the five prod episodes of 2026-09-06 that closed
+  # with `NEVER announced while it held`. `report_stalls(_, [])` returned `:ok`
+  # for a holder past the threshold whenever no WAITER was registered, and the
+  # watch table has one producer (`Repo.immediate_transaction/1`), so every
+  # autocommit writer queued behind that holder is invisible to the gate. The
+  # instrument had the pid and the stack in hand and printed nothing until
+  # release — i.e. exactly when the operator no longer needs it.
+  #
+  # The closing bracket already reports on the hold ALONE (#1888:
+  # `close_episode/1` fires on `announced or past_threshold?`, with no waiter
+  # conjunct). The opening line requiring a queue was the asymmetry, and one
+  # threshold policy is what removes it.
+  test "a holder past the threshold is announced WHILE it holds, with no waiter registered at the seam" do
+    holder = start_role(:holder)
+
+    await_holder_only(holder)
+
+    log = capture_log(fn -> LockWatch.scan(%{}, 0) end)
+
+    assert log =~ "db lock stall: attribution=named"
+    assert log =~ "holder #{inspect(holder)}"
+    assert log =~ "has held RESERVED"
+
+    # The honesty half, and it is what keeps the cure from being "print
+    # something". Nothing was queued at the seam and nothing was parked in the
+    # NIF, so the line must SAY zero rather than imply a queue it never
+    # measured — a mutant that hardcodes the old "with N waiter(s) queued"
+    # prose against an empty queue dies here.
+    assert log =~ "1 holder(s) / 0 waiter(s) registered at the seam"
+    assert log =~ "0 process(es) parked inside Exqlite.Sqlite3NIF"
+  end
+
+  test "the unattributed verdict refuses to name a holder, and says which kind of silence it is" do
     waiter = start_role(:waiter)
 
     await_queue_only(waiter)
 
-    log = capture_log(fn -> LockWatch.scan(0) end)
+    log = capture_log(fn -> LockWatch.scan(%{}, 0) end)
 
-    # #1687 — in prod this was the empty string for ~170 seconds.
-    assert log =~ "db lock stall UNATTRIBUTED: 1 writer(s) queued past the threshold"
+    # #1687 — in prod this was the empty string for ~170 seconds. issue 1960
+    # moved the count out of the headline and into the seam clause every
+    # verdict carries, so both halves are pinned: the verdict AND the number.
+    assert log =~ "db lock stall: attribution=none, longest writer queued at the seam for"
+    assert log =~ "0 holder(s) / 1 waiter(s) registered at the seam"
     assert log =~ "no holder registered"
 
     # 🔴 The load-bearing negative. The issue's own wording ("holder
@@ -82,8 +121,10 @@ defmodule Grappa.Repo.LockWatchReportTest do
 
     # What it CAN vouch for: which waiter, and where it is parked — the one
     # field that separates "blocked on the lock" from "queued for a
-    # connection" without guessing between them.
-    assert log =~ "longest waiter #{inspect(waiter)}"
+    # connection" without guessing between them. The role that used to be in
+    # the words `longest waiter` is now the `attribution=none` asserted above,
+    # so the pair says what the single literal said.
+    assert log =~ "subject #{inspect(waiter)}"
     assert log =~ "status=:waiting"
   end
 
@@ -106,7 +147,7 @@ defmodule Grappa.Repo.LockWatchReportTest do
     # between the reading and the scan on the next line.
     {holder_ms, waiter_ms} = await_gap(holder, waiter, 100)
 
-    log = capture_log(fn -> LockWatch.scan(holder_ms + 50) end)
+    log = capture_log(fn -> LockWatch.scan(%{}, holder_ms + 50) end)
 
     assert waiter_ms > holder_ms + 100
 
@@ -115,7 +156,7 @@ defmodule Grappa.Repo.LockWatchReportTest do
     # described, cannot tell an operator whether the seam is working. These
     # two sub-cases call for opposite next moves: widen coverage, versus
     # nothing at all because the queue is simply older than the holder.
-    assert log =~ "db lock stall UNATTRIBUTED"
+    assert log =~ "db lock stall: attribution=none"
     assert log =~ "1 holder(s) registered, none past the threshold"
     refute log =~ "no holder registered"
   end
@@ -152,6 +193,26 @@ defmodule Grappa.Repo.LockWatchReportTest do
   defp park do
     receive do
       :never -> :ok
+    end
+  end
+
+  # issue 1960 — the mirror of `await_queue_only/1`: a holder with NOTHING
+  # queued behind it. Same discipline; the `send` proves the process reached
+  # `observe/1`, not that its ETS row has been promoted to `:holding` yet.
+  defp await_holder_only(holder), do: await_holder_only(holder, 300)
+
+  defp await_holder_only(holder, 0) do
+    flunk("holder never settled: #{inspect(LockWatch.inspect_lock())} (#{inspect(holder)})")
+  end
+
+  defp await_holder_only(holder, attempts) do
+    %{holders: holders, waiters: waiters} = LockWatch.inspect_lock()
+
+    if waiters == [] and Enum.map(holders, & &1.pid) == [inspect(holder)] do
+      :ok
+    else
+      Process.sleep(10)
+      await_holder_only(holder, attempts - 1)
     end
   end
 

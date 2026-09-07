@@ -66,7 +66,9 @@
 #   * known answer — each sample raises its OWN counter exactly once, and
 #     no other (so a pattern that swallows a sibling's line is caught:
 #     `db lock stall` matches the RESOLVED line too, which is the exact
-#     trap these three counters walked into).
+#     trap these counters walked into — and since issue 1960 folded the
+#     three opening arms onto ONE prefix, it is the whole reason they key
+#     on `attribution=` and not on the prefix).
 #   * invented line — a line no signature describes raises nothing.
 #   * complete set — every registered signature reaches the SUMMARY line
 #     with its known answer, and the SUMMARY declares no `key=` field that
@@ -117,23 +119,20 @@ function count_signatures(line) {
     # control below is what proves the guard lets them through.
     if (index(line, "lock") > 0) {
         if (line ~ /write lock held by another writer/) CNT["lockheld"]++
-        if (line ~ /db lock stall: holder /) CNT["lockstall"]++
+        # 🔴 issue 1960 — the three opening arms became ONE prefix carrying an
+        # `attribution=` field, so the INPUT of these three counters moved from
+        # three literals to one literal plus a value. The OUTPUT contract does
+        # NOT move: the #1429 census reads `lockstall`, `lockstall_unattributed`
+        # and `lockstall_nif` off the summary line, and the discrimination they
+        # express — a holder was NAMED, versus a queue was measured with nobody
+        # to blame, versus neither was established and a cohort was
+        # photographed — is exactly what `attribution` now spells out. Folding
+        # them into one counter would let an episode the instrument could not
+        # attribute be read off the artefact as one it did.
+        if (line ~ /db lock stall: attribution=named/) CNT["lockstall"]++
+        if (line ~ /db lock stall: attribution=none/) CNT["lockstall_unattributed"]++
+        if (line ~ /db lock stall: attribution=cohort/) CNT["lockstall_nif"]++
         if (line ~ /db lock stall RESOLVED/) CNT["lockstall_resolved"]++
-        # #1687 — the third LockWatch edge. Its own counter, not folded into
-        # `lockstall`: that one means "a holder was NAMED", and the whole
-        # point of this one is that nobody could be. Folding them would let
-        # an episode the instrument could not attribute be read off the
-        # artefact as one it did.
-        if (line ~ /db lock stall UNATTRIBUTED/) CNT["lockstall_unattributed"]++
-        # #1901 — LockWatch's fourth edge, and the only one taken WITHOUT
-        # reading the BEGIN IMMEDIATE seam: a roster of the processes sitting
-        # inside the SQLite NIF. Its own counter for the reason the two above
-        # have theirs, one step further out — `lockstall` means a holder was
-        # NAMED and `lockstall_unattributed` means a QUEUE was measured with
-        # nobody to blame, while this one means neither was established and a
-        # cohort was photographed instead. Folding it into either would let a
-        # census be read off the artefact as an attribution.
-        if (line ~ /db lock stall NIF CENSUS/) CNT["lockstall_nif"]++
     }
 }
 
@@ -245,13 +244,16 @@ BEGIN {
     #                      counts the non-scrollback write paths, which emit
     #                      no `dropped` line of their own.
     #   lockheld           — Repo.BusyRetry, busy_locked arm (#1420).
-    #   lockstall{,_resolved} — Grappa.Repo.LockWatch's two episode edges.
-    #   lockstall_unattributed — LockWatch's third edge (#1687): a queue past
+    #   lockstall{,_resolved} — Grappa.Repo.LockWatch's two episode edges. Since
+    #                      issue 1960 `lockstall` counts `attribution=named`:
+    #                      one prefix, one field, same meaning as before —
+    #                      a holder was NAMED.
+    #   lockstall_unattributed — `attribution=none` (#1687): a queue past
     #                      the threshold that named nobody. It counted ZERO
     #                      through the whole 2026-08-22 prod episode because
     #                      the line did not exist; a census blind to it reads
     #                      exactly like a clean run.
-    #   lockstall_nif      — LockWatch's fourth edge (#1901): the roster of
+    #   lockstall_nif      — `attribution=cohort` (#1901): the roster of
     #                      processes inside `Exqlite.Sqlite3NIF` past the
     #                      threshold. It is the ONLY lock signature that does
     #                      not depend on a writer having gone through the
@@ -275,21 +277,27 @@ BEGIN {
         "db write unavailable: SQLite write lock held by another writer for 30067ms" \
         " across 1 attempts (1500ms retry budget) — returning :db_unavailable")
     sig("lockstall", \
-        "db lock stall: holder #PID<0.512.0> has held RESERVED for 30123ms with 2" \
-        " waiter(s) queued — holder status=:runnable at :gen_server.loop/7, stack: …")
+        "db lock stall: attribution=named, holder #PID<0.512.0> has held RESERVED for" \
+        " 30123ms — 1 holder(s) / 2 waiter(s) registered at the seam, 0 process(es) parked" \
+        " inside Exqlite.Sqlite3NIF; subject #PID<0.512.0> status=:runnable at" \
+        " :gen_server.loop/7, stack: …")
     sig("lockstall_resolved", \
         "db lock stall RESOLVED: holder #PID<0.512.0> released RESERVED after 30456ms")
     sig("lockstall_unattributed", \
-        "db lock stall UNATTRIBUTED: 3 writer(s) queued past the threshold, longest" \
-        " 31303ms — no holder registered, so the holder is NOT attributable at the" \
-        " BEGIN IMMEDIATE seam; longest waiter #PID<0.512.0> status=:waiting at" \
+        "db lock stall: attribution=none, longest writer queued at the seam for 31303ms —" \
+        " no holder registered, so the holder is NOT attributable at the BEGIN IMMEDIATE" \
+        " seam — 0 holder(s) / 3 waiter(s) registered at the seam, 0 process(es) parked" \
+        " inside Exqlite.Sqlite3NIF; subject #PID<0.512.0> status=:waiting at" \
         " :gen_server.loop/7, stack: …")
     sig("lockstall_nif", \
-        "db lock stall NIF CENSUS: 2 process(es) parked inside Exqlite.Sqlite3NIF past the" \
-        " threshold, longest 31402ms — none of them registered at the BEGIN IMMEDIATE seam," \
-        " so all 2 are writers it cannot name; roster: #PID<0.512.0> 31402ms" \
-        " Exqlite.Sqlite3NIF.step/2, #PID<0.513.0> 30011ms Exqlite.Sqlite3NIF.execute/2;" \
-        " longest #PID<0.512.0> status=:running at Exqlite.Sqlite3NIF.step/2, stack: …")
+        "db lock stall: attribution=cohort, longest process parked inside" \
+        " Exqlite.Sqlite3NIF for 31402ms — nothing registered at the seam, and nothing" \
+        " BEAM-visible says which of the cohort holds the lock — 0 holder(s) / 0 waiter(s)" \
+        " registered at the seam, 2 process(es) parked inside Exqlite.Sqlite3NIF; none of" \
+        " them registered at the BEGIN IMMEDIATE seam, so all 2 are writers it cannot name;" \
+        " roster: #PID<0.512.0> 31402ms Exqlite.Sqlite3NIF.step/2, #PID<0.513.0> 30011ms" \
+        " Exqlite.Sqlite3NIF.execute/2; subject #PID<0.512.0> status=:running at" \
+        " Exqlite.Sqlite3NIF.step/2, stack: …")
 
     # Deliberately ordinary: a real line from the same stream that names
     # none of the signatures. It DOES carry the word "lock" so the

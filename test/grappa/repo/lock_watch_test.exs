@@ -17,7 +17,7 @@ defmodule Grappa.Repo.LockWatchTest do
 
   ## Why the detection pass is driven, not awaited
 
-  `LockWatch.scan/1` is called directly instead of waiting for the
+  `LockWatch.scan/2` is called directly instead of waiting for the
   watchdog's tick. A test that sleeps past a tick interval measures the
   scheduler as much as the code; driving the pass makes the assertions
   deterministic under `--repeat-each`. The barrier before each scan is a
@@ -40,9 +40,7 @@ defmodule Grappa.Repo.LockWatchTest do
   end
 
   @detected [:grappa, :repo, :lock_stall, :detected]
-  @unattributed [:grappa, :repo, :lock_stall, :unattributed]
   @resolved [:grappa, :repo, :lock_stall, :resolved]
-  @nif_census [:grappa, :repo, :lock_stall, :nif_census]
 
   # 🔴 TWO CLOCKS BOUND EVERY TEST HERE, AND THEY HAVE TO BE ORDERED.
   #
@@ -139,24 +137,21 @@ defmodule Grappa.Repo.LockWatchTest do
     handler = "lock-watch-test-#{System.unique_integer([:positive])}"
     test_pid = self()
 
-    # Every door on ONE handler, tagged by event: a test that asserts the
-    # attributed line fired must also be able to REFUTE the unattributed one
-    # (and vice versa). Two separate handlers would let a mutant that emits
-    # both pass every assertion in the file. #1888 adds the closing bracket
-    # for the same reason — a test that asserts an episode brackets must be
-    # able to refute that it brackets when it should not. #1901 adds the NIF
-    # census on the same reasoning: it is a THIRD verdict about the same lock,
-    # and a mutant routing a seam-attributable stall through it (or the other
-    # way round) has to die on a refutation somewhere.
+    # Both edges of an episode on ONE handler, tagged by event. Since issue
+    # 1960 the three OPENING arms are one event carrying `attribution`, so the
+    # discrimination that used to be "which message arrived" is now "which
+    # value the message carries" — the same mutants have to die, and they die
+    # on an equality rather than on a `refute_receive`. Keeping the closing
+    # bracket on the same handler is unchanged and for the original reason: a
+    # test that asserts an episode brackets must be able to refute that it
+    # brackets when it should not.
     :ok =
       :telemetry.attach_many(
         handler,
-        [@detected, @unattributed, @resolved, @nif_census],
+        [@detected, @resolved],
         fn
           @detected, measurements, metadata, _ -> send(test_pid, {:stall, measurements, metadata})
-          @unattributed, measurements, metadata, _ -> send(test_pid, {:unattributed, measurements, metadata})
           @resolved, measurements, metadata, _ -> send(test_pid, {:resolved, measurements, metadata})
-          @nif_census, measurements, metadata, _ -> send(test_pid, {:nif_census, measurements, metadata})
         end,
         nil
       )
@@ -177,14 +172,14 @@ defmodule Grappa.Repo.LockWatchTest do
 
       await_roles(holder, [waiter])
 
-      LockWatch.scan(0)
+      LockWatch.scan(%{}, 0)
 
       assert_receive {:stall, measurements, stall}, 1_000
 
       # M1 — a mutant that reports the longest-queued WAITER as the holder
       # (the two roles are symmetric in the table; only the tag separates
       # them) has to survive both of these to live.
-      assert stall.holder.pid == inspect(holder)
+      assert stall.subject.pid == inspect(holder)
       assert [waiter_sample] = stall.waiters
       assert waiter_sample.pid == inspect(waiter)
 
@@ -192,21 +187,23 @@ defmodule Grappa.Repo.LockWatchTest do
       # holder at all, so there is nothing to report and this never arrives;
       # a mutant that promotes TOO EARLY (before the transaction opens)
       # promotes the blocked writer too, and the waiter count goes to zero.
-      assert stall.waiter_count == 1
+      assert length(stall.waiters) == 1
       assert measurements.waiter_count == 1
-      assert is_integer(measurements.held_ms)
+      assert is_integer(measurements.elapsed_ms)
 
       # M4 — a mutant sampling `self()` (the scanning process) instead of
       # the holder's pid still produces a well-formed record, and only the
       # CONTENT of the stack tells the two apart. This frame is the reason
       # the holder is stuck, which is the datum #1420 says is missing.
-      assert Enum.any?(stall.holder.stacktrace, &(&1 =~ "park_until_released"))
+      assert Enum.any?(stall.subject.stacktrace, &(&1 =~ "park_until_released"))
 
-      # #1687 — the two arms are mutually exclusive by construction. A mutant
-      # that emits the unattributed line unconditionally (rather than only
-      # when nothing was named) would double-report every real stall, and the
+      # #1687, as issue 1960 restates it — the three verdicts are mutually
+      # exclusive by construction, and the discrimination moved from the event
+      # NAME to the `attribution` field. A mutant that labels a
+      # seam-attributable stall as an anonymous queue (or as a NIF cohort)
+      # would double-report every real stall under two claims, and the
       # operator would learn to ignore both.
-      refute_receive {:unattributed, _, _}, 100
+      assert stall.attribution == :named
 
       send(holder, :release)
       assert_receive {:DOWN, ^holder_ref, :process, ^holder, :normal}, 5_000
@@ -228,7 +225,7 @@ defmodule Grappa.Repo.LockWatchTest do
       # M5 — a mutant that drops the `elapsed >= threshold` comparison
       # reports immediately and dies here. The holder has been holding for
       # milliseconds, not the ten seconds demanded.
-      LockWatch.scan(10_000)
+      LockWatch.scan(%{}, 10_000)
 
       refute_receive {:stall, _, _}, 300
 
@@ -239,7 +236,22 @@ defmodule Grappa.Repo.LockWatchTest do
       Supervisor.stop(repo)
     end
 
-    test "a slow but UNCONTENDED holder is not a stall" do
+    # 🔴 THIS TEST IS THE INVERSION OF ITS OWN FORMER SELF, AND THE REASON IS
+    # ISSUE 1960's DEFECT 1 — read the two halves before touching it.
+    #
+    # It used to be "a slow but UNCONTENDED holder is not a stall" and it
+    # refuted the report. That encoded `report_stalls(_, [])`, and the gate it
+    # protected is not a contention test: the watch table has ONE producer, so
+    # "no waiter registered" means "no waiter that went through
+    # `Repo.immediate_transaction/1`", which on this system is 0.1 % of the
+    # write load. Measured in prod on 2026-09-06: five episodes closed with
+    # `NEVER announced while it held`, each with the holder's pid and write
+    # path already in hand.
+    #
+    # What replaces the gate is not "print more": it is the line SAYING what
+    # it observed. So this test now asserts both halves — that the holder is
+    # announced, and that the record does not invent a queue behind it.
+    test "an uncontended holder past the threshold is announced, and says the queue was empty" do
       repo = start_tmp_repo()
 
       {holder, holder_ref} = start_writer(1, :park)
@@ -247,13 +259,26 @@ defmodule Grappa.Repo.LockWatchTest do
 
       await_roles(holder, [])
 
-      # M3 — a mutant that emits on a slow holder without checking for a
-      # queue behind it fires here. Nobody is blocked: this transaction is
-      # slow, and slow is not a stall. Reporting it would bury the signal
-      # the instrument exists to find under every long write in the system.
-      LockWatch.scan(0)
+      LockWatch.scan(%{}, 0)
 
-      refute_receive {:stall, _, _}, 300
+      assert_receive {:stall, measurements, stall}, 1_000
+
+      assert stall.attribution == :named
+      assert stall.subject.pid == inspect(holder)
+
+      # M3, inverted and STRONGER than the refutation it replaces. The old
+      # test could be satisfied by an instrument that says nothing; this one
+      # can only be satisfied by one that says the true thing. A mutant that
+      # buys the announcement by inventing contention — reporting the holder
+      # itself as its own waiter, or carrying the old "with N waiter(s)
+      # queued" prose over an empty list — dies on these two.
+      assert stall.waiters == []
+      assert measurements.waiter_count == 0
+
+      # And the honesty field that makes the empty queue readable rather than
+      # ambiguous: the seam DID see this holder, so `holders` is 1. A `0` here
+      # would say the seam was blind, which is a different episode entirely.
+      assert stall.holders == 1
 
       send(holder, :release)
       assert_receive {:DOWN, ^holder_ref, :process, ^holder, :normal}, 5_000
@@ -277,17 +302,19 @@ defmodule Grappa.Repo.LockWatchTest do
       # three-minute episode and put NOT ONE line in `erlang.log.5`, so the
       # #1429 census and the operator both read a healthy system. Pinning the
       # telemetry alone would leave exactly the door that was dark, dark.
-      log = capture_log(fn -> LockWatch.scan(0) end)
+      log = capture_log(fn -> LockWatch.scan(%{}, 0) end)
 
-      assert log =~ "db lock stall UNATTRIBUTED"
+      assert log =~ "db lock stall: attribution=none"
       assert log =~ "no holder registered"
 
-      assert_receive {:unattributed, measurements, report}, 1_000
+      assert_receive {:stall, measurements, report}, 1_000
+
+      assert report.attribution == :none
 
       # M6 — a mutant reporting the holder-less queue with a fabricated holder
       # (the shape the issue's own wording invites) dies here: there is no
       # holder to name, and the record says so rather than guessing.
-      assert report.holders_registered == 0
+      assert report.holders == 0
 
       # M7 — a mutant sampling `self()` (the scanning process) instead of the
       # queued writers still produces a well-formed record; only the pid tells
@@ -298,11 +325,14 @@ defmodule Grappa.Repo.LockWatchTest do
       assert is_integer(sample.elapsed_ms)
 
       assert measurements.waiter_count == 1
-      assert is_integer(measurements.longest_wait_ms)
+      assert is_integer(measurements.elapsed_ms)
 
       # M8 — the queue is NOT a named stall. A mutant that routes this through
-      # the attributed door would put a `holder` key on a record that has none.
-      refute_receive {:stall, _, _}, 100
+      # the attributed verdict would claim a HOLD nobody measured; since issue
+      # 1960 that claim lives in `attribution`, asserted above, and in the
+      # prose, asserted here. The word is the one `subject_clause/3` reserves
+      # for `:named`.
+      refute log =~ "has held RESERVED"
 
       send(blind, :release)
       assert_receive {:DOWN, ^blind_ref, :process, ^blind, :normal}, 5_000
@@ -321,13 +351,13 @@ defmodule Grappa.Repo.LockWatchTest do
 
       await_roles(nil, [waiter])
 
-      # M9 — the mirror of M5 on the new arm. A mutant that drops the
+      # M9 — the mirror of M5 on the queue verdict. A mutant that drops the
       # threshold comparison for waiters turns every transient queue behind
       # every autocommit write into a warning, which on the hot path is a log
       # flood, not a signal.
-      LockWatch.scan(10_000)
+      LockWatch.scan(%{}, 10_000)
 
-      refute_receive {:unattributed, _, _}, 300
+      refute_receive {:stall, _, _}, 300
 
       send(blind, :release)
       assert_receive {:DOWN, ^blind_ref, :process, ^blind, :normal}, 5_000
@@ -346,14 +376,14 @@ defmodule Grappa.Repo.LockWatchTest do
 
       await_roles(nil, [waiter])
 
-      LockWatch.scan(0)
-      assert_receive {:unattributed, _, _}, 1_000
+      LockWatch.scan(%{}, 0)
+      assert_receive {:stall, _, %{attribution: :none}}, 1_000
 
       # M10 — the prod episode ran ~170s at `tick_ms: 1_000`. A mutant that
       # forgets to arm the row's `reported?` flag prints ~170 identical
       # warnings for one episode, which is the same as printing none.
-      LockWatch.scan(0)
-      refute_receive {:unattributed, _, _}, 300
+      LockWatch.scan(%{}, 0)
+      refute_receive {:stall, _, _}, 300
 
       send(blind, :release)
       assert_receive {:DOWN, ^blind_ref, :process, ^blind, :normal}, 5_000
@@ -371,8 +401,8 @@ defmodule Grappa.Repo.LockWatchTest do
       {writer, writer_ref} = start_writer(2, :park)
       await_roles(nil, [writer])
 
-      LockWatch.scan(0)
-      assert_receive {:unattributed, _, _}, 1_000
+      LockWatch.scan(%{}, 0)
+      assert_receive {:stall, _, %{attribution: :none}}, 1_000
 
       # The unregistered writer lets go; the pid that was just reported as a
       # WAITER now takes RESERVED itself.
@@ -383,7 +413,7 @@ defmodule Grappa.Repo.LockWatchTest do
       {queued, queued_ref} = start_writer(3, :straight_through)
       await_roles(writer, [queued])
 
-      LockWatch.scan(0)
+      LockWatch.scan(%{}, 0)
 
       # 🔴 M11, and it is the whole reason this test exists. `acquired/0`
       # promotes the row's role and restarts its clock but leaves the
@@ -393,7 +423,8 @@ defmodule Grappa.Repo.LockWatchTest do
       # that already worked. The flag has to clear on promotion, because the
       # promotion starts a new episode with a new clock.
       assert_receive {:stall, _, stall}, 1_000
-      assert stall.holder.pid == inspect(writer)
+      assert stall.attribution == :named
+      assert stall.subject.pid == inspect(writer)
 
       send(writer, :release)
       assert_receive {:DOWN, ^writer_ref, :process, ^writer, :normal}, 5_000
@@ -427,7 +458,7 @@ defmodule Grappa.Repo.LockWatchTest do
   # the NIF and MUST NOT appear. That is the honest limit of this arm stated
   # as an assertion — it sees a writer inside a NIF call, not a transaction
   # parked between statements.
-  describe "the NIF census — the writers the seam cannot see (#1901)" do
+  describe "the NIF cohort — the writers the seam cannot see (#1901)" do
     test "names a writer parked inside the SQLite NIF that owns no row at the seam" do
       repo = start_tmp_repo()
 
@@ -441,12 +472,14 @@ defmodule Grappa.Repo.LockWatchTest do
       # `grep -h "db lock stall" runtime/log/erlang.log.*` returned 0 while
       # six victims timed out at ~31 s. Pinning the telemetry alone would
       # leave exactly the door that failed, failing.
-      log = capture_log(fn -> LockWatch.census(%{}, 0) end)
+      log = capture_log(fn -> LockWatch.scan(%{}, 0) end)
 
-      assert log =~ "db lock stall NIF CENSUS"
+      assert log =~ "db lock stall: attribution=cohort"
       assert log =~ "none of them registered at the BEGIN IMMEDIATE seam"
 
-      assert_receive {:nif_census, measurements, report}, 1_000
+      assert_receive {:stall, measurements, report}, 1_000
+
+      assert report.attribution == :cohort
 
       # N1 — the whole deliverable. A mutant that reads the watch table (as
       # both older arms do) finds nothing here: this writer registered
@@ -476,13 +509,16 @@ defmodule Grappa.Repo.LockWatchTest do
       assert Enum.any?(sample.stacktrace, &(&1 =~ "Exqlite"))
 
       assert measurements.parked_count == length(report.parked)
-      assert is_integer(measurements.longest_parked_ms)
+      assert is_integer(measurements.elapsed_ms)
 
-      # N5 — the three arms are distinct verdicts. A mutant that also routes
-      # this through either older door would double-report the same episode
-      # under two different claims about attribution.
-      refute_receive {:stall, _, _}, 100
-      refute_receive {:unattributed, _, _}, 100
+      # N5 — the three verdicts are distinct, and since issue 1960 the
+      # distinction is a field rather than an event name. A mutant that labels
+      # this cohort as a named holder (or as a seam queue) would claim an
+      # attribution nothing here established; the equality above is where it
+      # dies. The prose half: the two words reserved for the verdicts this is
+      # NOT must be absent.
+      refute log =~ "has held RESERVED"
+      refute log =~ "longest writer queued at the seam"
 
       # BOTH, and `unseen` before it is even unblocked: the moment `blind`
       # lets go, `unseen` takes RESERVED and parks in `park_until_released/0`
@@ -509,9 +545,20 @@ defmodule Grappa.Repo.LockWatchTest do
       await_roles(nil, [waiter])
       await_parked_in_nif(waiter)
 
-      log = capture_log(fn -> LockWatch.census(%{}, 0) end)
+      log = capture_log(fn -> LockWatch.scan(%{}, 0) end)
 
-      assert_receive {:nif_census, _, report}, 1_000
+      assert_receive {:stall, _, report}, 1_000
+
+      # 🔴 issue 1960 changed the VERDICT here and not the finding, and the
+      # difference is worth stating. This waiter is registered at the seam AND
+      # parked in the NIF, so before the fold two arms could each have claimed
+      # it and the census won by running second. Under one ladder the seam
+      # queue outranks the cohort (see `t:Grappa.Repo.LockWatch.attribution/0`):
+      # a registered waiter is a writer we KNOW is blocked, while a NIF
+      # resident may be a healthy two-millisecond write. Nothing is lost —
+      # the roster rides every verdict, which is what the three assertions
+      # below still measure.
+      assert report.attribution == :none
 
       # N6 — the counts are the difference between "widen coverage" and
       # "the seam already told you". A mutant that hard-codes them to zero
@@ -544,9 +591,9 @@ defmodule Grappa.Repo.LockWatchTest do
       # ever see a pid at elapsed 0, so a mutant that drops the threshold
       # comparison turns every millisecond-long insert on the system into a
       # warning at every tick: a log flood, which reads the same as silence.
-      seen = LockWatch.census(%{}, 10_000)
+      seen = LockWatch.scan(%{}, 10_000)
 
-      refute_receive {:nif_census, _, _}, 300
+      refute_receive {:stall, _, _}, 300
 
       # N8 — and the clock it started has to SURVIVE, or the threshold can
       # never be crossed on any later pass. A mutant that returns a fresh map
@@ -578,15 +625,15 @@ defmodule Grappa.Repo.LockWatchTest do
       {unseen, unseen_ref} = start_unobserved_writer(2)
       await_parked_in_nif(unseen)
 
-      {seen, _} = with_log(fn -> LockWatch.census(%{}, 0) end)
-      assert_receive {:nif_census, _, _}, 1_000
+      {seen, _} = with_log(fn -> LockWatch.scan(%{}, 0) end)
+      assert_receive {:stall, _, %{attribution: :cohort}}, 1_000
 
       # N9 — the #1888 episodes ran ~31 s at `tick_ms: 1_000` and the #1687
       # one ~170 s. A mutant that forgets to carry the reported flag prints
       # one identical warning per tick for the whole freeze, which is how the
-      # other two arms would have drowned their own signal.
-      LockWatch.census(seen, 0)
-      refute_receive {:nif_census, _, _}, 300
+      # other two verdicts would have drowned their own signal.
+      LockWatch.scan(seen, 0)
+      refute_receive {:stall, _, _}, 300
 
       # BOTH, and `unseen` before it is even unblocked: the moment `blind`
       # lets go, `unseen` takes RESERVED and parks in `park_until_released/0`
@@ -694,16 +741,18 @@ defmodule Grappa.Repo.LockWatchTest do
     end
 
     test "an ANNOUNCED hold brackets exactly as it did before, and says it was announced" do
-      # A queue behind the holder is the second half `report_stalls/2`
-      # requires. Without it the detection pass walks away and this test would
-      # measure the unannounced arm again, passing for the wrong reason.
+      # A queue behind the holder is no longer REQUIRED for the announcement
+      # (issue 1960 removed that gate — see the uncontended-holder test above),
+      # but it is kept here on purpose: this test's claim is about the closing
+      # bracket of an episode that WAS announced, and the fixture that produced
+      # the original reading is the one that keeps producing it.
       waiter = queue_a_waiter()
 
       log =
         capture_log(fn ->
           LockWatch.observe(fn acquired ->
             acquired.()
-            LockWatch.scan(0)
+            LockWatch.scan(%{}, 0)
             :ok
           end)
         end)
@@ -769,7 +818,7 @@ defmodule Grappa.Repo.LockWatchTest do
       capture_log(fn ->
         LockWatch.observe(fn acquired ->
           acquired.()
-          LockWatch.scan(0)
+          LockWatch.scan(%{}, 0)
           :ok
         end)
       end)

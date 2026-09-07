@@ -48,25 +48,24 @@ defmodule Grappa.DbLatency do
         - **mechanism 3 (pure insert / index write-amplification):** the
           `persist` row `mean_ms` on its own, watched as the table grows.
 
-    * **`[:grappa, :repo, :lock_stall, :detected | :resolved |
-      :unattributed]`** (#1420, #1687) —
+    * **`[:grappa, :repo, :lock_stall, :detected | :resolved]`** (#1420,
+      #1687, #1901, issue 1960) —
       the write-lock HOLDER, which neither family above can see. Both of
       them are completion-driven, so a process sitting idle inside
       `BEGIN IMMEDIATE` emits nothing while it sits and only its victims
       show up (as 30.1s `busy_timeout` rows). `Grappa.Repo.LockWatch`
-      reads at the seam instead and hands over the holder's sampled stack
-      plus the queue behind it; here they are kept as a bounded ring, so
-      the existing CLI and admin doors surface them with no new noun.
-      `:unattributed` is the same ring for the episodes that seam CANNOT
-      name — an autocommit writer holds the same file lock and never
-      registers — and it carries the queue's stacks with explicit nils
-      where the holder would be. `:nif_census` (#1901) is the fourth phase
-      and the only one taken WITHOUT reading the seam at all: the roster of
-      processes sitting inside `Exqlite.Sqlite3NIF`, which is how the
-      autocommit writers that dominate this system's write volume become
-      visible to any door. Filing any of them elsewhere would mean an
-      operator asking what the write lock did has to already know that a
-      differently-shaped answer exists somewhere else.
+      reads at the seam instead and hands over the subject's sampled stack
+      plus both populations behind it; here they are kept as a bounded ring,
+      so the existing CLI and admin doors surface them with no new noun.
+      🔴 **TWO events, not four (issue 1960).** `:unattributed` and
+      `:nif_census` were separate phases for what is one phenomenon — the
+      same write lock, described with different confidence — and an operator
+      had to correlate four differently-shaped rows by timestamp. They fold
+      into `:detected` carrying an `attribution` of `:named` / `:none` /
+      `:cohort`; `t:Grappa.Repo.LockWatch.attribution/0` is the SSOT for what
+      each means. Filing any of them elsewhere would mean an operator asking
+      what the write lock did has to already know that a differently-shaped
+      answer exists somewhere else.
 
   ## Reading a window
 
@@ -108,9 +107,7 @@ defmodule Grappa.DbLatency do
     [:grappa, :session, :send_privmsg, :stop],
     [:grappa, :scrollback, :persist, :contention],
     [:grappa, :repo, :lock_stall, :detected],
-    [:grappa, :repo, :lock_stall, :resolved],
-    [:grappa, :repo, :lock_stall, :unattributed],
-    [:grappa, :repo, :lock_stall, :nif_census]
+    [:grappa, :repo, :lock_stall, :resolved]
   ]
 
   # #1420 — the lock-stall ring is bounded: these rows carry sampled
@@ -120,6 +117,39 @@ defmodule Grappa.DbLatency do
   @lock_stall_ring 20
 
   @type op :: :select | :insert | :update | :delete | :count | :other
+
+  @typedoc """
+  One telemetry event name this handler attaches at `init/1`.
+
+  Spelled as the concrete atom union and not `[atom(), ...]` on Dialyzer's
+  instruction: `@events` is a compile-time constant, so the success typing IS
+  this union.
+
+  🔴 It was NOT flagged before issue 1960, and that was luck rather than
+  correctness — measured while folding the four lock-stall events into two.
+  The old list carried 14 distinct atoms, above the width at which Dialyzer
+  widens a union to `atom()`; dropping to 12 put it under, and the
+  `:underspecs` warning that had been latent since #357 appeared. A contract
+  that is only exact while a list stays LONG is not a contract, so it is now
+  written out — and a new event that forgets this type is red, which is the
+  same discipline the independent `@events` copy in `db_latency_test.exs`
+  already imposes.
+  """
+  @type event :: [
+          :contention
+          | :detected
+          | :grappa
+          | :lock_stall
+          | :persist
+          | :query
+          | :repo
+          | :resolved
+          | :scrollback
+          | :send_privmsg
+          | :session
+          | :stop,
+          ...
+        ]
 
   @typedoc """
   One `{source, op}` bucket. Everything but `queue_ms` comes from a
@@ -171,59 +201,73 @@ defmodule Grappa.DbLatency do
         }
 
   @typedoc """
-  One write-lock stall episode (#1420). `:detected` carries the holder's
-  sampled stack and the queue behind it; `:resolved` brackets the same
+  The verdict column of a ring row: `nil` on `:resolved`, where the question
+  does not arise. Named so consumers can spec against it without restating the
+  union — `Grappa.Operator` renders three different labels off exactly this
+  value, and a fourth verdict must break its spec, not its output.
+  """
+  @type lock_stall_row_attribution :: Grappa.Repo.LockWatch.attribution() | nil
+
+  @typedoc """
+  One write-lock stall episode (#1420). `:detected` carries the subject's
+  sampled stack and both populations behind it; `:resolved` brackets the same
   episode with the TOTAL hold and no samples (by then there is nothing left
   to sample). Newest first.
 
-  `:unattributed` (#1687) is the third phase and the reason two fields are
-  nilable: a queue past the threshold that LockWatch could name nobody for.
-  Its `holder_pid` and `held_ms` are `nil` — the explicit-null honesty
-  signal, not a gap to paper over. A `held_ms: 0` would assert a hold of
-  zero was measured, and nothing in that episode measured a hold at all; its
-  own figure is the longest WAIT, which rides the telemetry measurements and
-  is derivable from `waiters` rather than duplicated here. It gets no
-  `:resolved` bracket, because there is no hold to total.
+  🔴 **TWO phases, not four (issue 1960).** `:unattributed` (#1687) and
+  `:nif_census` (#1901) were separate phases describing the same lock with
+  different confidence, and the honesty each of them expressed with a
+  differently-shaped row is now ONE field: `attribution`, `:named` / `:none`
+  / `:cohort`, whose SSOT is `t:Grappa.Repo.LockWatch.attribution/0`. That
+  removes the nils those phases existed to carry — a `:none` row no longer
+  needs `holder_pid: nil` to say nobody was named, because `attribution`
+  says it — and it is what lets ONE row carry the seam queue AND the NIF
+  roster instead of forcing a reader to line two rows up by timestamp.
 
-  #1888 adds three fields, on the same rule — a phase that did not observe a
-  thing carries an explicit `nil` for it rather than a plausible value:
+  `elapsed_ms` is the subject's own measurement and is deliberately not
+  called `held_ms`: it is a HOLD only on `:resolved` and on `:detected` with
+  `attribution: :named`, a WAIT on `:none` and a time parked in a NIF on
+  `:cohort`. `phase` and `attribution` are both always present, so the pair
+  is total — this is the #1687 ruling (never smuggle a hold claim in through
+  a field name) generalised to one column instead of three.
+
+  The remaining nilable fields follow the same rule they always have — a
+  phase that did not observe a thing carries an explicit `nil` for it rather
+  than a plausible value:
 
     * `observed_at` — the instant the EMITTER observed the episode, on every
       phase. Without it a ring row cannot be lined up against `erlang.log`,
       which is the only artefact that dates a freeze, and the ring is exactly
       the door that survives a log that went quiet.
-    * `caller` — WHO held the lock, on `:resolved` only. It is not a holder
+    * `caller` — WHO held the lock, on `:resolved` only (#1888). It is not a
       `sample()` and the two must not be read as one: a sample names the
-      frame the holder PAUSED in, this names the write path that opened the
-      transaction. `holder` therefore stays `nil` on a `:resolved` row, as it
-      always has.
+      frame the subject PAUSED in, this names the write path that opened the
+      transaction. `subject` therefore stays `nil` on a `:resolved` row.
     * `announced` — whether the watchdog got to report the episode WHILE it
       held. `false` means this row is the only record of it, which is the
-      #1888 case; `nil` on the two phases where the question does not arise.
+      #1888 case; `nil` on the phase where the question does not arise.
+    * `waiter_count` — nil on `:resolved` for the same reason: a closing
+      bracket counts no queue, and a `0` would assert an empty one was
+      measured.
+    * `holders` — how many holders the seam had registered at ANY elapsed,
+      which is how a reader tells "the seam saw nobody" (`0`) from "the seam
+      saw a holder that has not crossed the threshold" (positive).
+    * `registered_holders` / `registered_waiters` — how many of `parked` the
+      seam could already name, so an operator can tell "widen coverage" from
+      "the seam already told you".
 
-  `waiter_count` is nilable for the same reason: a closing bracket counts no
-  queue, and the `0` it used to carry asserted an empty one was measured.
-
-  #1901 adds the fourth phase, `:nif_census`, and with it `parked` plus two
-  counts. It is the arm that does not read the seam at all — it reports every
-  process sitting inside `Exqlite.Sqlite3NIF` past the threshold — so on that
-  row EVERY seam-derived field is nil, including `holder_pid`, and that is a
-  stronger statement than `:unattributed`'s: a holder is certainly IN
-  `parked`, and nothing BEAM-visible says which entry it is.
-  `registered_holders` / `registered_waiters` count how many of the parked
-  processes the seam could already name, so an operator can tell "widen
-  coverage" from "the other two arms already told you". `parked` follows
-  `waiters` in being a plain list defaulting to `[]` rather than a nilable:
-  an empty roster and no roster are the same fact here, since a census with
-  nobody in it emits nothing at all.
+  `waiters` and `parked` are plain lists defaulting to `[]` rather than
+  nilables: an empty roster and no roster are the same fact here.
   """
   @type lock_stall_row :: %{
-          phase: :detected | :resolved | :unattributed | :nif_census,
+          phase: :detected | :resolved,
+          attribution: lock_stall_row_attribution(),
           observed_at: String.t(),
-          holder_pid: String.t() | nil,
-          held_ms: non_neg_integer() | nil,
+          subject_pid: String.t() | nil,
+          elapsed_ms: non_neg_integer() | nil,
           waiter_count: non_neg_integer() | nil,
-          holder: map() | nil,
+          holders: non_neg_integer() | nil,
+          subject: map() | nil,
           caller: map() | nil,
           announced: boolean() | nil,
           waiters: [map()],
@@ -282,7 +326,7 @@ defmodule Grappa.DbLatency do
   independent copy of the set as the oracle and asserts it equals this one, so
   the drift is a named failure rather than a missing row.
   """
-  @spec attached_events() :: nonempty_list(nonempty_list(atom()))
+  @spec attached_events() :: [event(), ...]
   def attached_events, do: @events
 
   ## ----- GenServer callbacks ------------------------------------------
@@ -369,94 +413,57 @@ defmodule Grappa.DbLatency do
     end
   end
 
+  # issue 1960 — ONE opening clause for all three verdicts. What used to be
+  # three fold clauses differing only in which columns they nil'd out is now
+  # one row plus `attribution`, and the honesty each of those clauses spelled
+  # out in prose is carried by that field: a `:none` row does not have to say
+  # "no holder" by leaving a column empty, and a `:cohort` row does not have
+  # to say "the holder is in here somewhere" by nil'ing every seam column.
+  # `subject_pid` is never synthesised — it is the process the emitter NAMED,
+  # and `attribution` says what naming it means.
   defp fold([:grappa, :repo, :lock_stall, :detected], measurements, metadata, state) do
     push_stall(state, %{
       phase: :detected,
+      attribution: metadata.attribution,
       observed_at: metadata.observed_at,
-      holder_pid: metadata.holder.pid,
-      held_ms: measurements.held_ms,
+      subject_pid: metadata.subject.pid,
+      elapsed_ms: measurements.elapsed_ms,
       waiter_count: measurements.waiter_count,
-      holder: metadata.holder,
+      holders: metadata.holders,
+      subject: metadata.subject,
       caller: nil,
       announced: nil,
       waiters: metadata.waiters,
-      parked: [],
-      registered_holders: nil,
-      registered_waiters: nil
-    })
-  end
-
-  # #1687 — the episode that named nobody. It reaches the SAME ring and the
-  # same two doors as the other two: an operator asking "what did the write
-  # lock do" must not have to know that a third, differently-shaped answer
-  # exists somewhere else. What it does NOT do is synthesise a holder to fit
-  # the row shape — the nils are the finding.
-  defp fold([:grappa, :repo, :lock_stall, :unattributed], measurements, metadata, state) do
-    push_stall(state, %{
-      phase: :unattributed,
-      observed_at: metadata.observed_at,
-      holder_pid: nil,
-      held_ms: nil,
-      waiter_count: measurements.waiter_count,
-      holder: nil,
-      caller: nil,
-      announced: nil,
-      waiters: metadata.waiters,
-      parked: [],
-      registered_holders: nil,
-      registered_waiters: nil
+      parked: metadata.parked,
+      registered_holders: metadata.registered_holders,
+      registered_waiters: metadata.registered_waiters
     })
   end
 
   # #1888 — the closing bracket, which since that issue also fires for an
   # episode the watchdog never announced. `caller` is the identity such a row
-  # carries INSTEAD of a holder sample (there is no pause site left to sample
+  # carries INSTEAD of a subject sample (there is no pause site left to sample
   # by then), and `announced: false` is the finding: this row is the only
-  # record that episode left anywhere.
+  # record that episode left anywhere. `attribution` is nil because the
+  # question does not arise at release — the row IS the holder's own.
   defp fold([:grappa, :repo, :lock_stall, :resolved], measurements, metadata, state) do
     push_stall(state, %{
       phase: :resolved,
+      attribution: nil,
       observed_at: metadata.observed_at,
-      holder_pid: metadata.holder_pid,
-      held_ms: measurements.held_ms,
+      subject_pid: metadata.holder_pid,
+      elapsed_ms: measurements.held_ms,
       # nil, not 0: nothing in a closing bracket counted a queue, and a zero
       # would assert an empty one was measured.
       waiter_count: nil,
-      holder: nil,
+      holders: nil,
+      subject: nil,
       caller: metadata.caller,
       announced: metadata.announced,
       waiters: [],
       parked: [],
       registered_holders: nil,
       registered_waiters: nil
-    })
-  end
-
-  # #1901 — the arm that reads `Process.list/0` rather than the seam, so it is
-  # the one phase where `holder_pid` being nil is not a gap the instrument
-  # might have closed: a holder IS among `parked`, and exqlite's busy handler
-  # sleeping inside the same dirty-IO NIF as the writer that holds the lock
-  # makes the cohort indivisible from the BEAM's side. Synthesising a
-  # `holder_pid` to fill the column would turn the one honest thing this row
-  # says into a guess. `registered_holders` / `registered_waiters` are what
-  # separate "the seam is blind here" from "the other two arms already spoke".
-  defp fold([:grappa, :repo, :lock_stall, :nif_census], _, metadata, state) do
-    push_stall(state, %{
-      phase: :nif_census,
-      observed_at: metadata.observed_at,
-      holder_pid: nil,
-      held_ms: nil,
-      # nil, not `parked_count`: nothing here observed a QUEUE. The count of
-      # parked processes is a different measurement and rides its own field,
-      # exactly as #1687 refused to reuse `held_ms` for a longest WAIT.
-      waiter_count: nil,
-      holder: nil,
-      caller: nil,
-      announced: nil,
-      waiters: [],
-      parked: metadata.parked,
-      registered_holders: metadata.registered_holders,
-      registered_waiters: metadata.registered_waiters
     })
   end
 

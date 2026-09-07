@@ -289,8 +289,8 @@ defmodule Grappa.OperatorTest do
           @db_latency_handler_id,
           [
             [:grappa, :repo, :query],
-            [:grappa, :repo, :lock_stall, :resolved],
-            [:grappa, :repo, :lock_stall, :nif_census]
+            [:grappa, :repo, :lock_stall, :detected],
+            [:grappa, :repo, :lock_stall, :resolved]
           ],
           &DbLatency.handle_telemetry/4,
           nil
@@ -358,8 +358,13 @@ defmodule Grappa.OperatorTest do
 
       output = capture_io(fn -> assert :ok = Operator.db_latency_text!() end)
 
-      assert output =~ "resolved\tat=2026-09-01T10:07:28.554000Z\tholder=#PID<0.512.0>"
-      assert output =~ "held_ms=31295"
+      # issue 1960 — `attribution` is absent on a closing bracket, so the phase
+      # column carries no suffix. A mutant that prints `resolved/named` there
+      # would tell an operator the watchdog attributed an episode that, per the
+      # `announced=NO` below, it never announced at all.
+      assert output =~ "resolved\tat=2026-09-01T10:07:28.554000Z\tsubject=#PID<0.512.0>"
+      assert output =~ "elapsed_ms=31295"
+      refute output =~ "resolved/"
 
       # `waiters=0` would assert a queue was counted and found empty; the
       # closing bracket counts none. `announced=NO` is the #1888 finding: this
@@ -375,24 +380,44 @@ defmodule Grappa.OperatorTest do
       refute output =~ "holder at"
     end
 
-    test "a NIF census renders its roster and refuses to name a holder (#1901)" do
+    test "a cohort verdict renders its roster and refuses to name a holder (#1901)" do
       # The CLI is the door an operator reaches for mid-incident, and this
-      # phase carries nil in every seam-derived column. Until it is rendered
+      # verdict carries nil in every seam-derived column. Until it is rendered
       # once in a test, the first `bin/grappa db-latency` of a real freeze is
       # where a nil would surface — as a crash, during the exact incident the
-      # arm was added to diagnose. That is the #1888 lesson applied one phase
+      # arm was added to diagnose. That is the #1888 lesson applied one verdict
       # later rather than relearned.
+      parked = [
+        %{
+          pid: "#PID<0.222.0>",
+          elapsed_ms: 31_402,
+          current_function: "Exqlite.Sqlite3NIF.step/2",
+          status: :running,
+          message_queue_len: 0,
+          stacktrace: []
+        },
+        %{
+          pid: "#PID<0.333.0>",
+          elapsed_ms: 30_011,
+          current_function: "Exqlite.Sqlite3NIF.execute/2",
+          status: :running,
+          message_queue_len: 0,
+          stacktrace: []
+        }
+      ]
+
       :telemetry.execute(
-        [:grappa, :repo, :lock_stall, :nif_census],
-        %{parked_count: 2, longest_parked_ms: 31_402},
+        [:grappa, :repo, :lock_stall, :detected],
+        %{elapsed_ms: 31_402, waiter_count: 0, parked_count: 2},
         %{
           observed_at: "2026-09-01T10:07:28.554000Z",
+          attribution: :cohort,
+          subject: hd(parked),
+          holders: 0,
+          waiters: [],
+          parked: parked,
           registered_holders: 0,
-          registered_waiters: 1,
-          parked: [
-            %{pid: "#PID<0.222.0>", elapsed_ms: 31_402, current_function: "Exqlite.Sqlite3NIF.step/2"},
-            %{pid: "#PID<0.333.0>", elapsed_ms: 30_011, current_function: "Exqlite.Sqlite3NIF.execute/2"}
-          ]
+          registered_waiters: 1
         }
       )
 
@@ -401,21 +426,30 @@ defmodule Grappa.OperatorTest do
 
       output = capture_io(fn -> assert :ok = Operator.db_latency_text!() end)
 
-      assert output =~ "nif_census\tat=2026-09-01T10:07:28.554000Z\tholder=unattributed"
+      # issue 1960 — the verdict is a suffix on the phase column, so `detected`
+      # alone no longer says what was attributed. A mutant that drops the
+      # suffix renders three different findings under one indistinguishable
+      # label, which is the correlate-by-timestamp reading the fold removed.
+      assert output =~ "detected/cohort\tat=2026-09-01T10:07:28.554000Z\tsubject=#PID<0.222.0>"
 
       # `parked=` and `waiters=` are two different questions and the row has
       # to keep them apart: two processes were in the NIF, and NOBODY counted
       # a queue. A mutant rendering the roster length as `waiters=` reads as
-      # two blocked writers, which is a claim this phase never made.
-      assert output =~ "waiters=not counted"
+      # two blocked writers, which is a claim this verdict never made.
+      assert output =~ "waiters=0"
       assert output =~ "parked=2"
       assert output =~ "registered=0h/1w"
 
-      # The roster itself, under its own wording — "parked ... in the NIF",
-      # never the DETECTED block's "holder at", which names a pause site the
-      # instrument attributed to one process.
+      # The roster itself, under its own wording — "parked ... in the NIF".
       assert output =~ "parked #PID<0.222.0> in the NIF 31402ms at Exqlite.Sqlite3NIF.step/2"
       assert output =~ "parked #PID<0.333.0> in the NIF 30011ms at Exqlite.Sqlite3NIF.execute/2"
+
+      # 🔴 The load-bearing negative, and issue 1960 makes it harder to keep
+      # than it was. One row shape now serves three verdicts, so the SUBJECT
+      # block is rendered here too — and rendering it under the old `holder at`
+      # wording would hand an operator a holder to blame on the one verdict
+      # that explicitly cannot name one. The label has to follow the verdict.
+      assert output =~ "longest parked at Exqlite.Sqlite3NIF.step/2"
       refute output =~ "holder at"
     end
   end

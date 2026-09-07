@@ -25,10 +25,14 @@ setup() {
     # prose fails here rather than reporting a confident zero.
     #   lock_watch.ex — the two edges of one stall episode
     #   busy_retry.ex — the four terminal arms, one per fault kind
-    LOCKSTALL_LINE='db lock stall: holder #PID<0.512.0> has held RESERVED for 30123ms with 2 waiter(s) queued — holder status=:runnable at :gen_server.loop/7, stack: a <- b'
+    # 🔴 issue 1960 — the three OPENING lines now share one prefix and differ
+    # by `attribution=`, so these three pins are what proves the counters key
+    # on the field. A pin that kept an old prefix would pass against a scanner
+    # that no longer matches production at all.
+    LOCKSTALL_LINE='db lock stall: attribution=named, holder #PID<0.512.0> has held RESERVED for 30123ms — 1 holder(s) / 2 waiter(s) registered at the seam, 0 process(es) parked inside Exqlite.Sqlite3NIF; subject #PID<0.512.0> status=:runnable at :gen_server.loop/7, stack: a <- b'
     LOCKRESOLVED_LINE='db lock stall RESOLVED: holder #PID<0.512.0> released RESERVED after 30456ms'
-    LOCKUNATTR_LINE='db lock stall UNATTRIBUTED: 3 writer(s) queued past the threshold, longest 31303ms — no holder registered, so the holder is NOT attributable at the BEGIN IMMEDIATE seam; longest waiter #PID<0.512.0> status=:waiting at :gen_server.loop/7, stack: a <- b'
-    LOCKNIF_LINE='db lock stall NIF CENSUS: 2 process(es) parked inside Exqlite.Sqlite3NIF past the threshold, longest 31402ms — none of them registered at the BEGIN IMMEDIATE seam, so all 2 are writers it cannot name; roster: #PID<0.512.0> 31402ms Exqlite.Sqlite3NIF.step/2, #PID<0.513.0> 30011ms Exqlite.Sqlite3NIF.execute/2; longest #PID<0.512.0> status=:running at Exqlite.Sqlite3NIF.step/2, stack: a <- b'
+    LOCKUNATTR_LINE='db lock stall: attribution=none, longest writer queued at the seam for 31303ms — no holder registered, so the holder is NOT attributable at the BEGIN IMMEDIATE seam — 0 holder(s) / 3 waiter(s) registered at the seam, 0 process(es) parked inside Exqlite.Sqlite3NIF; subject #PID<0.512.0> status=:waiting at :gen_server.loop/7, stack: a <- b'
+    LOCKNIF_LINE='db lock stall: attribution=cohort, longest process parked inside Exqlite.Sqlite3NIF for 31402ms — nothing registered at the seam, and nothing BEAM-visible says which of the cohort holds the lock — 0 holder(s) / 0 waiter(s) registered at the seam, 2 process(es) parked inside Exqlite.Sqlite3NIF; none of them registered at the BEGIN IMMEDIATE seam, so all 2 are writers it cannot name; roster: #PID<0.512.0> 31402ms Exqlite.Sqlite3NIF.step/2, #PID<0.513.0> 30011ms Exqlite.Sqlite3NIF.execute/2; subject #PID<0.512.0> status=:running at Exqlite.Sqlite3NIF.step/2, stack: a <- b'
     LOCKHELD_LINE='db write unavailable: SQLite write lock held by another writer for 30067ms across 1 attempts (1500ms retry budget) — returning :db_unavailable'
     SATURATED_LINE='db write unavailable: SQLite pool saturated for 1512ms across 14 attempts (1500ms retry budget) — returning :db_unavailable'
     # #1657 — the third arm. The elapsed is ~15s because a cancellation is
@@ -306,7 +310,7 @@ corrupted_scanner() {
     # known-answer control's cross-talk arm is what names both signatures
     # instead of quietly reporting an episode that never opened.
     local mutated
-    mutated="$(corrupted_scanner 's|/db lock stall: holder /|/db lock stall/|')"
+    mutated="$(corrupted_scanner 's|/db lock stall: attribution=named/|/db lock stall/|')"
 
     run awk -v SVC=svc -v THRESH=10 -f "$mutated" </dev/null
     [ "$status" -eq 3 ]

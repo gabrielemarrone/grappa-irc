@@ -16,6 +16,7 @@ defmodule Grappa.DbLatencyTest do
   use ExUnit.Case, async: false
 
   alias Grappa.DbLatency
+  alias Grappa.Repo.LockWatch
 
   @handler_id "grappa-db-latency"
 
@@ -32,14 +33,91 @@ defmodule Grappa.DbLatencyTest do
     [:grappa, :session, :send_privmsg, :stop],
     [:grappa, :scrollback, :persist, :contention],
     [:grappa, :repo, :lock_stall, :detected],
-    [:grappa, :repo, :lock_stall, :resolved],
-    [:grappa, :repo, :lock_stall, :unattributed],
-    [:grappa, :repo, :lock_stall, :nif_census]
+    [:grappa, :repo, :lock_stall, :resolved]
   ]
 
   # Native-unit duration for a whole number of milliseconds, via the
   # production conversion (never hardcode the native tick rate).
   defp ms(n), do: System.convert_time_unit(n, :millisecond, :native)
+
+  # 🔴 issue 1960 — the three verdicts share ONE event, so their payloads share
+  # one shape and differ only where the verdict differs. Written out as
+  # literals, INDEPENDENTLY of `Grappa.Repo.LockWatch`, on the same reasoning
+  # as `@events` above: deriving them from the emitter would make every
+  # assertion below a tautology, and the shape is exactly what this file is
+  # for. Realistic values throughout — a stall this sink has actually seen in
+  # prod, not zeroes that pass while validating nothing.
+  defp detected_measurements, do: %{elapsed_ms: 2_400, waiter_count: 2, parked_count: 0}
+
+  defp named_metadata do
+    %{
+      observed_at: "2026-09-01T10:06:57.328000Z",
+      attribution: :named,
+      subject: %{pid: "#PID<0.111.0>", elapsed_ms: 2_400, stacktrace: ["Foo.bar/1"]},
+      holders: 1,
+      waiters: [%{pid: "#PID<0.222.0>"}, %{pid: "#PID<0.333.0>"}],
+      parked: [],
+      registered_holders: 0,
+      registered_waiters: 0
+    }
+  end
+
+  defp none_measurements, do: %{elapsed_ms: 31_303, waiter_count: 3, parked_count: 0}
+
+  defp none_metadata do
+    %{
+      observed_at: "2026-09-01T10:07:28.554000Z",
+      attribution: :none,
+      subject: %{pid: "#PID<0.222.0>", elapsed_ms: 31_303, stacktrace: ["Exqlite.Sqlite3NIF.step/2"]},
+      holders: 0,
+      waiters: [
+        %{pid: "#PID<0.222.0>", elapsed_ms: 31_303, stacktrace: ["Exqlite.Sqlite3NIF.step/2"]},
+        %{pid: "#PID<0.333.0>", elapsed_ms: 2_100},
+        %{pid: "#PID<0.444.0>", elapsed_ms: 2_050}
+      ],
+      parked: [],
+      registered_holders: 0,
+      registered_waiters: 0
+    }
+  end
+
+  defp cohort_measurements, do: %{elapsed_ms: 31_402, waiter_count: 0, parked_count: 2}
+
+  defp cohort_metadata do
+    parked = [
+      %{
+        pid: "#PID<0.222.0>",
+        elapsed_ms: 31_402,
+        current_function: "Exqlite.Sqlite3NIF.step/2",
+        stacktrace: ["Grappa.Scrollback.persist_row/1"]
+      },
+      %{pid: "#PID<0.333.0>", elapsed_ms: 30_011, current_function: "Exqlite.Sqlite3NIF.execute/2"}
+    ]
+
+    %{
+      observed_at: "2026-09-01T10:07:28.554000Z",
+      attribution: :cohort,
+      subject: hd(parked),
+      holders: 0,
+      waiters: [],
+      parked: parked,
+      registered_holders: 0,
+      registered_waiters: 1
+    }
+  end
+
+  defp resolved_metadata do
+    %{
+      observed_at: "2026-09-01T10:07:28.554000Z",
+      holder_pid: "#PID<0.111.0>",
+      announced: true,
+      caller: %{
+        pid: "#PID<0.111.0>",
+        initial_call: "Grappa.Session.Server.init/1",
+        stacktrace: ["Grappa.Repo.immediate_transaction/1"]
+      }
+    }
+  end
 
   defp query_row(snapshot, source, op) do
     Enum.find(snapshot.queries, fn r -> r.source == source and r.op == op end)
@@ -259,40 +337,25 @@ defmodule Grappa.DbLatencyTest do
     end
 
     test "[:grappa, :repo, :lock_stall, :*] folds both brackets of an episode, newest first" do
-      :telemetry.execute(
-        [:grappa, :repo, :lock_stall, :detected],
-        %{held_ms: 2_400, waiter_count: 2},
-        %{
-          observed_at: "2026-09-01T10:06:57.328000Z",
-          holder: %{pid: "#PID<0.111.0>", stacktrace: ["Foo.bar/1"]},
-          waiters: [%{pid: "#PID<0.222.0>"}, %{pid: "#PID<0.333.0>"}]
-        }
-      )
-
-      :telemetry.execute(
-        [:grappa, :repo, :lock_stall, :resolved],
-        %{held_ms: 30_120},
-        %{
-          observed_at: "2026-09-01T10:07:28.554000Z",
-          holder_pid: "#PID<0.111.0>",
-          announced: true,
-          caller: %{
-            pid: "#PID<0.111.0>",
-            initial_call: "Grappa.Session.Server.init/1",
-            stacktrace: ["Grappa.Repo.immediate_transaction/1"]
-          }
-        }
-      )
+      :telemetry.execute([:grappa, :repo, :lock_stall, :detected], detected_measurements(), named_metadata())
+      :telemetry.execute([:grappa, :repo, :lock_stall, :resolved], %{held_ms: 30_120}, resolved_metadata())
 
       assert [resolved, detected] = DbLatency.snapshot().lock_stalls
 
       # Newest first: an operator reading a live incident wants the last
       # thing that happened at the top, not to scroll a boot-long history.
       assert resolved.phase == :resolved
-      assert resolved.held_ms == 30_120
-      assert resolved.holder == nil
+      assert resolved.elapsed_ms == 30_120
+      assert resolved.subject == nil
 
-      # #1888 — `holder` stays nil (a `sample()` means "sampled while it
+      # issue 1960 — `attribution` is nil on the closing bracket, and that is
+      # not an omission: at release the row IS the holder's own, so the
+      # question the field answers does not arise. A mutant that defaults it
+      # to `:named` would let a reader believe the watchdog attributed an
+      # episode it may never have announced at all.
+      assert resolved.attribution == nil
+
+      # #1888 — `subject` stays nil (a `sample()` means "sampled while it
       # stalled", and by release there is no pause site left to sample) while
       # `caller` carries the write path that held the lock. Two different
       # facts, two different keys: folding them would let a release-time stack
@@ -305,8 +368,9 @@ defmodule Grappa.DbLatencyTest do
       assert resolved.waiter_count == nil
 
       assert detected.phase == :detected
+      assert detected.attribution == :named
       assert detected.waiter_count == 2
-      assert detected.holder.stacktrace == ["Foo.bar/1"]
+      assert detected.subject.stacktrace == ["Foo.bar/1"]
       assert length(detected.waiters) == 2
 
       # The instant, on both edges: a ring row that cannot be aligned with
@@ -315,38 +379,38 @@ defmodule Grappa.DbLatencyTest do
       assert detected.observed_at == "2026-09-01T10:06:57.328000Z"
     end
 
-    test "[:grappa, :repo, :lock_stall, :unattributed] folds with an explicit nil where the holder would be" do
-      :telemetry.execute(
-        [:grappa, :repo, :lock_stall, :unattributed],
-        %{waiter_count: 3, longest_wait_ms: 31_303},
-        %{
-          observed_at: "2026-09-01T10:07:28.554000Z",
-          holders_registered: 0,
-          waiters: [
-            %{pid: "#PID<0.222.0>", elapsed_ms: 31_303, stacktrace: ["Exqlite.Sqlite3NIF.step/2"]},
-            %{pid: "#PID<0.333.0>", elapsed_ms: 2_100},
-            %{pid: "#PID<0.444.0>", elapsed_ms: 2_050}
-          ]
-        }
-      )
+    # 🔴 issue 1960 replaced the `:unattributed` PHASE with an `attribution`
+    # field, and this test is the same claim it always made: a queue past the
+    # threshold that could name nobody must not acquire a holder on its way
+    # into the ring. What changed is where the honesty lives — the row no
+    # longer says "nobody was named" by leaving `holder_pid` empty, it says it
+    # in a field, which is stronger because an empty column and an unset
+    # column are indistinguishable to a reader.
+    test "[:grappa, :repo, :lock_stall, :detected] with attribution :none names nobody as the holder" do
+      :telemetry.execute([:grappa, :repo, :lock_stall, :detected], none_measurements(), none_metadata())
 
       assert [row] = DbLatency.snapshot().lock_stalls
 
-      assert row.phase == :unattributed
+      assert row.phase == :detected
+      assert row.attribution == :none
       assert row.waiter_count == 3
 
-      # 🔴 The two nils are the POINT, not an omission. CLAUDE.md's admin rule
-      # — an explicit null is the honesty signal, never papered over with a
-      # computed field — lands exactly here: a `held_ms: 0` would assert a
-      # measured hold of zero, and a synthesised `holder_pid` would name
-      # somebody. A mutant that defaults either one dies on these two lines.
-      assert row.holder_pid == nil
-      assert row.held_ms == nil
-      assert row.holder == nil
+      # 🔴 The honesty pair. CLAUDE.md's admin rule — an explicit null is the
+      # signal, never papered over with a computed field — lands here: a
+      # synthesised holder would name somebody nothing measured, and
+      # `holders: 0` is the number that says the SEAM saw no holder at all
+      # (as opposed to seeing one that had not crossed the threshold).
+      assert row.holders == 0
+      assert row.subject.pid == "#PID<0.222.0>"
 
-      # #1888 — the same rule for the two fields the closing bracket adds.
-      # Nothing here released a hold, so there is no write path to name and no
-      # announcement to report; both stay explicitly absent.
+      # `elapsed_ms` is the subject's, and on this verdict it is a WAIT. The
+      # column carries no hold claim of its own — that is the #1687 ruling,
+      # and `attribution` above is what makes reading it unambiguous.
+      assert row.elapsed_ms == 31_303
+
+      # #1888 — the two fields only a closing bracket can answer. Nothing here
+      # released a hold, so there is no write path to name and no announcement
+      # to report; both stay explicitly absent.
       assert row.caller == nil
       assert row.announced == nil
 
@@ -357,57 +421,75 @@ defmodule Grappa.DbLatencyTest do
       assert hd(row.waiters).stacktrace == ["Exqlite.Sqlite3NIF.step/2"]
     end
 
-    test "[:grappa, :repo, :lock_stall, :nif_census] folds the roster, and names nobody as the holder" do
-      :telemetry.execute(
-        [:grappa, :repo, :lock_stall, :nif_census],
-        %{parked_count: 2, longest_parked_ms: 31_402},
-        %{
-          observed_at: "2026-09-01T10:07:28.554000Z",
-          registered_holders: 0,
-          registered_waiters: 1,
-          parked: [
-            %{
-              pid: "#PID<0.222.0>",
-              elapsed_ms: 31_402,
-              current_function: "Exqlite.Sqlite3NIF.step/2",
-              stacktrace: ["Grappa.Scrollback.persist_row/1"]
-            },
-            %{pid: "#PID<0.333.0>", elapsed_ms: 30_011, current_function: "Exqlite.Sqlite3NIF.execute/2"}
-          ]
-        }
-      )
+    test "[:grappa, :repo, :lock_stall, :detected] with attribution :cohort folds the roster" do
+      :telemetry.execute([:grappa, :repo, :lock_stall, :detected], cohort_measurements(), cohort_metadata())
 
       assert [row] = DbLatency.snapshot().lock_stalls
 
-      assert row.phase == :nif_census
+      assert row.phase == :detected
+      assert row.attribution == :cohort
       assert row.observed_at == "2026-09-01T10:07:28.554000Z"
 
-      # 🔴 `holder_pid: nil` is a STRONGER statement here than on the
-      # `:unattributed` row, and a mutant that fills it in — say with the
-      # longest-parked pid, which is the plausible guess — dies here. On this
-      # phase a holder is certainly among `parked`; the instrument simply
+      # 🔴 `:cohort` is a STRONGER refusal than `:none`, and a mutant that
+      # promotes the longest-parked process to a holder — the plausible guess,
+      # and the one #1901's acceptance criterion invites — dies on this
+      # equality. A holder is certainly among `parked`; the instrument simply
       # cannot say which, because exqlite's busy handler sleeps inside the
-      # same dirty-IO NIF the lock holder is executing in.
-      assert row.holder_pid == nil
-      assert row.held_ms == nil
-      assert row.holder == nil
+      # same dirty-IO NIF the lock holder is executing in. Naming the SUBJECT
+      # is not naming the holder, and `attribution` is what keeps the two
+      # apart in the row as the prose keeps them apart in the line.
+      assert row.subject.pid == "#PID<0.222.0>"
+      assert row.holders == 0
       assert row.caller == nil
       assert row.announced == nil
 
-      # A census counts no QUEUE. `parked_count` is a different measurement
+      # The cohort counts no QUEUE. `parked_count` is a different measurement
       # and rides the measurements map, exactly as #1687 refused to reuse
-      # `held_ms` for a longest WAIT. A mutant that copies `parked_count` in
-      # here reports two blocked writers where nobody measured one.
-      assert row.waiter_count == nil
+      # `held_ms` for a longest WAIT. A mutant that copies `parked_count` into
+      # the queue column reports two blocked writers where nobody measured one.
+      assert row.waiter_count == 0
       assert row.waiters == []
 
       # The roster IS the payload, and the counts are what tell an operator
-      # whether to widen coverage or to scroll up to a line the other two
-      # arms already printed.
+      # whether to widen coverage or to read the seam numbers on the same line.
       assert length(row.parked) == 2
       assert hd(row.parked).stacktrace == ["Grappa.Scrollback.persist_row/1"]
       assert row.registered_holders == 0
       assert row.registered_waiters == 1
+    end
+
+    # 🔴 THE VOID CONTROL (issue 1960, and it is why this test is not a
+    # duplicate of the drift test below).
+    #
+    # `fold/4` has NO catch-all, so the two failure modes are asymmetric and
+    # only one of them is loud. An event attached with no clause CRASHES the
+    # singleton — noisy, findable. A clause left attached with no EMITTER
+    # folds nothing, in silence, and the ring quietly stops filling: exactly
+    # what happened while #1901 was being built. Pruning two emitters here is
+    # the move that can reproduce it, so both directions get a control.
+    test "no lock-stall event is attached without an emitter, and none is emitted without a fold" do
+      # NEGATIVE — derived from the EMITTER, so an event this sink attaches
+      # after LockWatch stops emitting it is red rather than silent.
+      attached = Enum.filter(DbLatency.attached_events(), &match?([:grappa, :repo, :lock_stall, _], &1))
+
+      assert Enum.sort(attached) == Enum.sort(LockWatch.emitted_events())
+
+      # POSITIVE — every one of them, driven with a realistic payload, lands a
+      # ring row. That is what a set equality alone cannot show: the event can
+      # be attached, present in `@events`, and still fold nothing.
+      for {event, measurements, metadata} <- [
+            {[:grappa, :repo, :lock_stall, :detected], detected_measurements(), named_metadata()},
+            {[:grappa, :repo, :lock_stall, :resolved], %{held_ms: 30_120}, resolved_metadata()}
+          ] do
+        :ok = DbLatency.reset()
+        :telemetry.execute(event, measurements, metadata)
+
+        # `match?/2` and not `assert [_] = …`: a match assertion discards the
+        # custom message, and the whole value of this control is that the
+        # failure NAMES the event that folded nothing.
+        assert match?([_], DbLatency.snapshot().lock_stalls),
+               "#{inspect(event)} is attached but folded no ring row"
+      end
     end
 
     test "the lock-stall ring is bounded, keeping the newest episodes" do
@@ -429,8 +511,8 @@ defmodule Grappa.DbLatencyTest do
       # These rows carry sampled stacktraces; unbounded, they would grow the
       # singleton's heap for as long as the node lives.
       assert length(stalls) == 20
-      assert hd(stalls).held_ms == 25
-      assert List.last(stalls).held_ms == 6
+      assert hd(stalls).elapsed_ms == 25
+      assert List.last(stalls).elapsed_ms == 6
     end
 
     test "reset/0 zeroes accumulated state" do

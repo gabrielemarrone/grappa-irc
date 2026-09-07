@@ -1037,8 +1037,9 @@ defmodule Grappa.Operator do
 
     Enum.each(snapshot.lock_stalls, fn stall ->
       IO.puts(
-        "#{stall.phase}\tat=#{stall.observed_at}\tholder=#{lock_stall_field(stall.holder_pid)}" <>
-          "\theld_ms=#{lock_stall_field(stall.held_ms)}" <>
+        "#{stall.phase}#{attribution_column(stall.attribution)}\tat=#{stall.observed_at}" <>
+          "\tsubject=#{lock_stall_field(stall.subject_pid)}" <>
+          "\telapsed_ms=#{lock_stall_field(stall.elapsed_ms)}" <>
           "\twaiters=#{waiters_column(stall.waiter_count)}" <>
           "#{announced_column(stall.announced)}#{parked_column(stall)}"
       )
@@ -1049,9 +1050,18 @@ defmodule Grappa.Operator do
     :ok
   end
 
-  # #1687 — an `:unattributed` row has no holder and no hold, and the column
-  # has to SAY so. Interpolating the nil would print `holder=`, which reads
-  # as a formatting slip rather than as the finding it is.
+  # issue 1960 — the verdict rides next to the phase, because on a `:detected`
+  # row it is what says whether `subject=` names a HOLDER, the longest queued
+  # writer, or the longest process parked in the NIF. Absent on `:resolved`,
+  # where the question does not arise: printing `attribution=` there would
+  # invite a reader to interpret the blank.
+  @spec attribution_column(DbLatency.lock_stall_row_attribution()) :: String.t()
+  defp attribution_column(nil), do: ""
+  defp attribution_column(attribution), do: "/#{attribution}"
+
+  # #1687 — a row with nothing named has no subject and no measurement, and
+  # the column has to SAY so. Interpolating the nil would print `subject=`,
+  # which reads as a formatting slip rather than as the finding it is.
   @spec lock_stall_field(String.t() | non_neg_integer() | nil) :: String.t()
   defp lock_stall_field(nil), do: "unattributed"
   defp lock_stall_field(value), do: to_string(value)
@@ -1079,13 +1089,13 @@ defmodule Grappa.Operator do
   # there, so that behaviour is preserved by the data, not by a clause.
   #
   # 🔴 The clause this replaces was `%{holder: nil} -> []`, which would have
-  # thrown away an `:unattributed` row's ENTIRE payload: those waiters and
+  # thrown away an unattributed row's ENTIRE payload: those waiters and
   # their stacks are the only thing such an episode can honestly show, and
   # they are what separates "blocked on the lock" from "queued for a
   # connection".
   @spec lock_stall_detail_lines(DbLatency.lock_stall_row()) :: [String.t()]
-  defp lock_stall_detail_lines(%{holder: holder, caller: caller, waiters: waiters, parked: parked}) do
-    holder_lines(holder) ++
+  defp lock_stall_detail_lines(%{subject: subject, caller: caller, waiters: waiters, parked: parked} = stall) do
+    subject_lines(stall.attribution, subject) ++
       caller_lines(caller) ++
       Enum.map(waiters, &"  waiter #{&1.pid} waiting #{&1.elapsed_ms}ms at #{&1.current_function}") ++
       Enum.map(parked, &"  parked #{&1.pid} in the NIF #{&1.elapsed_ms}ms at #{&1.current_function}")
@@ -1119,13 +1129,31 @@ defmodule Grappa.Operator do
       Enum.map(caller.stacktrace, &"    #{&1}")
   end
 
-  @spec holder_lines(map() | nil) :: [String.t()]
-  defp holder_lines(nil), do: []
+  # 🔴 issue 1960 — the LABEL is chosen by the verdict, and that is the whole
+  # reason this takes an attribution. One row shape now carries three
+  # subjects, and rendering all three under the old `holder at` wording would
+  # hand an operator a HOLDER to blame on the two verdicts that never observed
+  # a hold — the same claim `subject_clause/3` in `Grappa.Repo.LockWatch`
+  # refuses to make in the log line this row mirrors.
+  @spec subject_lines(DbLatency.lock_stall_row_attribution(), map() | nil) :: [String.t()]
+  defp subject_lines(_, nil), do: []
 
-  defp holder_lines(holder) do
-    ["  holder at #{holder.current_function} (#{holder.status}, mailbox #{holder.message_queue_len})"] ++
-      Enum.map(holder.stacktrace, &"    #{&1}")
+  defp subject_lines(attribution, subject) do
+    [
+      "  #{subject_label(attribution)} at #{subject.current_function} " <>
+        "(#{subject.status}, mailbox #{subject.message_queue_len})"
+    ] ++
+      Enum.map(subject.stacktrace, &"    #{&1}")
   end
+
+  # No `nil` clause, and Dialyzer is right to insist: a row with no
+  # attribution is a `:resolved` one, whose `subject` is nil, so
+  # `subject_lines/2`'s first clause has already returned. A `nil` arm here
+  # would be an unreachable label for a block that is never rendered.
+  @spec subject_label(:named | :none | :cohort) :: String.t()
+  defp subject_label(:named), do: "holder"
+  defp subject_label(:none), do: "longest waiter"
+  defp subject_label(:cohort), do: "longest parked"
 
   @doc """
   #357 — zero the `Grappa.DbLatency` counters (`bin/grappa

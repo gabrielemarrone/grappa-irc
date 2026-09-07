@@ -1,4 +1,5 @@
 import { type Component, For, Show } from "solid-js";
+import { createBackdropDismiss } from "./lib/backdropDismiss";
 import { networkIdBySlug } from "./lib/networks";
 import { createOverlayLock } from "./lib/overlayScrollLock";
 import { pushChannelUmode } from "./lib/socket";
@@ -76,6 +77,14 @@ const UmodeModal: Component = () => {
   // #232 shared Esc-to-close (topmost-first, focus-independent).
   createOverlayLock(() => umodeModalState() !== null, ".umode-modal", closeUmodeModal);
 
+  // issue 1982 — the scrim dismisses on the press it began, not on any click
+  // that happens to land on it. Both openers (bare `/umode`, `/mode <ownnick>`)
+  // reach `openUmodeModal` with no `await` ahead of them, so a tap on send
+  // mounts this backdrop under the finger and the tap's own synthesised click
+  // hit-tests onto it. Same defect and same cure as issue 1831 on BanlistModal
+  // and ModeModal — see lib/backdropDismiss.ts.
+  const backdropDismiss = createBackdropDismiss(closeUmodeModal);
+
   return (
     <Show when={target()} keyed>
       {(t) => (
@@ -83,7 +92,8 @@ const UmodeModal: Component = () => {
         // biome-ignore lint/a11y/noStaticElementInteractions: backdrop is non-interactive scrim
         <div
           class="modal-backdrop modal-backdrop-viewport mode-modal-backdrop"
-          onClick={closeUmodeModal}
+          onPointerDown={backdropDismiss.onPointerDown}
+          onClick={backdropDismiss.onClick}
         >
           {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner dialog onClick only stops backdrop-click propagation; Esc closes via the shared overlay stack */}
           <div

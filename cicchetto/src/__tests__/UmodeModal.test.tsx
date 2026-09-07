@@ -101,6 +101,54 @@ describe("UmodeModal", () => {
     expect(vendor.getAttribute("aria-disabled")).toBe("true");
   });
 
+  // issue 1982 — the same defect issue 1831 cured on BanlistModal and
+  // ModeModal, on the sibling it did not reach. `umodeViewCommand` (bare
+  // `/umode`) and `umodeTargetViewCommand` (`/mode <ownnick>`) both call
+  // `openUmodeModal` with no `await` ahead of it, so the scrim is mounted while
+  // the finger is still down and the tap's synthesised click lands on it.
+  // Nothing about this arm is umode-specific: it is the shared cure applied to
+  // the third of five compose-reachable overlays.
+  describe("backdrop dismiss is armed by the press, not by the click (issue 1982)", () => {
+    const backdropIn = (container: HTMLElement): HTMLElement => {
+      const el = container.querySelector<HTMLElement>(".mode-modal-backdrop");
+      if (el === null) throw new Error("no umode backdrop rendered");
+      return el;
+    };
+
+    it("ignores a click the backdrop never received a pointerdown for", () => {
+      mockUmodes[1] = [];
+      openUmodeModal("bahamut");
+      const { container, queryByTestId } = render(() => <UmodeModal />);
+
+      fireEvent.click(backdropIn(container));
+
+      expect(queryByTestId("umode-modal")).not.toBeNull();
+    });
+
+    it("still dismisses on a press and release that both land on the backdrop", () => {
+      mockUmodes[1] = [];
+      openUmodeModal("bahamut");
+      const { container, queryByTestId } = render(() => <UmodeModal />);
+
+      const backdrop = backdropIn(container);
+      fireEvent.pointerDown(backdrop);
+      fireEvent.click(backdrop);
+
+      expect(queryByTestId("umode-modal")).toBeNull();
+    });
+
+    it("a press that starts INSIDE the dialog does not dismiss on release", () => {
+      mockUmodes[1] = [];
+      openUmodeModal("bahamut");
+      const { container, getByTestId, queryByTestId } = render(() => <UmodeModal />);
+
+      fireEvent.pointerDown(getByTestId("umode-modal"));
+      fireEvent.click(backdropIn(container));
+
+      expect(queryByTestId("umode-modal")).not.toBeNull();
+    });
+  });
+
   it("renders only the server-advertised umodes when the server sent a set (#249)", () => {
     // The server advertised only +i (invisible) and +x (masked host); the
     // modal renders exactly those, NOT the full static table.

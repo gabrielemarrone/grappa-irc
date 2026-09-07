@@ -1,4 +1,5 @@
 import { type Component, createEffect, createSignal, For, Show } from "solid-js";
+import { createBackdropDismiss } from "./lib/backdropDismiss";
 import { casemappingForSlug } from "./lib/casemapping";
 import { friendlyError } from "./lib/friendlyError";
 import { nickEquals } from "./lib/nickEquals";
@@ -35,6 +36,16 @@ const ServiceModal: Component = () => {
   // same wiring as ServerReplyModal / ModeModal. A new pane-covering modal
   // MUST push the overlay refcount or the iOS scroll-freeze mis-counts.
   createOverlayLock(() => state() !== null, ".service-modal-body", close);
+
+  // issue 1982 — the scrim dismisses on the press it began, not on any click
+  // that happens to land on it. `serviceModalCommand` opens FIRST and awaits
+  // `sendBodyLines` after (an ordering #1518 pinned: the $server high-water
+  // mark must be taken before the POST), so a tap on send provably mounts this
+  // backdrop before the tap's synthesised click is hit-tested. Same defect and
+  // same cure as issue 1831 on BanlistModal and ModeModal — see
+  // lib/backdropDismiss.ts. Created at component scope, not inside the keyed
+  // `Show`, so switching services cannot reset the arm mid-gesture.
+  const backdropDismiss = createBackdropDismiss(close);
 
   return (
     <Show when={state()} keyed>
@@ -89,7 +100,8 @@ const ServiceModal: Component = () => {
           // biome-ignore lint/a11y/noStaticElementInteractions: backdrop is non-interactive scrim
           <div
             class="modal-backdrop modal-backdrop-viewport service-modal-backdrop"
-            onClick={close}
+            onPointerDown={backdropDismiss.onPointerDown}
+            onClick={backdropDismiss.onClick}
           >
             {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner dialog onClick only stops backdrop-click propagation; Esc closes via the shared overlay stack */}
             <div

@@ -202,4 +202,49 @@ describe("ServiceModal (#290)", () => {
     fireEvent.click(screen.getByLabelText("close"));
     expect(screen.queryByTestId("service-modal")).toBeNull();
   });
+
+  // issue 1982 — the last of the five compose-reachable overlays to still
+  // dismiss on a bare click. `serviceModalCommand` calls `openServiceModal`
+  // FIRST and only then awaits `sendBodyLines` — an ordering #1518 pinned as
+  // load-bearing (the high-water mark must be taken before the POST), so the
+  // scrim provably exists before the tap's compat mouse events are dispatched.
+  // The cure therefore has to sit on the scrim; moving the `await` ahead of the
+  // open would trade this bug for #1518's.
+  describe("backdrop dismiss is armed by the press, not by the click (issue 1982)", () => {
+    const backdropIn = (container: HTMLElement): HTMLElement => {
+      const el = container.querySelector<HTMLElement>(".service-modal-backdrop");
+      if (el === null) throw new Error("no service backdrop rendered");
+      return el;
+    };
+
+    it("ignores a click the backdrop never received a pointerdown for", () => {
+      openServiceModal("svc-press-a", "NickServ");
+      const { container } = render(() => <ServiceModal />);
+
+      fireEvent.click(backdropIn(container));
+
+      expect(screen.queryByTestId("service-modal")).not.toBeNull();
+    });
+
+    it("still dismisses on a press and release that both land on the backdrop", () => {
+      openServiceModal("svc-press-b", "NickServ");
+      const { container } = render(() => <ServiceModal />);
+
+      const backdrop = backdropIn(container);
+      fireEvent.pointerDown(backdrop);
+      fireEvent.click(backdrop);
+
+      expect(screen.queryByTestId("service-modal")).toBeNull();
+    });
+
+    it("a press that starts INSIDE the dialog does not dismiss on release", () => {
+      openServiceModal("svc-press-c", "NickServ");
+      const { container } = render(() => <ServiceModal />);
+
+      fireEvent.pointerDown(screen.getByTestId("service-modal"));
+      fireEvent.click(backdropIn(container));
+
+      expect(screen.queryByTestId("service-modal")).not.toBeNull();
+    });
+  });
 });

@@ -47851,3 +47851,79 @@ _Deploy: **cic bundle only** — no server code, no wire change, no
 `protocol_version` movement. `serverBundleVersion` was already on the wire
 (`api.ts` `bundle_hash` event); this slice is the first production code to
 read it._
+<!-- entry #1973 -->
+
+---
+
+## 2026-09-07 — #1973: the client protocol constant lags by construction, so the cure is a pin and not more diligence
+
+`cicchetto`'s `CLIENT_PROTOCOL_VERSION` said 9 while `Grappa.Protocol`'s
+`@protocol_version` said 13, so every boot of every current bundle logged
+`protocol mismatch: this bundle speaks 9, the server speaks 11` against
+production. The same defect the constant's own note already records for
+`2 → 9` — *"a true statement about a stale constant, not about a real
+incompatibility"* — and it came back because nothing pinned the two numbers
+to each other in this direction.
+
+**The recurrence is structural, and that is the argument.** Measured on
+`origin/main`: 12 bumps of `@protocol_version` (1 → 13, 2026-07-27 →
+2026-09-06) against 3 writes of the cic constant, two of which were
+catch-ups — `2 → 9` swallowed seven bumps at once. Since cic first declared
+a version (2026-08-16) the two have been equal for roughly 8 days out of 22.
+The stale value is the NORMAL state of that file. A rule saying "remember to
+bump both" has now been written twice and obeyed neither time.
+
+**Why the three existing pins all stayed green: every one of them is
+one-sided, and none of them looks at `version/0`.**
+`protocol_test.exs` asserted `cic >= Protocol.min_version()` (`9 >= 1`) and
+cic's floor `<= Protocol.version()` (`9 <= 13`); `serverProtocol.test.ts`
+asserted `MIN_SERVER <= CLIENT` (`9 <= 9`). Nothing compared cic against what
+the server actually SPEAKS. The new pin is
+`cic_protocol_version() == Protocol.version()`, and equality rather than `>=`
+because the two are one contract version by definition: cic below is a stale
+constant, cic above is a bundle claiming a shape no server ever emitted, and
+`>=` waves one of them through. It is deliberately NOT the
+`MIN_SERVER_PROTOCOL_VERSION` axis — what cic SPEAKS says nothing about what
+it REQUIRES, and after this bump the two no longer coincide (13 vs 9), which
+is those axes working rather than drifting.
+
+### The objection that had to be measured before the cure, and how it resolved
+
+`noteServerProtocol` is a pure inequality: its only silence is exact
+equality, so it warns for `server < CLIENT` and `server > CLIENT` alike.
+Raising the constant to 13 while production speaks 11 therefore does not
+silence the warn — it reverses its sign. The question raised before any edit
+was whether the cure merely relocates the lie.
+
+It does not, and the distinction is between the two configurations rather
+than between the two directions. Today's warn fires with ZERO skew: prod
+serves the `v1.5.1` bundle (declares 9, measured at the tag) against the
+`v1.5.1` server (speaks 11), both artefacts from one commit, and that is what
+makes the message a lie. After the bump and the pin, bundle and BEAM built
+from the same commit are equal by construction, so an inequality at runtime
+means the two artefacts came from DIFFERENT commits — which is exactly the
+`--cic`-only skew the warn was written to surface. `13` against a `11` server
+is reachable only that way.
+
+Measured while resolving it, and worth keeping because it bounds the claim:
+the two deltas between 11 and 13 cannot hurt a newer bundle talking to an
+older server. v12's break was measured in the OPPOSITE direction (an old
+bundle drops `presence_changed` on the unknown `source: "ison"` enum member;
+a bundle knowing the wider set accepts a server that never sends it), and
+v13's `stale_code_path` token is loopback-gated, so no browser is ever handed
+it. That acquits those two deltas specifically — it is not a general proof
+that a newer bundle tolerates an older server, which #1393d repealed
+outright.
+
+vjt's call (2026-09-07): keep the condition as it is. Narrowing the warn to
+`server < CLIENT` would reverse a deliberate choice — the note on the
+function already says the newer-server direction is additive and tolerated
+and keeps warning anyway, because on a service-worker-cached PWA the skew
+FACT is the signal. The floor (`MIN_SERVER_PROTOCOL_VERSION`,
+`min_protocol_version`) is the #1654 question and is untouched here.
+
+_Deploy: **cic bundle** — one integer literal and comments in `socket.ts`;
+the pin is a test and reaches CI only. Ship the bundle with a server built
+from the same commit: a `--cic`-only push of this bundle onto the current
+`1.5.1` BEAM will log the mismatch, and after this change that log is telling
+the truth._

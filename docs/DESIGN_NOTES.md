@@ -48609,3 +48609,95 @@ v10/v11 shape (REST endpoints sit outside the generated schema), but the 422
 moved, `ErrorTokensDriftTest` went red, and this paragraph had already
 written the bump off before either spoke. `min_protocol_version` stays 1:
 no pre-v14 bundle knows `/ignore`, so none can earn the token._
+<!-- entry #1767c -->
+
+---
+
+## 2026-09-07 — #1767c: the LockWatch flake is quarantined at MODULE scope, and that is a real hole
+
+`test/grappa/repo/lock_watch_test.exs` is excluded from CI by default. vjt's
+ruling on issue 1767, 2026-09-07: *"se abbiamo un flake test disattiviamo e
+apriamo issue per fixarlo"*. **Issue 1767 stays OPEN** — it is where the cure
+will be built. This entry records the quarantine, which is the immediate action
+and explicitly not the diagnosis.
+
+The trigger, from the orchestrator's sightings register (`.orchestrate/
+flake-1767-lockwatch-sightings.md`, kept on the Pi — read by them, not by me,
+so it is attributed and not claimed): six reds in forty minutes on one evening,
+five distinct carriers inside this module plus one in `JoinSeedCostTest`; one
+carrier reproduced in isolation at 38 tests against a clean `origin/main`; one
+test green and red on the SAME sha.
+
+### Where the exclusion lives, and why it cannot live in `config/test.exs`
+
+The tag is `@moduletag :flaky` on the test module; the exclusion is
+`ExUnit.start(capture_log: true, exclude: [:flaky])` in
+`test/test_helper.exs`. That placement is not a preference. The same file
+already documents the incident that settles it: **`ExUnit.start/1` opts
+override `config :ex_unit` SILENTLY**, and on 2026-05-13 the CP25
+shared-singleton fix shipped INERT for ~12 hours because a `max_cases: 2` in
+`ExUnit.start/1` quietly beat the `max_cases: 1` in the config. An exclusion
+written config-side would have been the next thing to ship inert, and it would
+have looked exactly like a working one.
+
+Getting back in is `scripts/test.sh --include flaky <path>`. Mix configures the
+CLI `--include` before requiring `test_helper.exs`, and `:include` is a
+different key from the `:exclude` set here, so the `ExUnit.start/1` call does
+not clobber it — measured below rather than reasoned about, since reasoning is
+what produced the twelve inert hours.
+
+### The four measurements
+
+All on this branch, in the container, `scripts/test.sh`:
+
+* **Module size / baseline.** Unmodified tree: `38 tests, 0 failures` in 11.5s.
+  Green on that run — the flake is intermittent by construction, which is why a
+  single green proves nothing and is not offered as proof of anything.
+* **NEGATIVE.** Default run of the file: header `Excluding tags: [:flaky]`,
+  then `0 tests, 0 failures (38 excluded)`. The exclusion is live and its reach
+  is exactly the 38.
+* **POSITIVE.** `--include flaky` on the same file: **38 tests actually ran**,
+  150.8s. `--include` beats the exclude. This run did more than count: it
+  reproduced the quarantined phenomenon — `1 failure`,
+  `lock_roles/0 names the same holders and waiters inspect_lock/0 does`,
+  `** (ExUnit.TimeoutError) test timed out after 60000ms`. Same class as the
+  register's sightings, on the first attempt after tagging.
+* **SUITE DELTA.** Full suite before: `8 doctests, 65 properties, 7164 tests,
+  0 failures` (155.3s). After: `8 doctests, 65 properties, 7126 tests, 0
+  failures (38 excluded)` (141.7s). 7164 − 7126 = **38**, exactly the module,
+  with the doctest and property figures unmoved. Nothing but this module left
+  CI. Both runs green, so the delta is a clean subtraction and not a red
+  cutting a run short.
+* **NON-COLLATERAL.** `git grep ':flaky' -- test/ config/` returned **0 hits**
+  before this change (positive control alongside: `@moduletag` in
+  `lock_watch_test.exs` = 1 hit, so the grep was alive). The tag has exactly one
+  carrier; a second one is a decision, not housekeeping.
+
+### 🔴 The price, stated rather than buried
+
+`@moduletag` quarantines the **whole module**, not the tests that actually
+flake. From here on **a GENUINE `LockWatch` regression lands unobserved in
+CI** — the holder/waiter attribution (#1420), the unattributed-queue arm
+(#1687), the NIF cohort (#1901), the closing bracket (#1888), the episode
+instant, the boot-time priming of the logger module cache (#1715), the barrier
+budget (#1747) and the filmer (#1767) all stop being defended. That is the cost
+the ruling accepts in exchange for not losing unrelated PRs a night to somebody
+else's flake, and it is a cost, not a claim that the module stopped mattering.
+
+Module scope rather than five per-test tags is deliberate for a second reason:
+the carrier set is not closed. Five carriers are known; pinning today's five
+would go stale on the sixth while reading, to anyone glancing at CI, like
+coverage.
+
+### What this entry does NOT claim
+
+* Not a diagnosis and not a cure. Nothing here explains the flake; #1767b's
+  measurements remain the state of the art and issue 1767 remains open.
+* Not that the phenomenon is confined to this module. `JoinSeedCostTest`
+  carried a red the same night per the register; it is deliberately NOT tagged
+  by this slice.
+* Not that `--include` is the only door back in — `--only flaky` was never
+  measured here.
+
+_Deploy: **test-only** — no production module, no migration, no `VERSION` bump,
+no cic bundle, no wire change._

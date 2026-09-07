@@ -70,6 +70,26 @@ defmodule Grappa.Repo.LockWatchTest do
   @moduletag timeout: @test_timeout_ms
   @waiter_budget_ms @test_timeout_ms * 2
 
+  # 🔴 QUARANTINED, NOT FIXED (issue 1767, vjt's ruling 2026-09-07).
+  #
+  # Six reds in forty minutes on one evening, five distinct carriers in this
+  # file, one of them reproduced in isolation and one green and red on the SAME
+  # sha. The ruling is the standing one for a flake — take it out of CI and keep
+  # the issue open for the cure — so this tag is the immediate action and NOT
+  # the diagnosis. Excluded by default in `test/test_helper.exs`, which is where
+  # the exclusion has to live: `ExUnit.start/1` opts override `config :ex_unit`
+  # SILENTLY, and this repo already paid ~12 hours of an inert fix for that.
+  # Run it with `scripts/test.sh --include flaky <path>`.
+  #
+  # ⚠️ THE PRICE, stated because it is real: `@moduletag` quarantines the WHOLE
+  # module, not the tests that actually flake. Every claim in this file — the
+  # holder/waiter attribution, the NIF cohort, the closing bracket, the filmer —
+  # stops being defended in CI from here on, so a GENUINE `LockWatch` regression
+  # now lands unobserved. That is the cost the ruling accepts to stop six
+  # unrelated PRs a night dying on somebody else's flake; it is not a claim that
+  # the module is unimportant. Lifting the tag is part of closing issue 1767.
+  @moduletag :flaky
+
   # 🔴 THE BARRIER IS A THIRD CLOCK, AND IT HAS TO BE ORDERED TOO (#1747).
   #
   # `await_until/2` used to count 300 ATTEMPTS, which is not a budget in

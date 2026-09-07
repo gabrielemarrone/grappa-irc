@@ -15,7 +15,18 @@
 # overruns the `busy_timeout` window with cascading "Database busy"
 # errors. The `max_cases: 1` config solves both the singleton class AND
 # the sqlite-busy class with one knob.
-ExUnit.start(capture_log: true)
+#
+# `exclude: [:flaky]` is the quarantine door (issue 1767, vjt's ruling
+# 2026-09-07: a flake comes out of CI and the issue stays open for the cure).
+# It lives HERE and not in `config/test.exs` for the very reason documented
+# above — `ExUnit.start/1` wins over `config :ex_unit`, so a config-side
+# exclusion would be the next thing to ship inert. A tagged module still runs
+# on demand: `scripts/test.sh --include flaky <path>` (CLI `--include` is
+# configured before this file is required and is a different key, so it is not
+# clobbered by the line below). Today the tag has exactly one carrier,
+# `test/grappa/repo/lock_watch_test.exs`; adding a second one is a decision,
+# not housekeeping.
+ExUnit.start(capture_log: true, exclude: [:flaky])
 Ecto.Adapters.SQL.Sandbox.mode(Grappa.Repo, :manual)
 
 # #594 — the cross-process BusyRetry fault table, created ONCE here so it is

@@ -47927,3 +47927,231 @@ the pin is a test and reaches CI only. Ship the bundle with a server built
 from the same commit: a `--cic`-only push of this bundle onto the current
 `1.5.1` BEAM will log the mismatch, and after this change that log is telling
 the truth._
+<!-- entry #1950 -->
+
+---
+
+## 2026-09-06 — #1950: a scrollback row is a RECORD, so its nicks take no live glyph
+
+`ScrollbackPane`'s `prefixFor` had two branches: CONTENT rows
+(privmsg/notice/action) read the server's send-time `meta.sender_prefix`
+snapshot — that is #25, which stopped a MODE change from retroactively
+re-prefixing old lines — and *everything else* re-derived the glyph from the
+LIVE members store at every render, on the stated rationale that those rows
+"describe a *now* event, so the current grade is the correct glyph".
+
+That rationale is false for every row it covered. **A scrollback
+row is never "now": it is a RECORD.** Reading the live store answers "what
+grade does this nick hold at the moment you happen to be looking", which is a
+different question from "what was true when this happened", and the difference
+is visible the instant the nick is opped.
+
+The reporter saw both halves of it on Azzurra:
+
+```
+20:30:23 * @Mezmerize [mezmerize@staff.azzurra.chat] has joined #italia
+20:31:21 * @ULIAK [~ULIAK@5uo2.l.time4vps.cloud] has quit (Read/Dead Error: Input/output error)
+```
+
+The join line is wrong on the protocol outright — **JOIN carries no grade**;
+the `@` always arrives afterwards in a separate MODE, from a human op or from
+ChanServ auto-op a fraction of a second later — so `@nick has joined` states
+something that cannot ever have been true. It bites hardest exactly the people
+who look at it most: anyone with auto-op reads every one of their own joins as
+`@nick`. The quit line is the same defect with a later re-render as its
+trigger, and it also killed the issue's own guess that part/quit "render empty
+anyway because the sender is gone from the store".
+
+### The rule, and why the answer is not a snapshot
+
+Where the event HAS no grade — a join, a kick victim — there is nothing to
+snapshot and the correct value is always empty. So the cure is a named reading
+of the sender button rather than a second server column: `bareSpanWithPrefix/2`
+holds the one `<button>`, `contentSenderSpan/1` passes `prefixFor(nick)` and
+`recordSenderSpan/1` passes `""`. The glyph is a PARAMETER, never a default,
+so each call site states which reading it wants — the same no-magic-default-arg
+rule the bare/bracketed split already followed.
+
+**The rule that settles it: the ONLY glyph a scrollback row may carry is the
+#25 send-time snapshot, on a CONTENT row.** `prefixFor` keeps that branch and
+nothing else; there is no live members read left in `ScrollbackPane`. The
+members pane keeps one, because it is the single surface where "now" is
+actually the subject.
+
+### The `mode` carve-out this entry first defended, and why it fell
+
+This entry originally read *"`mode` is the ONE deliberate survivor … a mode
+row's whole subject IS the grade, so the sender's current status is the honest
+thing to show"*. That is retracted. The reporter closed it with a repro that
+refutes itself on its face:
+
+```
+20:58:09 * @Mezmerize sets mode +o Mezmerize on #grappa
+```
+
+The `@` is GRANTED by that very line, so the setter provably did not hold it
+when the event happened — no knowledge of the channel's history is needed to
+see the render is wrong. The general form has nothing to do with self-ops: a
+`mode` row records who set the mode THEN, so a setter deopped since reads plain
+on the line where they were opping people, and one opped since reads `@` on a
+line from when they were not. "Its subject is the grade" describes the row's
+CONTENT; the glyph is about its SENDER, and those are two different people as
+often as not.
+
+Losing the exception made the fix SMALLER, not bigger — one branch deleted
+instead of one branch conditioned.
+
+### Measured
+
+Two rounds on the untouched tree, `ScrollbackPane.test.tsx`.
+
+Round 1, seven cases: **6 red, 1 green**. Red — `join`, `part`, `quit`,
+`nick_change`, `topic`, `kick`; the `kick` row failed with **2** glyphs, not
+one, because it renders the kicker through the sender span AND the victim
+through its own `NickText`. Green — the `mode` case, which round 1 used as the
+block's POSITIVE CONTROL.
+
+That control could not survive round 2, since `mode` is now one of the
+absences. Its replacement is the one glyph path deliberately left standing:
+a CONTENT row rendering its #25 snapshot, through the same component, fixture
+and `.nick-prefix` selector. It proves a glyph CAN reach the DOM here, so the
+ten absences are not an artefact of a mocked-away `NickText`. It does NOT
+prove the LIVE store would have supplied one — after this fix nothing in the
+module reads it, so no in-block assertion can, and that half is carried by the
+red measurement below rather than pretended at.
+
+Round 2 (this extension), four more cases: **4 red, 0 green**, one glyph each
+(`mode` channel, `mode` self-op, `mode` on `$server`, `server_event` INVITE).
+Two of them are the interesting ones, because round 1's own text had ACQUITTED
+them:
+
+* `mode` on `$server` (#154(b) user modes). Round 1 reasoned it was safe
+  because no member list exists for that key. True, and irrelevant: seed one
+  and the old code paints an `@` on a row that has no channel grade at all. It
+  was safe by ROUTING ACCIDENT, not by rule. The unit fixture seeds a
+  deliberately unrealistic `$server` member list for exactly this reason — a
+  vacuous assertion would have passed either way.
+* the `server_event` INVITE into a channel we are ALREADY in. Round 1 listed
+  this as a stated residual, reasoned from `EventRouter` rather than measured.
+  It was real: red, one glyph. It is now fixed as a consequence of the total
+  rule, not as a carve-in.
+
+Counts, `bun.sh run test`: 6759 → **6755**. That is +4 new cases and −8 for
+the deleted `senderPrefix` unit tests, and the arithmetic closes exactly.
+
+### The helper is deleted, not just unused
+
+With the live branch gone, `nickColor.senderPrefix/3` had zero production
+callers — its only remaining consumers were its own eight unit tests. It is
+removed rather than left exported: there is no correct use of a live members
+read on a scrollback row, and an exported helper that says otherwise in its
+own doc comment is how the next session reintroduces this. `memberSigil`
+remains the members-pane path and is untouched.
+
+### What this does NOT claim
+
+Nothing here was measured on production. The Azzurra lines above are the
+reporter's, quoted from the issue; what was measured is the renderer, in jsdom
+for the eleven cases and against the live stack for the two-door
+(live vs. reload) contract in `issue1950-record-row-no-live-glyph.spec.ts`.
+
+The e2e `mode` case needs out-of-band standing to exist at all: setting `+o`
+requires chanop, so a setter who lacks the grade cannot normally produce the
+row. The reporter could because he is Azzurra staff
+(`mezmerize@staff.azzurra.chat` in the field line above) and the testnet runs
+the same ircd, bahamut — so the spec buys the same standing the same way. That
+is a property of the FIXTURE, not of the defect: the defect needs no oper,
+only a setter whose grade moved.
+
+### /OPER is not the standing — the fixture asked the wrong door
+
+The paragraph above first read "so the spec buys the same standing the same
+way, with /OPER", and the spec did exactly that: `oper()` on the line above
+`mode()`. It went red on `IrcPeer: timeout waiting for mode … (5000ms)`, and
+the reason is structural rather than incidental. bahamut's `m_mode` grants the
+override on
+
+```c
+IsULine || ((IsSAdmin || IsAdmin) && !MyClient(sptr)) || IsUmodez
+```
+
+and **`!MyClient` switches the admin arm off for anyone connected to the very
+server being asked** — which is every e2e peer. `IsUmodez` is unreachable:
+`m_umode` lists `z` (with `a`, `j`, `S`, `r`) among the modes a client may
+never set on itself. So an opered non-chanop lands on `chanop = 0`,
+`set_mode` raises `SM_ERR_NOPRIVS`, and the peer gets a 482 with no echo.
+**No quantity of /OPER was ever going to be enough**, and raising the 5 s
+budget would only have bought a slower red.
+
+The door that opens is `SAMODE`, which carries no `!MyClient` conjunct: it
+gates on `IsPrivileged` (the /OPER) plus `IsAdmin || IsSAdmin`. Umode `+A` is
+reachable because the leaf's O: line is `OaARD` and `s_conf.c`'s
+`oper_access[]` maps `A` to `OFLAG_ADMIN`, which is what lets the `MyClient`
+clamp `if (IsAdmin && !OPIsAdmin) ClearAdmin` spare it. `+a` stays out of
+reach and is not needed. Nothing downstream changes: `m_samode` relays through
+the same `sendto_channel_butserv` call `m_mode` uses, so the wire line is a
+plain `:<setter> MODE <chan> +o <nick>` and the row grappa stores is the row
+the spec was always asserting on.
+
+**The generalisable part is the comment, not the verb.** `oper()`'s docstring
+claimed ircops "issue MODE / SAMODE freely on any channel they're in" — true
+of the second and false of the first — and separately that the leaf is
+permanently split so "fresh JOINers never auto-op", which
+`infra/bahamut/Dockerfile:26` contradicts on purpose by sed-deleting
+`NO_CHANOPS_WHEN_SPLIT` from `config.h`. Sixteen of the suite's seventeen
+`.mode()` sites are green precisely because their peer joins FIRST and
+auto-ops. Two readers were sent down the MODE path by that comment before it
+was measured against the source; it is corrected in place.
+
+### Why the setter still joins second
+
+The cheap repair is to make the setter the founding JOINer, like the other
+sixteen sites. It is refused, and the spec now says so at the join. The claim
+is not "a mode row renders bare" but "a mode row renders bare **even when its
+setter demonstrably could not have held the glyph at the time**" — which is
+what makes `* @Mezmerize sets mode +o Mezmerize` self-refuting without any
+knowledge of the channel's history. A setter who joined first already holds
+`@` when the row is written, so reordering keeps the assertion passing while
+quietly deleting the thing it asserts. **Join order is load-bearing here; at
+the other sixteen sites it is the opposite — there it is the only way the peer
+gets chanop at all.**
+
+### The oracle, measured
+
+A repaired test that cannot fail is worse than a red one, so the fix was run
+against a deliberately un-cured tree. In a detached scratch worktree,
+`cicchetto/src/ScrollbackPane.tsx` and `cicchetto/src/lib/nickColor.ts` were
+reverted to their pre-#1950 blobs while the new tests were kept:
+
+| tree | `ScrollbackPane.test.tsx` |
+|---|---|
+| cured (HEAD) | **234 passed**, 0 failed |
+| pre-cure mutant | **10 failed**, 224 passed |
+
+All ten failures are the `#1950 record rows carry no live-derived mode glyph`
+block and all ten fail on the same assertion — `.nick-prefix` length 0, got 2
+— across join, part, quit, kick, topic, nick_change, the channel `mode` row,
+the **self-op `mode` row**, the user mode on `$server`, and the
+already-in-channel INVITE `server_event`. The mutation was proven real before
+the run (`export const senderPrefix` back in `nickColor.ts`, its call back in
+`prefixFor`) and proven gone after it, with a positive control showing the
+same grep finds the helper in the pre-cure blob.
+
+The same displacement was run on the STACK, because jsdom proves the renderer
+discriminates and only the live stack proves it through the reload door:
+
+| tree | `issue1950-record-row-no-live-glyph.spec.ts` |
+|---|---|
+| pre-cure mutant | both tests **RED**, on the glyph assertion |
+| cured | both tests **GREEN** (5.6 s, 5.1 s) |
+
+The red is the one that had to be checked, and it is the right red: `:73:1`
+fails at line 130 with `.nick-prefix` expected 0, **got 2** (both join rows
+re-prefixed), and `:181:1` at line 234 with expected 0, **got 1**. That second
+number is also the proof the SAMODE path works end to end — the assertion one
+line above it, `expect(modeRow).toHaveCount(1)`, PASSED, so the row
+`sets mode +o <staff>` was really created, relayed and persisted by the very
+sequence the fixture now issues. A cure that had not worked would have failed
+earlier, as a `samode`/`umode` timeout, and the red would have proven nothing.
+
+_Deploy: **cic bundle only** — no server module, no migration, no wire change._

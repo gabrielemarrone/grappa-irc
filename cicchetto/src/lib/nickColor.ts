@@ -1,6 +1,4 @@
-import type { Casemapping } from "./isupport";
-import type { ChannelMembers } from "./memberTypes";
-import { asciiFold, nickEquals } from "./nickEquals";
+import { asciiFold } from "./nickEquals";
 
 // UX-5 bucket BC2 — colored nicks (xchat-style) + scrollback-side
 // mode-prefix glyph lookup.
@@ -74,20 +72,29 @@ import { asciiFold, nickEquals } from "./nickEquals";
 //
 // ## Scrollback sender prefix
 //
-// Members-pane nicks already carry the prefix via `memberSigil`
-// (op `@`, halfop `%`, voiced `+`, plain ` `). Scrollback PRIVMSG
-// senders are bare `{nick}` interpolations — no per-message mode
-// flag on the wire (scrollback `messages` table is mode-agnostic;
-// modes belong to the live members store). The `senderPrefix`
-// helper looks up the CURRENT membership for (channel, nick) and
-// returns the highest-precedence prefix glyph for inline render in
-// `<sender>` / `*sender` lines.
+// Members-pane nicks carry the CURRENT prefix via `memberSigil` (op `@`,
+// halfop `%`, voiced `+`, plain ` `), and that pane is the only surface
+// where a live grade belongs — "now" is genuinely its subject.
 //
-// Returns empty string `""` (not " ") for plain / unknown members:
-// scrollback senders live inside `<...>` brackets and any space
-// would render as `< nick>` with a visible gap. The members-pane
-// padding-space (`memberSigil` returns " ") only makes sense in a
-// column layout where prefix-aligned glyphs share width.
+// A scrollback row is not. It is a RECORD of a past event, so the only
+// glyph it may show is `snapshotSenderPrefix` below: the grade the SERVER
+// captured at send time into `meta.sender_prefix`, on a CONTENT row.
+//
+// #1950 deleted this module's live counterpart, `senderPrefix(members,
+// nick, casemapping)`, which looked the grade up in the members store at
+// render time. Its last caller was `ScrollbackPane`'s `prefixFor`, and
+// re-deriving there re-prefixed a nick's own history the instant they were
+// opped — `* @nick has joined` (JOIN carries no grade on the wire at all),
+// `* @nick has quit`, and `* @nick sets mode +o nick`, a line that GRANTS
+// the `@` it was painted with. There is no correct use of a live members
+// read on a scrollback row, so the helper is gone rather than left
+// available: an exported function with no caller is an invitation.
+//
+// Returns empty string `""` (not " ") for a plain / unknown sender:
+// scrollback senders live inside `<...>` brackets and any space would
+// render as `< nick>` with a visible gap. The members-pane padding-space
+// (`memberSigil` returns " ") only makes sense in a column layout where
+// prefix-aligned glyphs share width.
 
 export const NICK_PALETTE_SIZE = 32;
 
@@ -115,24 +122,6 @@ export const nickColorIndex = (nick: string): number => {
 };
 
 export const nickColorVar = (nick: string): string => `var(--nick-color-${nickColorIndex(nick)})`;
-
-// Highest-precedence channel-mode prefix glyph for a (members, nick)
-// pair. Mirrors the precedence in `memberSigil` (@ > % > +) — both
-// derive from the same `MemberEntry.modes` array, just diverge on
-// what to return for the plain case.
-export const senderPrefix = (
-  members: ChannelMembers | undefined,
-  nick: string,
-  casemapping: Casemapping,
-): "@" | "%" | "+" | "" => {
-  if (!members) return "";
-  const entry = members.find((m) => nickEquals(m.nick, nick, casemapping));
-  if (!entry) return "";
-  if (entry.modes.includes("@")) return "@";
-  if (entry.modes.includes("%")) return "%";
-  if (entry.modes.includes("+")) return "+";
-  return "";
-};
 
 // #25: glyph for a CONTENT row's own sender, read from the server's
 // send-time snapshot (`meta.sender_prefix`) instead of live member

@@ -400,17 +400,82 @@ export class IrcPeer {
   // alone — `raw_modes.includes(rawModes.replace(/^[+-]/, ''))` would
   // be a stricter check, but for our use sites (single-letter modes)
   // the literal echo is reliable enough.
+  //
+  // ⚠️ The caller must be chanop. On this testnet that means the caller
+  // FOUNDED the channel (`NO_CHANOPS_WHEN_SPLIT` is sed-deleted from
+  // `config.h` in `infra/bahamut/Dockerfile`, so the first JOINer
+  // auto-ops) — every green `.mode()` call site does exactly that.
+  // /OPER is NOT a substitute; see `oper()` and `samode()`.
   async mode(channel: string, rawModes: string, extraArg?: string): Promise<void> {
-    const modeEcho = onceMatching(
+    const modeEcho = this.channelModeEcho(channel, rawModes, extraArg, "mode");
+    this.client.mode(channel, rawModes, extraArg);
+    await modeEcho;
+  }
+
+  // Set channel modes by OPER OVERRIDE, for a caller who is not chanop.
+  // Resolves on the same echo `mode` waits for, because bahamut's
+  // `m_samode` relays the result through the very `sendto_channel_butserv`
+  // call `m_mode` uses — `:<setter> MODE <chan> <modes> <params>`. The
+  // frame going OUT is the only difference between the two verbs, which is
+  // why they share the wait rather than each growing their own copy.
+  //
+  // Preconditions, both mandatory and both loud when missing:
+  //   1. `oper(...)`      — `m_samode` gates on `IsPrivileged(cptr)`.
+  //   2. `umode("+A")`    — and on `IsAdmin(cptr) || IsSAdmin(cptr)`. That
+  //      arm returns 0 SILENTLY, so a missing `+A` costs a MODE_TIMEOUT_MS
+  //      wait with no server error to read. `+a` (SAdmin) is unreachable:
+  //      `m_umode` lists `a` among the modes a client may never set itself.
+  //
+  // Emits a GLOBOPS notice server-side. Harmless here (no spec reads the
+  // oper notice stream), but it is why this is a separate named verb and
+  // not a quiet fallback inside `mode()`: a test should say when it is
+  // overriding.
+  async samode(channel: string, rawModes: string, extraArg?: string): Promise<void> {
+    const modeEcho = this.channelModeEcho(channel, rawModes, extraArg, "samode");
+    this.client.raw(
+      extraArg ? ["SAMODE", channel, rawModes, extraArg] : ["SAMODE", channel, rawModes],
+    );
+    await modeEcho;
+  }
+
+  // The echo shared by `mode` and `samode`. Kept private: a caller that
+  // wants to WITNESS someone else's mode change wants `waitForLine`, which
+  // filters on `from_server` — this one matches the peer's own action too.
+  private channelModeEcho(
+    channel: string,
+    rawModes: string,
+    extraArg: string | undefined,
+    verb: string,
+  ): Promise<IrcEventMap["mode"]> {
+    return onceMatching(
       this.client,
       "mode",
       (event: { target: string; raw_modes: string }) =>
         event.target === channel && event.raw_modes === rawModes,
       MODE_TIMEOUT_MS,
-      `mode ${channel} ${rawModes}${extraArg ? ` ${extraArg}` : ""}`,
+      `${verb} ${channel} ${rawModes}${extraArg ? ` ${extraArg}` : ""}`,
     );
-    this.client.mode(channel, rawModes, extraArg);
-    await modeEcho;
+  }
+
+  // Set OWN user modes. Resolves on upstream's echo, which bahamut sends
+  // as `:<nick> MODE <nick> :<modes>` (`send_umode_out` → `send_umode`
+  // with `ALL_UMODES`, and `UMODE_A` is in it — a mode outside that mask
+  // would apply SILENTLY and this would time out).
+  //
+  // Shares the `mode` EVENT with the channel verbs above but not their
+  // wait: irc-framework routes every MODE through one handler keyed on
+  // `params[0]`, so the discriminator here is the nick, not the channel.
+  async umode(rawModes: string): Promise<void> {
+    const umodeEcho = onceMatching(
+      this.client,
+      "mode",
+      (event: { target: string; raw_modes: string }) =>
+        event.target === this.nick && event.raw_modes === rawModes,
+      MODE_TIMEOUT_MS,
+      `umode ${this.nick} ${rawModes}`,
+    );
+    this.client.raw(["MODE", this.nick, rawModes]);
+    await umodeEcho;
   }
 
   // Set a channel topic. Resolves once upstream echoes the `topic`
@@ -484,18 +549,29 @@ export class IrcPeer {
     this.client.raw(["KILL", targetNick, reason]);
   }
 
-  // /OPER up to ircop. Required to bypass bahamut's "no ops on new
-  // channels in split-mode" gate that otherwise locks every freshly
-  // created channel out of any kind of mode-setting (including +i, +k,
-  // +o). Resolves on 381 RPL_YOUREOPER.
+  // /OPER up to ircop. Resolves on 381 RPL_YOUREOPER.
   //
-  // Reason this matters for e2e: the testnet leaf isn't S2S-linked to
-  // the hub at the time peer clients connect (255 reports `0 servers`),
-  // so bahamut keeps the leaf in split-mode permanently — fresh JOINers
-  // never auto-op. Without ircop bypass, the peer can JOIN but cannot
-  // MODE +i / MODE +o anyone, including itself. With +O (and the
-  // configured `OaARD` flagset on the leaf's O: line), ircops issue
-  // MODE / SAMODE freely on any channel they're in.
+  // 🔴 WHAT THIS DOES NOT BUY, corrected 2026-09-07 against bahamut's own
+  // source after the text below sent two readers the wrong way (#1950).
+  // It used to claim the leaf is permanently split so "fresh JOINers never
+  // auto-op", and that an ircop can therefore "issue MODE / SAMODE freely
+  // on any channel they're in". Both halves were false:
+  //
+  //   1. Fresh JOINers DO auto-op. `infra/bahamut/Dockerfile` sed-deletes
+  //      `#define NO_CHANOPS_WHEN_SPLIT` from `config.h` precisely so that
+  //      split-mode stops withholding chanop, and every `.mode()` call
+  //      site in the suite relies on it by having its peer join first.
+  //   2. /OPER does NOT unlock plain MODE. `m_mode` grants override on
+  //      `IsULine || ((IsSAdmin || IsAdmin) && !MyClient(sptr)) ||
+  //      IsUmodez` — the `!MyClient` conjunct switches the admin arm off
+  //      for anyone connected to THIS server, and `IsUmodez` is out of
+  //      reach (`m_umode` refuses `+z` from clients). So an opered peer
+  //      that is not chanop gets 482 and no echo, i.e. a MODE_TIMEOUT_MS
+  //      wait that looks exactly like a hung fixture.
+  //
+  // The override door is `samode()`, which needs this call AND
+  // `umode("+A")`. What /OPER alone is genuinely for: oper-only verbs
+  // (`kill()`, #554) and oper-visible state (#367's WHOIS role text).
   //
   // #367 — we wait on the raw `381` wire-line, NOT an `rpl_youreoper`
   // named event: irc-framework does not surface 381 as a typed event, so

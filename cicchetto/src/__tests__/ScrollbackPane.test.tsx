@@ -1623,6 +1623,192 @@ describe("ScrollbackPane", () => {
     });
   });
 
+  // #1950 — a scrollback row is a RECORD of a past event, never a view of
+  // "now", so no nick on one may take its glyph from the LIVE members store.
+  //
+  // `prefixFor`'s live branch re-derived the glyph at every render, so a nick
+  // opped AFTER the event retroactively re-prefixed their own history. On a
+  // `join` it states something that cannot ever have been true — JOIN carries
+  // no grade on the wire; the `@` arrives later in a separate MODE — and
+  // anyone with ChanServ auto-op reads every one of their own joins as
+  // `@nick`. On a `part`/`quit`/`kick` the row was reported in the field as
+  // `* @ULIAK [...] has quit (...)`, which is the same defect wearing the
+  // "they were still in the store" mask: any later re-render of that row,
+  // after the nick rejoined and was re-opped, re-prefixes it.
+  //
+  // This is exactly the class #25 removed from CONTENT rows (which read the
+  // server's send-time `meta.sender_prefix` snapshot), left standing on the
+  // record rows. There is nothing to snapshot here: a record row's correct
+  // glyph is always none.
+  //
+  // `mode` was argued as a survivor — "its subject IS the grade change, so the
+  // live read is honest" — and the reporter closed that too, with a repro that
+  // refutes itself on its face:
+  //
+  //     20:58:09 * @Mezmerize sets mode +o Mezmerize on #grappa
+  //
+  // The `@` is being GRANTED by that very line, so the setter provably did not
+  // hold it when the event happened. No knowledge of the channel's history is
+  // needed to see the render is wrong. The general form is the same as every
+  // other record row: a `mode` row states who set the mode THEN, and painting
+  // the setter with their grade at render time re-prefixes history — someone
+  // deopped since reads plain on the line where they were opping people.
+  //
+  // So the perimeter is total: no live-derived glyph on ANY scrollback row,
+  // and `prefixFor` keeps only its #25 snapshot branch. Nothing is carved out,
+  // which is why the raw-event arms are pinned here too — including the one
+  // case where their live read produced a visible glyph rather than "" by
+  // construction (an INVITE into a channel we are already in).
+  describe("#1950 record rows carry no live-derived mode glyph", () => {
+    // channelKey is mocked to `${slug} ${name}`.
+    const RECORD_KEY = "freenode #glyph" as ChannelKey;
+    const SERVER_KEY = "freenode $server" as ChannelKey;
+
+    // Three members — far below LARGE_CHANNEL_THRESHOLD, so the #222 presence
+    // filter leaves join/part/quit/nick_change rendered with the pref unset.
+    // `alice` and `carol` hold @ RIGHT NOW; that is the whole premise.
+    //
+    // The `$server` entry is DELIBERATELY unrealistic — a synthetic server
+    // window has no member list, which is exactly why the user-MODE arm used
+    // to be safe by accident rather than by rule. Seeding one is what makes
+    // that case's assertion falsifiable instead of vacuous: it proves the arm
+    // cannot read the store even when the store has something to say.
+    const oppedMembers = () => ({
+      [RECORD_KEY]: [
+        { nick: "alice", modes: ["@"] },
+        { nick: "carol", modes: ["@"] },
+        { nick: "dave", modes: [] },
+      ],
+      [SERVER_KEY]: [{ nick: "alice", modes: ["@"] }],
+    });
+
+    const recordRow = (
+      kind: ScrollbackMessage["kind"],
+      extra: Partial<ScrollbackMessage>,
+    ): ScrollbackMessage => ({
+      id: 1,
+      network: "freenode",
+      channel: "#glyph",
+      server_time: 1_700_000_000_000,
+      kind,
+      sender: "alice",
+      body: null,
+      meta: {},
+      ...extra,
+    });
+
+    const renderRow = (msg: ScrollbackMessage, channelName: string): HTMLElement => {
+      mockMembersByChannel.mockReturnValue(oppedMembers());
+      setScrollback({ [`freenode ${channelName}` as ChannelKey]: [msg] });
+      render(() => (
+        <ScrollbackPane networkSlug="freenode" channelName={channelName} kind="channel" />
+      ));
+      return screen.getByTestId("scrollback-line");
+    };
+
+    afterEach(() => {
+      clearChannelPresencePref(RECORD_KEY);
+      clearChannelPresencePref(SERVER_KEY);
+      setScrollback({});
+    });
+
+    const cases: { name: string; channelName: string; msg: ScrollbackMessage }[] = [
+      { name: "join", channelName: "#glyph", msg: recordRow("join", {}) },
+      { name: "part", channelName: "#glyph", msg: recordRow("part", { body: "brb" }) },
+      {
+        name: "quit",
+        channelName: "#glyph",
+        msg: recordRow("quit", { body: "Read/Dead Error: Input/output error" }),
+      },
+      {
+        name: "nick_change",
+        channelName: "#glyph",
+        msg: recordRow("nick_change", { meta: { new_nick: "alice2" } }),
+      },
+      { name: "topic", channelName: "#glyph", msg: recordRow("topic", { body: "the new topic" }) },
+      // `kick` carries TWO live glyphs — the kicker through the sender span
+      // and the VICTIM through its own NickText. A victim is out of the
+      // channel the instant the event lands, so an `@` on them can only have
+      // come from a later rejoin-and-reop. Both must be gone.
+      {
+        name: "kick",
+        channelName: "#glyph",
+        msg: recordRow("kick", { sender: "carol", meta: { target: "alice" } }),
+      },
+      // A channel MODE set by someone who holds @ now. Even where the live
+      // glyph happens to be TRUE, it is still derived from "now" on a row that
+      // reports "then" — the contract is about the derivation, not the value.
+      {
+        name: "mode (channel)",
+        channelName: "#glyph",
+        msg: recordRow("mode", { meta: { modes: "+o", args: ["dave"] } }),
+      },
+      // The reporter's own line: `* @Mezmerize sets mode +o Mezmerize`. Setter
+      // and target are one nick, so the row itself is the evidence the setter
+      // held nothing at the time — the `@` is what this line grants.
+      {
+        name: "mode (self-op — the row that grants the glyph it was painted with)",
+        channelName: "#glyph",
+        msg: recordRow("mode", { meta: { modes: "+o", args: ["alice"] } }),
+      },
+      // #154(b) user-MODE on the synthetic server window. Its live read
+      // returned "" only because a `$server` key is never populated; with the
+      // key seeded above, the OLD code paints an `@` on a row that has no
+      // channel grade to speak of at all.
+      {
+        name: "mode (user mode on $server)",
+        channelName: "$server",
+        msg: recordRow("mode", { channel: "$server", meta: { modes: "+i" } }),
+      },
+      // The raw-event residual this fix retires: an INVITE persisted on a
+      // channel we are ALREADY in, so `membersByChannel()` DOES have an entry
+      // and the inviter's live grade reached the row. Every other raw verb
+      // lands on `$server` and returned "" by construction — which is an
+      // accident of routing, not a rule, and is why the rule now lives in
+      // `prefixFor` instead.
+      {
+        name: "server_event INVITE into a channel we are already in",
+        channelName: "#glyph",
+        msg: recordRow("server_event", {
+          sender: "carol",
+          meta: { raw_verb: "INVITE", raw_sender: "carol", raw_params: ["grappa", "#glyph"] },
+        }),
+      },
+    ];
+
+    for (const { name, channelName, msg } of cases) {
+      it(`renders a ${name} row with no mode glyph although the nick holds @ now`, () => {
+        const line = renderRow(msg, channelName);
+        // The row rendered and names the nick — otherwise the absence below
+        // would be the absence of a row, not the absence of a glyph.
+        expect(line.textContent).toContain(msg.sender);
+        expect(line.querySelectorAll(".nick-prefix")).toHaveLength(0);
+      });
+    }
+
+    // The block's own positive control. It can no longer be a `mode` row —
+    // that row is now one of the absences — so it is the ONE glyph path this
+    // fix deliberately leaves standing: #25's send-time snapshot on a CONTENT
+    // row, rendered through the same component, the same fixture and the same
+    // `.nick-prefix` selector the ten assertions above read.
+    //
+    // What it proves: a glyph CAN reach the DOM here, so those ten absences
+    // are not an artefact of a mocked-away NickText or a stale selector.
+    // What it does NOT prove: that the LIVE store would have supplied one —
+    // after this fix nothing in the module reads it, so no in-block assertion
+    // can. That half is carried by the pre-fix RED measurement recorded in
+    // the commit body, which is the only place it can honestly live.
+    it("POSITIVE CONTROL — a content row still shows its #25 snapshot glyph here", () => {
+      const line = renderRow(
+        recordRow("privmsg", { body: "hello", meta: { sender_prefix: "@" } }),
+        "#glyph",
+      );
+      const glyphs = line.querySelectorAll(".scrollback-sender .nick-prefix");
+      expect(glyphs).toHaveLength(1);
+      expect(glyphs[0]?.textContent).toBe("@");
+    });
+  });
+
   // C7.2: Muted-events rendering.
   describe("muted-event rendering (C7.2)", () => {
     it("applies .scrollback-muted class to JOIN events", () => {

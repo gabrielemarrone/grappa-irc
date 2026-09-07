@@ -48492,6 +48492,18 @@ as a history of what was asked and done (Gabriele's rulings, 2026-09-06:
 name what was removed; drop the trailing list; print in the window; then
 the bare verb opens settings rather than printing the list).
 
+**The ignore list is read at the SPAWN BOUNDARY, not in `init/1`.** First
+CI run after the review fixes: `JoinSeedCostTest` (the #1759 join-storm
+count, which deliberately counts every query in the VM) read one stray
+`user_settings` query at W=1 and failed its linearity law. The stray was
+`UserSettings.get_ignores/2` inside `Session.Server.init/1`: a `:transient`
+respawn re-runs `init/1` with the same opts, so an init-time read fires on
+every crash — and the storm fixture's session respawns mid-window. Moved to
+`start_session/3` beside `auto_away_debounce_ms` and `show_peer_profiles`
+(`Map.put_new_lazy(:ignores, …)`), the repo's spawn-boundary pattern, which
+a respawn does not re-run. Same edge those two carry: a restart holds the
+spawn-time value until the next `ignores_changed`.
+
 **Review fixes (vjt on #1984, 2026-09-07), all three taken as fixes.** (1)
 Masks are compiled ONCE — `Mask.compile_all/1` in `Session.Server` at init
 and on every `ignores_changed` — and the router matches the compiled list;

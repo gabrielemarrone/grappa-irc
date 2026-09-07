@@ -440,6 +440,10 @@ defmodule Grappa.Session.Server do
           # above; omitted opt (test seam) defaults to `false` — silent
           # unless a test explicitly opts in.
           optional(:show_peer_profiles) => boolean(),
+          # #162 — stored `/ignore` masks, resolved at the spawn boundary
+          # (`Grappa.Session.start_session/3`); compiled in `init/1`. Kept
+          # in sync with the `Grappa.Session.start_session/3` opts twin.
+          optional(:ignores) => [String.t()],
           # GH #189 — on-connect perform list + its `$oper_pass` secret,
           # decrypted plaintext from the credential (nil when unset). Run at 001
           # before the built-in identify and before autojoin. The `$nickserv_pass`
@@ -1194,12 +1198,16 @@ defmodule Grappa.Session.Server do
       # #216: default capability table until 005 arrives — MODES/LINELEN
       # included since #1390.
       isupport: ISupport.default(),
-      # #162: /ignore masks, read once at spawn so the very first inbound
-      # line is filtered — an ignore set while the session was parked must
-      # hold from the first message after reconnect, not from the next sync.
-      # #162 — compiled ONCE here and on every `:ignores_changed`, never per
-      # message: the delivery filter runs on every inbound line.
-      ignores: Mask.compile_all(UserSettings.get_ignores(opts.subject, opts.network_slug)),
+      # #162: /ignore masks, read at the SPAWN BOUNDARY (`start_session/3`,
+      # like `auto_away_debounce_ms` and `show_peer_profiles`) so the very
+      # first inbound line is filtered — an ignore set while the session was
+      # parked holds from the first message after reconnect. Not read here:
+      # a `:transient` respawn re-runs `init/1` and a query in it would fire
+      # on every crash (measured by `JoinSeedCostTest` as a stray read inside
+      # a join storm). Compiled ONCE here and on every `:ignores_changed`,
+      # never per message. Absent = a unit test built the Server directly
+      # (the boundary was bypassed), the same contract as its two siblings.
+      ignores: Mask.compile_all(Map.get(opts, :ignores, [])),
       # #247: /notify presence map — seeded at the end-of-MOTD arm.
       presence: %{},
       presence_armed: false,

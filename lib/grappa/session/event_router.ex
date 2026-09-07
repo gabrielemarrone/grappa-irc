@@ -121,7 +121,7 @@ defmodule Grappa.Session.EventRouter do
   @type state :: %{
           # #162: optional so a bare unit-test state still routes; the filter
           # reads it with a `[]` default. Session.Server always sets it.
-          optional(:ignores) => [String.t()],
+          optional(:ignores) => [Mask.compiled()],
           required(:subject) => Session.subject(),
           required(:network_id) => integer(),
           required(:nick) => String.t(),
@@ -374,8 +374,10 @@ defmodule Grappa.Session.EventRouter do
   end
 
   # #162 — the /ignore delivery filter. Pure: reads `state.ignores`, which
-  # Session.Server loads at init and re-syncs on mutation, so nothing here
-  # touches the DB on the inbound hot path.
+  # Session.Server loads at init and re-syncs on mutation — already COMPILED
+  # (`Mask.compile_all/1`), so nothing here touches the DB or builds a regex
+  # on the inbound hot path. The subject nick folds with THIS network's
+  # casemapping (#537); the masks were folded with it when they were written.
   #
   # Scope, deliberately narrow for v1:
   #   * CONTENT only — PRIVMSG and NOTICE (ACTION rides PRIVMSG). Presence
@@ -401,7 +403,7 @@ defmodule Grappa.Session.EventRouter do
       {masks, {nick, user, host}} ->
         not nick_eq?(nick, state.nick) and
           Mentions.mentionable_sender?(nick) and
-          Mask.any_match?(masks, nick, user, host)
+          Mask.any_match?(masks, nick, user, host, casemapping(state))
     end
   end
 

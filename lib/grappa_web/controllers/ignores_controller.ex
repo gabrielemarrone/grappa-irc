@@ -48,7 +48,12 @@ defmodule GrappaWeb.IgnoresController do
     subject = session_subject(conn)
     network = conn.assigns.network
 
-    with {:ok, outcome, mask, masks} <- UserSettings.add_ignore(subject, network.slug, mask) do
+    # #537 ingress: the mask folds with THIS network's casemapping, read off
+    # the live session (`:ascii` when none — the same door `/notify` uses).
+    casemapping = Session.casemapping(subject, network.id)
+
+    with {:ok, outcome, mask, masks} <-
+           UserSettings.add_ignore(subject, network.slug, mask, casemapping) do
       :ok = Session.ignores_changed(subject, network.id, masks)
 
       conn
@@ -68,7 +73,10 @@ defmodule GrappaWeb.IgnoresController do
     subject = session_subject(conn)
     network = conn.assigns.network
 
-    with {:ok, outcome, mask, masks} <- UserSettings.remove_ignore(subject, network.slug, mask) do
+    casemapping = Session.casemapping(subject, network.id)
+
+    with {:ok, outcome, mask, masks} <-
+           UserSettings.remove_ignore(subject, network.slug, mask, casemapping) do
       :ok = Session.ignores_changed(subject, network.id, masks)
       json(conn, %{masks: masks, mask: mask, outcome: outcome})
     end

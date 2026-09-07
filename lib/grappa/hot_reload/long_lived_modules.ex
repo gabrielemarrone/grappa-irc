@@ -181,7 +181,11 @@ defmodule Grappa.HotReload.LongLivedModules do
     Grappa.Session.WhoisAccum,
     Grappa.Session.WhowasAccum,
     Grappa.Session.WindowState,
-    Grappa.IRC.FakeLag
+    Grappa.IRC.FakeLag,
+    # #162 — `Session.Server` holds the ignore list COMPILED, a list of
+    # `%Grappa.IRC.Mask{}`; a field-add to that struct is a state-shape
+    # change for every live session, so its file is on the preflight's list.
+    Grappa.IRC.Mask
   ]
 
   @typedoc """
@@ -230,6 +234,7 @@ defmodule Grappa.HotReload.LongLivedModules do
           | Grappa.Session.WhowasAccum
           | Grappa.Session.WindowState
           | Grappa.IRC.FakeLag
+          | Grappa.IRC.Mask
 
   @doc """
   Returns the list of long-lived `GenServer` modules whose state

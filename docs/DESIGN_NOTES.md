@@ -48474,7 +48474,7 @@ no cic bundle, no wire change._
 **Shipped:** a per-subject, per-network `/ignore` mask list, honoured
 server-side. `Grappa.IRC.Mask` (the `nick!user@host` glob matcher grappa never
 had), an `"ignores"` key in `user_settings.data` with `get_ignores/2` +
-`add_ignore/3` + `remove_ignore/3`, `/networks/:network_id/ignores` REST, the
+`add_ignore/4` + `remove_ignore/4`, `/networks/:network_id/ignores` REST, the
 list carried on `Session.Server` state and re-synced on mutation, and the
 filter itself at the head of `EventRouter.route/2`. cic gets `/ignore <mask>`,
 `/unignore <mask>`; a BARE `/ignore` opens the ignore-list settings
@@ -48491,6 +48491,24 @@ which auto-dismisses and holds one line: the rows stay, so the window reads
 as a history of what was asked and done (Gabriele's rulings, 2026-09-06:
 name what was removed; drop the trailing list; print in the window; then
 the bare verb opens settings rather than printing the list).
+
+**Review fixes (vjt on #1984, 2026-09-07), all three taken as fixes.** (1)
+Masks are compiled ONCE — `Mask.compile_all/1` in `Session.Server` at init
+and on every `ignores_changed` — and the router matches the compiled list;
+the first cut compiled up to three regexes per mask per inbound line, on
+exactly the users who use the feature. (2) The fold is the NETWORK's, not
+ASCII-only: `Mask.normalize/2` takes the casemapping (the controller reads
+`Session.casemapping/2`, the `/notify` door), so a stored mask sits in that
+network's folded space, and the delivery match folds only the SUBJECT nick
+with `state.isupport`'s casemapping — the #537 ingress rule applied to one
+more key. The review asked for this to be documented as an accepted rfc1459
+gap; Gabriele ruled it fixed instead, since casemapping is implemented and
+the "accepted gap" reads as older than that fact. Compiled masks are
+casemapping-independent, so nothing recompiles on 005; the one remaining
+edge is the pre-005 write, the same one the autojoin plan carries. (3)
+`\A`/`\z` instead of `^`/`$`, with a test that a trailing newline on the
+subject does not match — and every positive assertion in `MaskTest` pins
+the backslashes themselves.
 
 **Settings sub-page.** The list is also editable under settings → "ignore
 list" (`cicchetto/src/IgnoresSettings.tsx`), one block per network with × to

@@ -270,7 +270,7 @@ function friendlyKnown(err: ApiError, code: ErrorTokensRestErrorToken): string {
       // resource, not a rate — the recourse is pruning, not waiting.
       return "Your watch list for this network is full. Remove an entry first.";
     case "invalid_mask":
-      // #162 — `/ignore` mask rejected by `Grappa.IRC.Mask.normalize/1`
+      // #162 — `/ignore` mask rejected by `Grappa.IRC.Mask.normalize/2`
       // (empty, whitespace, or not `nick!user@host`). A bare nick is
       // fine — it becomes `nick!*@*` server-side — so name the shape.
       return "That ignore mask is not valid. Use a nick or nick!user@host.";

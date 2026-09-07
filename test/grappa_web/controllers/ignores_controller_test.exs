@@ -28,7 +28,7 @@ defmodule GrappaWeb.IgnoresControllerTest do
     end
 
     test "reflects the stored list", %{conn: conn, user: user, network: network} do
-      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, network.slug, "spambot")
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, network.slug, "spambot", :ascii)
 
       assert json_response(get(conn, "/networks/#{network.slug}/ignores"), 200) ==
                %{"masks" => ["spambot!*@*"]}
@@ -68,8 +68,8 @@ defmodule GrappaWeb.IgnoresControllerTest do
   describe "DELETE /networks/:network_id/ignores/:mask" do
     test "removes by normalised mask and answers the resulting list",
          %{conn: conn, user: user, network: network} do
-      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, network.slug, "spambot")
-      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, network.slug, "*!*@evil.example")
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, network.slug, "spambot", :ascii)
+      {:ok, _, _, _} = UserSettings.add_ignore({:user, user.id}, network.slug, "*!*@evil.example", :ascii)
 
       conn = delete(conn, "/networks/#{network.slug}/ignores/SPAMBOT")
 

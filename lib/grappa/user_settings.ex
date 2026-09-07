@@ -71,8 +71,8 @@ defmodule Grappa.UserSettings do
   | `"upload_confirm_enabled"` | `boolean()`        | `get_upload_confirm_enabled/1`, |
   |                        |                        | `put_upload_confirm_enabled/2`  |
   |                        |                        | (#1883)                         |
-  | `"ignores"`            | `ignores()`            | `get_ignores/2`, `add_ignore/3`,|
-  |                        |                        | `remove_ignore/3` (#162)        |
+  | `"ignores"`            | `ignores()`            | `get_ignores/2`, `add_ignore/4`,|
+  |                        |                        | `remove_ignore/4` (#162)        |
   | `"vhost_selection"`    | `list(String.t())`     | `get_vhost_selection/1`,        |
   |                        |                        | `put_vhost_selection/2`         |
   | `"active_theme_id"`    | `pos_integer() \\| nil`| `get_active_theme_id/1`,        |
@@ -1048,12 +1048,12 @@ defmodule Grappa.UserSettings do
   """
   @type ignore_outcome :: :added | :already_ignored | :removed | :not_ignored
 
-  @spec add_ignore(Subject.t(), String.t(), String.t()) ::
+  @spec add_ignore(Subject.t(), String.t(), String.t(), Identifier.casemapping()) ::
           {:ok, :added | :already_ignored, String.t(), [String.t()]}
           | {:error, :invalid_mask | :list_full | Ecto.Changeset.t() | :db_unavailable}
-  def add_ignore({_, _} = subject, network_slug, raw_mask)
-      when is_binary(network_slug) and is_binary(raw_mask) do
-    with {:ok, mask} <- normalize_mask(raw_mask) do
+  def add_ignore({_, _} = subject, network_slug, raw_mask, casemapping)
+      when is_binary(network_slug) and is_binary(raw_mask) and is_atom(casemapping) do
+    with {:ok, mask} <- normalize_mask(raw_mask, casemapping) do
       add_normalized(subject, network_slug, mask, get_ignores(subject, network_slug))
     end
   end
@@ -1077,12 +1077,12 @@ defmodule Grappa.UserSettings do
   removes `spambot!*@*`). Idempotent: removing an absent mask is
   `{:ok, :not_ignored, mask, list}`.
   """
-  @spec remove_ignore(Subject.t(), String.t(), String.t()) ::
+  @spec remove_ignore(Subject.t(), String.t(), String.t(), Identifier.casemapping()) ::
           {:ok, :removed | :not_ignored, String.t(), [String.t()]}
           | {:error, :invalid_mask | Ecto.Changeset.t() | :db_unavailable}
-  def remove_ignore({_, _} = subject, network_slug, raw_mask)
-      when is_binary(network_slug) and is_binary(raw_mask) do
-    with {:ok, mask} <- normalize_mask(raw_mask) do
+  def remove_ignore({_, _} = subject, network_slug, raw_mask, casemapping)
+      when is_binary(network_slug) and is_binary(raw_mask) and is_atom(casemapping) do
+    with {:ok, mask} <- normalize_mask(raw_mask, casemapping) do
       remove_normalized(subject, network_slug, mask, get_ignores(subject, network_slug))
     end
   end
@@ -1100,8 +1100,12 @@ defmodule Grappa.UserSettings do
     with {:ok, _} <- put_ignores(subject, slug, next), do: {:ok, next}
   end
 
-  defp normalize_mask(raw) do
-    case Grappa.IRC.Mask.normalize(raw) do
+  # The #537 ingress fold: the caller names the network's casemapping (the
+  # web edge reads it off `Grappa.Session.casemapping/2`), so the stored mask
+  # already sits in that network's folded space and the delivery match only
+  # has to fold the subject.
+  defp normalize_mask(raw, casemapping) do
+    case Grappa.IRC.Mask.normalize(raw, casemapping) do
       {:ok, mask} -> {:ok, mask}
       :error -> {:error, :invalid_mask}
     end

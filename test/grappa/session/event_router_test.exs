@@ -11,7 +11,7 @@ defmodule Grappa.Session.EventRouterTest do
   """
   use ExUnit.Case, async: true
 
-  alias Grappa.IRC.{JoinFailure, Message, Parser}
+  alias Grappa.IRC.{JoinFailure, Mask, Message, Parser}
 
   alias Grappa.Session.{
     Deps,
@@ -7204,11 +7204,28 @@ defmodule Grappa.Session.EventRouterTest do
   # The four exclusions are each pinned, because each is a way a mask could
   # silence something it must not.
   describe "/ignore delivery filter (#162)" do
-    # No default argument: none of these cases needs one, and a `\` default
-    # is a backslash in source — which the tooling between the editor and the
-    # file has been eating in this change. Two clauses would be the shape if
-    # a case ever needed overrides.
-    defp ignoring(masks), do: base_state(%{ignores: masks})
+    # The state carries the masks COMPILED, as `Session.Server` hands them
+    # over — the router never sees a string.
+    defp ignoring(masks), do: base_state(%{ignores: Mask.compile_all(masks)})
+
+    # #537 — the subject folds with the SESSION's casemapping. On rfc1459 the
+    # mask `/ignore Foo[1]` was stored as `foo{1}!*@*` (the ingress fold), and
+    # a sender spelled `Foo[1]` is the same person to that ircd, so it drops.
+    # On ascii the same stored string is a different key from `foo[1]`.
+    test "on rfc1459 a sender folds to the stored mask across the national chars" do
+      from_brackets = msg(:privmsg, ["#chan", "x"], {:nick, "Foo[1]", "u", "h"})
+
+      on_rfc =
+        base_state(%{
+          isupport: %{ISupport.default() | casemapping: :rfc1459},
+          ignores: Mask.compile_all(["foo{1}!*@*"])
+        })
+
+      on_ascii = ignoring(["foo{1}!*@*"])
+
+      assert {:cont, _, []} = EventRouter.route(from_brackets, on_rfc)
+      assert {:cont, _, [{:persist, :privmsg, _}]} = EventRouter.route(from_brackets, on_ascii)
+    end
 
     test "a PRIVMSG from an ignored nick is dropped — no effects at all" do
       privmsg = msg(:privmsg, ["#chan", "buy my coins"], {:nick, "spambot", "u", "h"})

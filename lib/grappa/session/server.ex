@@ -91,7 +91,7 @@ defmodule Grappa.Session.Server do
     UserSettings
   }
 
-  alias Grappa.IRC.{AuthFSM, Client, CTCP, Identifier, LineSplit, Message}
+  alias Grappa.IRC.{AuthFSM, Client, CTCP, Identifier, LineSplit, Mask, Message}
   alias Grappa.Net.SourceAliasManager
   alias Grappa.PubSub.Topic
   alias Grappa.Push.Triggers, as: PushTriggers
@@ -651,7 +651,7 @@ defmodule Grappa.Session.Server do
           # globs. Loaded from UserSettings at init and re-synced on every
           # mutation, so EventRouter's delivery filter stays a pure read of
           # state — no IO on the inbound hot path.
-          ignores: [String.t()],
+          ignores: [Mask.compiled()],
           # #1946: the ISON polling loop. `presence_poll_ref` is the armed
           # timer (nil when the mechanism is not `:ison`, or when the watch
           # list is empty — an empty list arms nothing at all).
@@ -1197,7 +1197,9 @@ defmodule Grappa.Session.Server do
       # #162: /ignore masks, read once at spawn so the very first inbound
       # line is filtered — an ignore set while the session was parked must
       # hold from the first message after reconnect, not from the next sync.
-      ignores: UserSettings.get_ignores(opts.subject, opts.network_slug),
+      # #162 — compiled ONCE here and on every `:ignores_changed`, never per
+      # message: the delivery filter runs on every inbound line.
+      ignores: Mask.compile_all(UserSettings.get_ignores(opts.subject, opts.network_slug)),
       # #247: /notify presence map — seeded at the end-of-MOTD arm.
       presence: %{},
       presence_armed: false,
@@ -2505,7 +2507,7 @@ defmodule Grappa.Session.Server do
   # the whole resulting list rather than a diff: it is small, bounded, and a
   # replace cannot drift from the DB the way an incremental patch could.
   def handle_call({:ignores_changed, masks}, _, state) when is_list(masks) do
-    {:reply, :ok, Map.put(state, :ignores, masks)}
+    {:reply, :ok, Map.put(state, :ignores, Mask.compile_all(masks))}
   end
 
   @doc """

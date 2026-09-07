@@ -26,7 +26,11 @@
 // pure form-logic + live-upstream-effect proof.
 
 import { loginAs, openSettingsSection } from "../fixtures/cicchettoPage";
-import { GRAPPA_BASE_URL, patchNetworkConnectionState } from "../fixtures/grappaApi";
+import {
+  GRAPPA_BASE_URL,
+  patchNetworkConnectionState,
+  setNetworkIdentityNick,
+} from "../fixtures/grappaApi";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
@@ -43,20 +47,6 @@ async function getNetworks(token: string): Promise<NetRow[]> {
   });
   if (!res.ok) throw new Error(`getNetworks: ${res.status} ${await res.text()}`);
   return (await res.json()) as NetRow[];
-}
-
-// Set the per-network nick via the subject-agnostic door
-// `PATCH /networks/:slug/identity` — the SAME door cic's editor drives. Used
-// by the finally to restore the seeded baseline nick.
-async function setNetworkNick(token: string, slug: string, nick: string): Promise<void> {
-  const res = await fetch(`${GRAPPA_BASE_URL}/networks/${slug}/identity`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ nick }),
-  });
-  if (!res.ok) {
-    throw new Error(`setNetworkNick: ${slug}=${nick} → ${res.status} ${await res.text()}`);
-  }
 }
 
 // Poll GET /networks until `slug` reaches `state` (or throw). Gates on the
@@ -186,7 +176,7 @@ test("issue #476 — a USER edits its per-network identity in settings and it ap
     // resetSubject (wrapped-test teardown) does NOT touch the nick, so this
     // is the only restore. Swallow errors: a cleanup hiccup must not mask
     // the test's own assertion outcome.
-    await setNetworkNick(vjt.token, NETWORK_SLUG, specNick())
+    await setNetworkIdentityNick(vjt.token, NETWORK_SLUG, specNick())
       .then(() => waitForNetworkNick(vjt.token, NETWORK_SLUG, specNick()))
       .then(() => waitForOwnNickInMembers(vjt.token, NETWORK_SLUG, channel, specNick()))
       .catch(() => {});

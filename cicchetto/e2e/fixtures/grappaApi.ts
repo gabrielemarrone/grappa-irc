@@ -1061,6 +1061,29 @@ export async function settleNetworkAutojoin(
   }
 }
 
+// Set the per-network nick through `PATCH /networks/:slug/identity` — the
+// SAME subject-agnostic door the settings identity editor drives.
+//
+// Shared because both callers need it for the same reason and not by
+// coincidence: a spec that changes the nick through the UI has to put the
+// provisioned one back before the #1152 teardown guard reads the live value,
+// so this is the restore half of every apply-and-restore identity spec.
+// (Lifted out of issue476's private copy when issue 1993 needed the second.)
+export async function setNetworkIdentityNick(
+  token: string,
+  slug: string,
+  nick: string,
+): Promise<void> {
+  const res = await fetch(`${GRAPPA_BASE_URL}/networks/${slug}/identity`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ nick }),
+  });
+  if (!res.ok) {
+    throw new Error(`setNetworkIdentityNick: ${slug}=${nick} → ${res.status} ${await res.text()}`);
+  }
+}
+
 // #498 — self-serve accretion (`POST /session/networks`). Binds + spawns
 // the visitor_enabled `slug` for the authenticated subject, anon
 // (`auth_method: :none`), with the account name as the default nick. `204`

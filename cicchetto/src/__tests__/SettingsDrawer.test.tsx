@@ -384,12 +384,51 @@ describe("SettingsDrawer", () => {
     expect(screen.queryByTestId("quit-irc-btn")).toBeNull();
   });
 
-  it("backdrop click fires onClose", () => {
-    const onClose = vi.fn();
-    wrap(true, onClose);
-    const backdrop = screen.getByTestId("settings-drawer-backdrop");
-    fireEvent.click(backdrop);
-    expect(onClose).toHaveBeenCalled();
+  // issue 1982 — the drawer is the THIRD site of the issue 1831 class, and the
+  // first one reached through `requestOpenSettings` rather than through an
+  // `open*Modal`. A bare watch-family verb (`/notify`, `/alias`, …) reaches
+  // `requestOpenSettings` with no `await` ahead of it, so Shell's tick effect
+  // has already run `setSettingsOpen(true)` — and `.settings-drawer-backdrop.open`
+  // takes `pointer-events: auto` with no transition — by the time the tap's
+  // compat mouse events are hit-tested. They hit-test against the NEW layout,
+  // the click lands on the backdrop, and the dismiss fires in the gesture that
+  // opened the drawer. Symptom as reported: the draft clears and nothing opens.
+  //
+  // This case used to read "backdrop click fires onClose" and asserted a bare
+  // click, which is the defect written down as a requirement: it is exactly the
+  // click a press-armed dismiss must ignore. Replaced by the trio below rather
+  // than deleted — the dismiss itself must keep working.
+  describe("backdrop dismiss is armed by the press, not by the click (issue 1982)", () => {
+    const backdrop = (): HTMLElement => screen.getByTestId("settings-drawer-backdrop");
+
+    it("ignores a click the backdrop never received a pointerdown for", () => {
+      const onClose = vi.fn();
+      wrap(true, onClose);
+
+      fireEvent.click(backdrop());
+
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("still dismisses on a press and release that both land on the backdrop", () => {
+      const onClose = vi.fn();
+      wrap(true, onClose);
+
+      fireEvent.pointerDown(backdrop());
+      fireEvent.click(backdrop());
+
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it("a press that starts INSIDE the drawer does not dismiss on release", () => {
+      const onClose = vi.fn();
+      wrap(true, onClose);
+
+      fireEvent.pointerDown(screen.getByRole("dialog", { name: /settings/i }));
+      fireEvent.click(backdrop());
+
+      expect(onClose).not.toHaveBeenCalled();
+    });
   });
 
   it("open=true gives the drawer the .open class", () => {

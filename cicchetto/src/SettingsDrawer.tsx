@@ -16,6 +16,7 @@ import { windowCandidates } from "./lib/activeWindows";
 import { ApiError, displayNick, type Network, visitorNetworkNick } from "./lib/api";
 import { getSubject, token } from "./lib/auth";
 import { autoAwayDebounceValue, loadAutoAwayDebounce, saveAutoAwayDebounce } from "./lib/autoAway";
+import { createBackdropDismiss } from "./lib/backdropDismiss";
 import { type ChannelKey, decodeChannelKey } from "./lib/channelKey";
 import { getColoredNicklist } from "./lib/colorNicklist";
 import {
@@ -1084,12 +1085,26 @@ const SettingsDrawer: Component<Props> = (props) => {
     </header>
   );
 
+  // issue 1982 — the scrim dismisses on the press it began, not on any click
+  // that happens to land on it. A bare watch-family verb reaches
+  // `requestOpenSettings` with no `await` ahead of it, Shell's tick effect runs
+  // `setSettingsOpen(true)` in the same turn, and `.settings-drawer-backdrop.open`
+  // takes `pointer-events: auto` with NO transition — so a tap on send arms this
+  // scrim under the finger and the tap's own synthesised click hit-tests onto
+  // it, closing the drawer inside the gesture that opened it. Same defect and
+  // same cure as issue 1831 on BanlistModal and ModeModal; this is the first
+  // site reached through `requestOpenSettings` rather than an `open*Modal`.
+  // See lib/backdropDismiss.ts. `props.onClose` is read through an arrow so the
+  // dismiss always calls the CURRENT prop, never the one captured at mount.
+  const backdropDismiss = createBackdropDismiss(() => props.onClose());
+
   return (
     <>
       <div
         class="settings-drawer-backdrop"
         classList={{ open: props.open }}
-        onClick={props.onClose}
+        onPointerDown={backdropDismiss.onPointerDown}
+        onClick={backdropDismiss.onClick}
         aria-hidden="true"
         data-testid="settings-drawer-backdrop"
       />

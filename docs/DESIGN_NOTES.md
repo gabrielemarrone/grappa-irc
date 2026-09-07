@@ -47927,3 +47927,87 @@ the pin is a test and reaches CI only. Ship the bundle with a server built
 from the same commit: a `--cic`-only push of this bundle onto the current
 `1.5.1` BEAM will log the mismatch, and after this change that log is telling
 the truth._
+<!-- entry #1977 -->
+
+---
+
+## 2026-09-07 — #1977: the push was the one door still shipping the wire bytes, and the title took the same class
+
+Push notifications rendered the raw IRC body. `\x03` is non-printing, so the OS
+notification renderer drops the byte and leaves its decimal operands sitting in
+the text as ordinary digits: the lock-screen capture filed from `#allnitecafe`
+read `04QUACK` where the wire carried `\x03` `0` `4` `QUACK`.
+
+The projection already existed and had one caller too few. `Grappa.Mentions`
+runs `MircFormat.plain_text/1` before matching so a padded body cannot dodge or
+forge a mention, and cic parses the same bytes into styled runs for the message
+list. The same message was therefore de-formatted for matching, parsed for
+rendering, and shipped raw only to the notification — and that asymmetry, not
+the control byte, was the defect.
+
+The cure is in `Grappa.Push.Payload.build/3` rather than in the service worker:
+the server keeps one matcher and one projection, payloads already delivered stay
+consistent with the ones that follow, and no second parser ships inside the SW
+bundle. Interpreting instead of stripping was never on the table — the Web
+Notifications API takes plain text, so there is no styled-run surface to render
+into.
+
+### The title takes the same input class, and the asymmetry is measured
+
+`title` is built from `sender` and `channel`, so it needed deciding rather than
+assuming. Measured on this branch, executed rather than read off a regex:
+
+  * `Identifier.valid_nick?` on a `\x03`-bearing nick answers **false**, and so
+    does `valid_sender?` — the nick charset holds no control byte and the host
+    arm excludes `\x00-\x1f` outright. Positive controls `"alice"` and
+    `"irc.azzurra.chat"` both answer true. The one arm that would accept a
+    control byte is `<meta>`, and that shape is minted server-side for
+    non-IRC rows, never read off the wire.
+  * `Identifier.valid_channel?` on a `\x03`-bearing channel answers **true**.
+    The channel regex excludes only whitespace, comma and BELL; the negative
+    control `"#all nite"` is false, so that true is not vacuous.
+  * `Parser.parse/1` hands such a target back intact — `strip_unsafe_bytes/1`
+    removes `\x00 \r \n` and nothing else — and `canonical_target/1` folds
+    `A-Z` and passes every other byte through. A `\x03` in a channel name
+    therefore survives ingress, persist and fold.
+
+So a nick cannot carry it and a channel can. The projection sits on the COMPOSED
+title rather than on the channel alone: one door serves both arms, and the
+sender arm costs nothing because the projection is provably a no-op on any
+string the nick charset admits.
+
+### What does NOT get projected, and why that is the same rule
+
+`tag` and `url` keep the channel KEY exactly as stored. `tag` is the OS dedup
+key and `url` is a deep link cic resolves back to a window; projecting either
+would coalesce the banner against a surface that does not exist and land the
+click on a channel nobody is in. Two rendered fields project, two key fields do
+not — the key/display split, applied at one door.
+
+The issue left the dedup tag unmeasured ("probably untouched, but I did not
+check it"). It is untouched by the BODY: `dedup_key` reads `sender` or
+`channel` and never `body`, so no amount of formatting in a message can perturb
+the dedup surface — now pinned by an assert in the same test that pins the body.
+The second half is the part the report did not anticipate: the tag is not
+`\x03`-free in general, because a `\x03`-bearing CHANNEL puts it there, and
+deliberately so, since the tag is a key.
+
+The stripper is the mIRC one and not a control-byte purge: CTCP framing
+(`\x01`) round-trips verbatim per the wire-format rule, so an ACTION row still
+reaches the payload framed. That is pinned too, because `build/3` now runs a
+stripper and the next reader is entitled to know which one.
+
+### Refused
+
+No change to the service worker or to `pushPayload.ts` — the server projection
+makes both unnecessary, and a client-side stripper would be the second parser
+1908 spent its whole argument avoiding. No claim about payloads already
+delivered: they were sent raw and are gone, and nothing here rewrites stored
+rows. Whether a `\x03`-bearing channel is reachable on bahamut SPECIFICALLY was
+not measured — the ingress chain admits it, which is the fact the cure needs,
+and the ircd's own opinion would not make the projection wrong.
+
+_Deploy: **HOT** on all three substrates — measured via
+`Preflight.classify_paths/2` over the changed paths: `{:hot, []}` for `:docker`,
+`:jail` and `:linux`. Positive control: `VERSION` answers
+`{:cold, [version: ["VERSION"]]}` on jail and linux._

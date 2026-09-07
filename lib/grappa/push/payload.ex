@@ -14,13 +14,51 @@ defmodule Grappa.Push.Payload do
 
   ## Title / body
 
-    * **DM** (`channel == own_nick`): `title = sender`, body =
-      message body verbatim. Notification shape mirrors how mobile
-      messengers surface a 1:1 chat — sender on top line, content on
-      second.
+    * **DM** (`channel == own_nick`): `title = sender`, body = the
+      message body. Notification shape mirrors how mobile messengers
+      surface a 1:1 chat — sender on top line, content on second.
     * **Channel** (everything else): `title = "<sender> in <channel>"`,
-      body = message body verbatim. Reader sees both who spoke and
-      where in one glance.
+      body = the message body. Reader sees both who spoke and where in
+      one glance.
+
+  ## The two rendered fields are PROJECTED; the two key fields are not (issue 1977)
+
+  `title` and `body` go through `Grappa.IRC.MircFormat.plain_text/1` —
+  the de-formatted view, "the text a reader saw". `tag` and `url` do NOT.
+
+  The projection is not cosmetic. `\\x03` is non-printing, so the OS
+  notification renderer drops the byte and leaves its decimal operands in
+  the text as ordinary digits: a coloured line reached a lock screen as
+  `04QUACK` for a wire `\\x03` `0` `4` `QUACK`. Every other surface already
+  projects — `Grappa.Mentions` calls `plain_text/1` before matching so a
+  padded body cannot dodge or forge a mention, and cic parses the same
+  bytes into styled runs for the message list. Push was the one door that
+  shipped them raw, and that asymmetry WAS the defect. Interpreting rather
+  than stripping is not available here: the Web Notifications API takes
+  plain text, there is no styled-run surface to render into.
+
+  The projection sits on the COMPOSED title rather than on `channel`
+  alone, and that is a measurement rather than caution. A nick cannot
+  carry `\\x03`: `Identifier.valid_nick?/1`'s charset holds no control
+  byte, and the host arm of `valid_sender?/1` excludes `\\x00-\\x1f`
+  outright (its `<meta>` arm would accept one, but that shape is minted
+  here, never read off the wire). A CHANNEL can —
+  `Identifier.valid_channel?/1` excludes only
+  whitespace, comma and BELL; `Parser.strip_unsafe_bytes/1` removes only
+  `\\x00 \\r \\n`; and `canonical_target/1` folds `A-Z` and passes every
+  other byte through, so a `\\x03` in a channel name survives ingress,
+  persist and fold intact. One projection over the whole string covers
+  both arms with one door, and costs nothing on the sender arm because it
+  is provably a no-op on a valid nick.
+
+  `tag` and `url` keep the channel KEY as stored — the key/display split.
+  `tag` is the OS dedup key and `url` is a deep link cic resolves back to
+  a window; projecting either would coalesce the banner against a surface
+  that does not exist and land the click on a channel nobody is in.
+
+  The stripper is the mIRC one, not a control-byte purge: CTCP framing
+  (`\\x01`) round-trips verbatim per CLAUDE.md's wire-format rule, so an
+  ACTION row still reaches the payload framed.
 
   ## Presence transitions (#378)
 
@@ -64,7 +102,7 @@ defmodule Grappa.Push.Payload do
   trivial to test.
   """
 
-  alias Grappa.IRC.Identifier
+  alias Grappa.IRC.{Identifier, MircFormat}
   alias Grappa.Scrollback.Message
 
   @typedoc """
@@ -106,7 +144,6 @@ defmodule Grappa.Push.Payload do
           Identifier.canonical_target(own_nick)
 
     sender = message.sender || ""
-    body = message.body || ""
 
     {title, dedup_key, deep_link_target} =
       if dm? do
@@ -116,8 +153,8 @@ defmodule Grappa.Push.Payload do
       end
 
     %{
-      title: title,
-      body: body,
+      title: MircFormat.plain_text(title),
+      body: MircFormat.plain_text(message.body || ""),
       tag: "#{network_slug}:#{dedup_key}",
       url: build_url(network_slug, deep_link_target)
     }

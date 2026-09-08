@@ -5642,19 +5642,30 @@ button.topic-bar-windows-opener {
   overscroll-behavior: contain;
 }
 
+/* #1964 — a column, because a sound or a text preview is taller than the
+   2.5rem box a picture fits in. The FIRST line keeps the #1883 row shape
+   exactly (see -head below); anything taller stacks under it, so a mixed
+   batch still reads as a column of like rows rather than a ragged grid. */
 .confirm-modal-attachment {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  flex-direction: column;
+  align-items: stretch;
   border: 1px solid var(--border);
   padding: 0.375rem;
   min-width: 0;
 }
 
-/* Fixed box for BOTH the thumbnail and its placeholder, so a mixed batch
-   (photo + pdf) keeps every row the same height and the filenames line up. */
-.confirm-modal-attachment-thumb,
-.confirm-modal-attachment-icon {
+.confirm-modal-attachment-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* Fixed box for the picture and the video frame, so a batch of both keeps the
+   filenames lined up. #1964 dropped the matching placeholder box: a row with
+   no preview says so in words rather than holding an empty square. */
+.confirm-modal-attachment-thumb {
   flex: 0 0 auto;
   width: 2.5rem;
   height: 2.5rem;
@@ -5670,8 +5681,42 @@ button.topic-bar-windows-opener {
   border: 1px solid var(--border);
 }
 
-.confirm-modal-attachment-icon {
-  color: var(--muted);
+/* #1964 — sound has no picture and a video has to be watched, so for both the
+   preview IS the player. Full row width because a native control bar has a
+   minimum usable size well past the 2.5rem thumbnail box, and each sits UNDER
+   the row head rather than in place of it. */
+.confirm-modal-attachment-audio {
+  width: 100%;
+  height: 2rem;
+  margin-top: 0.375rem;
+}
+
+.confirm-modal-attachment-video {
+  width: 100%;
+  /* Capped so one clip cannot push the Send button off a phone screen; the
+     dialog's own 40vh attachment scroller does the rest. `contain` because a
+     preview is for recognising the take, and a cropped one can hide the very
+     thing being checked. */
+  max-height: 9rem;
+  object-fit: contain;
+  margin-top: 0.375rem;
+  background: var(--fg);
+}
+
+/* #1964 — the head of a text file. Scrolls sideways rather than wrapping: a
+   wrapped line would misreport where the file's line breaks are, and this
+   preview exists to show what the lines ARE. */
+.confirm-modal-attachment-source {
+  margin: 0.375rem 0 0;
+  padding: 0.375rem;
+  border: 1px solid var(--border);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  color: var(--fg);
+  white-space: pre;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
 
 .confirm-modal-attachment-text {

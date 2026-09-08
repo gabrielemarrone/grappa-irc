@@ -33,6 +33,7 @@ describe("ConfirmModal (#195)", () => {
       onConfirm: vi.fn(),
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     expect(screen.getByTestId("confirm-modal")).toBeInTheDocument();
     expect(screen.getByTestId("confirm-modal-body").textContent).toBe(
@@ -52,6 +53,7 @@ describe("ConfirmModal (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     fireEvent.click(screen.getByTestId("confirm-modal-confirm"));
     expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -68,6 +70,7 @@ describe("ConfirmModal (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     fireEvent.click(screen.getByTestId("confirm-modal-cancel"));
     expect(onConfirm).not.toHaveBeenCalled();
@@ -84,6 +87,7 @@ describe("ConfirmModal (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     fireEvent.click(screen.getByTestId("confirm-modal-backdrop"));
     expect(onConfirm).not.toHaveBeenCalled();
@@ -103,6 +107,7 @@ describe("ConfirmModal (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     await waitFor(() => expect(overlayEscapeDepth()).toBe(1));
     expect(runTopmostOverlayEscape()).toBe(true);
@@ -125,6 +130,7 @@ describe("ConfirmModal (#195)", () => {
         onConfirm: vi.fn(),
         alternative: null,
         attachments: null,
+        defaultButton: "cancel",
       });
       expect(screen.queryByTestId("confirm-modal-alternative")).toBeNull();
     });
@@ -140,6 +146,7 @@ describe("ConfirmModal (#195)", () => {
         onConfirm,
         alternative: { label: "Upload as .txt", onSelect },
         attachments: null,
+        defaultButton: "cancel",
       });
       const btn = screen.getByTestId("confirm-modal-alternative");
       expect(btn.textContent).toBe("Upload as .txt");
@@ -159,7 +166,7 @@ describe("ConfirmModal (#195)", () => {
       id: "a1",
       label: "cat.png",
       detail: "12 KB",
-      thumbnail: null,
+      preview: null,
       ...over,
     });
 
@@ -171,6 +178,7 @@ describe("ConfirmModal (#195)", () => {
         onConfirm: vi.fn(),
         alternative: null,
         attachments: { items: () => items, onRemove },
+        defaultButton: "confirm",
       });
     };
 
@@ -183,6 +191,7 @@ describe("ConfirmModal (#195)", () => {
         onConfirm: vi.fn(),
         alternative: null,
         attachments: null,
+        defaultButton: "cancel",
       });
       expect(screen.queryByTestId("confirm-modal-attachments")).toBeNull();
     });
@@ -201,16 +210,16 @@ describe("ConfirmModal (#195)", () => {
       expect(screen.getByText("2 KB")).toBeInTheDocument();
     });
 
-    it("renders a thumbnail for a row that carries a blob, and none for one that does not", () => {
+    it("renders a thumbnail for a row that carries a picture, and none for one that does not", () => {
       render(() => <ConfirmModal />);
       withAttachments(
         [
           attachment({
             id: "a1",
             label: "cat.png",
-            thumbnail: new Blob(["x"], { type: "image/png" }),
+            preview: { kind: "image", blob: new Blob(["x"], { type: "image/png" }) },
           }),
-          attachment({ id: "a2", label: "spec.pdf", thumbnail: null }),
+          attachment({ id: "a2", label: "spec.pdf", preview: null }),
         ],
         vi.fn(),
       );
@@ -236,7 +245,10 @@ describe("ConfirmModal (#195)", () => {
     it("revokes a row's object URL when the dialog closes", () => {
       const revoke = vi.spyOn(URL, "revokeObjectURL");
       render(() => <ConfirmModal />);
-      withAttachments([attachment({ thumbnail: new Blob(["x"], { type: "image/png" }) })], vi.fn());
+      withAttachments(
+        [attachment({ preview: { kind: "image", blob: new Blob(["x"], { type: "image/png" }) } })],
+        vi.fn(),
+      );
       const src = screen.getByTestId("confirm-modal-attachment-thumb").getAttribute("src");
       expect(src).toMatch(/^blob:/);
 
@@ -244,6 +256,212 @@ describe("ConfirmModal (#195)", () => {
 
       expect(revoke).toHaveBeenCalledWith(src);
       revoke.mockRestore();
+    });
+
+    // #1964 — the preview is per KIND. Each arm below is a different element,
+    // and the reason they are separate assertions rather than one loop is that
+    // a wrong element is exactly the defect: a `<video>` rendered as an `<img>`
+    // shows a broken-image glyph, which is what the issue reported.
+    it("renders a video frame for a video row", () => {
+      render(() => <ConfirmModal />);
+      withAttachments(
+        [
+          attachment({
+            label: "clip.mp4",
+            preview: { kind: "video", blob: new Blob(["x"], { type: "video/mp4" }) },
+          }),
+        ],
+        vi.fn(),
+      );
+      const video = screen.getByTestId("confirm-modal-attachment-video");
+      // The media fragment is what asks for a frame instead of a black poster.
+      expect(video.getAttribute("src")).toMatch(/^blob:.*#t=0\.1$/);
+      // Playable, not a still: a video is a thing that moves, so checking the
+      // operator picked the right take means watching it.
+      expect(video.hasAttribute("controls")).toBe(true);
+      expect(video.getAttribute("aria-label")).toBe("Play clip.mp4");
+      // It is NOT the head thumbnail — a control bar is unusable at 2.5rem, so
+      // it takes a full-width block under the row like the sound player.
+      expect(screen.queryByTestId("confirm-modal-attachment-thumb")).toBeNull();
+    });
+
+    it("renders a player for an audio row — for sound, listening IS the preview", () => {
+      render(() => <ConfirmModal />);
+      withAttachments(
+        [
+          attachment({
+            label: "song.mp3",
+            preview: { kind: "audio", blob: new Blob(["x"], { type: "audio/mpeg" }) },
+          }),
+        ],
+        vi.fn(),
+      );
+      const audio = screen.getByTestId("confirm-modal-attachment-audio");
+      expect(audio.getAttribute("src")).toMatch(/^blob:/);
+      // Operable, so it needs a name of its own: "audio" beside a filename the
+      // operator cannot hear is not one.
+      expect(audio.getAttribute("aria-label")).toBe("Play song.mp3");
+    });
+
+    it("renders the first lines of a text row — the paste case the issue was filed for", async () => {
+      render(() => <ConfirmModal />);
+      withAttachments(
+        [
+          attachment({
+            label: "paste.txt",
+            preview: {
+              kind: "text",
+              blob: new Blob(["alpha\nbeta\ngamma\ndelta\nepsilon\nzeta"], {
+                type: "text/plain",
+              }),
+            },
+          }),
+        ],
+        vi.fn(),
+      );
+
+      // Read asynchronously off the Blob, so the row paints before the lines do.
+      const source = await screen.findByTestId("confirm-modal-attachment-source");
+      expect(source.textContent).toContain("alpha");
+      expect(source.textContent).toContain("delta");
+      // Capped at TEXT_PREVIEW_LINES: this is a HEAD, not the file.
+      expect(source.textContent).not.toContain("epsilon");
+    });
+
+    // A text row renders a <pre> of lines read from the Blob, so a URL there
+    // would pin the Blob for the dialog's life and be handed to nothing.
+    it("mints no object URL for a text row", async () => {
+      const create = vi.spyOn(URL, "createObjectURL");
+      render(() => <ConfirmModal />);
+      withAttachments(
+        [
+          attachment({
+            label: "paste.txt",
+            preview: { kind: "text", blob: new Blob(["a\nb"], { type: "text/plain" }) },
+          }),
+        ],
+        vi.fn(),
+      );
+
+      await screen.findByTestId("confirm-modal-attachment-source");
+      expect(create).not.toHaveBeenCalled();
+      create.mockRestore();
+    });
+
+    // The row that cannot be previewed shows NO box at all. #1883's neutral ☐
+    // glyph kept rows the same height, but it reads as a picture that failed
+    // to load — a different claim from "this type has no viewer" — and the
+    // rows stopped being uniform when audio and text previews arrived.
+    it("a row with nothing renderable shows no box at all, and mints no URL", () => {
+      const create = vi.spyOn(URL, "createObjectURL");
+      render(() => <ConfirmModal />);
+      withAttachments(
+        [attachment({ label: "spec.pdf", detail: "2 KB · preview not supported", preview: null })],
+        vi.fn(),
+      );
+
+      expect(screen.getByText("2 KB · preview not supported")).toBeInTheDocument();
+      expect(document.querySelector(".confirm-modal-attachment-icon")).toBeNull();
+      expect(screen.queryByTestId("confirm-modal-attachment-thumb")).toBeNull();
+      expect(screen.queryByTestId("confirm-modal-attachment-video")).toBeNull();
+      expect(screen.queryByTestId("confirm-modal-attachment-audio")).toBeNull();
+      expect(screen.queryByTestId("confirm-modal-attachment-source")).toBeNull();
+      expect(create).not.toHaveBeenCalled();
+      create.mockRestore();
+    });
+  });
+
+  // #1964 — what a bare Enter answers. #195 focused Cancel unconditionally;
+  // the upload confirm is the one dialog whose Cancel loses work, so the
+  // request now names its own default and the modal focuses that button.
+  describe("#1964 — the default button", () => {
+    const openWith = (defaultButton: "cancel" | "confirm", onConfirm: () => void): void => {
+      requestConfirm({
+        title: "Send to #a?",
+        body: "b",
+        confirmLabel: "Send",
+        onConfirm,
+        alternative: null,
+        attachments: null,
+        defaultButton,
+      });
+    };
+
+    it("focuses Cancel by default, so a stray Enter dismisses", async () => {
+      const onConfirm = vi.fn();
+      render(() => <ConfirmModal />);
+      openWith("cancel", onConfirm);
+
+      await waitFor(() =>
+        expect(document.activeElement).toBe(screen.getByTestId("confirm-modal-cancel")),
+      );
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("focuses the affirmative when the request asks for it, so Enter sends", async () => {
+      const onConfirm = vi.fn();
+      render(() => <ConfirmModal />);
+      openWith("confirm", onConfirm);
+
+      const send = screen.getByTestId("confirm-modal-confirm");
+      await waitFor(() => expect(document.activeElement).toBe(send));
+
+      // The browser turns Enter on a focused button into a click; asserting the
+      // click is asserting the outcome that reaches the operator.
+      fireEvent.click(send);
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+
+    // Measured in the browser during #1964, not reasoned: the × the operator
+    // presses unmounts with its row, focus falls to <body>, and the next Enter
+    // answers nothing — in the one dialog where Enter is meant to send.
+    it("hands focus back to the default button after a row is removed", async () => {
+      const items = [
+        { id: "a1", label: "one.png", detail: "1 KB", preview: null },
+        { id: "a2", label: "two.png", detail: "1 KB", preview: null },
+      ];
+      render(() => <ConfirmModal />);
+      requestConfirm({
+        title: "Send to #a?",
+        body: "b",
+        confirmLabel: "Send",
+        onConfirm: vi.fn(),
+        alternative: null,
+        attachments: {
+          items: () => items,
+          onRemove: (id: string): void => {
+            const at = items.findIndex((i) => i.id === id);
+            if (at >= 0) items.splice(at, 1);
+          },
+        },
+        defaultButton: "confirm",
+      });
+
+      const remove = screen.getByRole("button", { name: /remove one\.png/i });
+      remove.focus();
+      fireEvent.click(remove);
+
+      await waitFor(() =>
+        expect(document.activeElement).toBe(screen.getByTestId("confirm-modal-confirm")),
+      );
+    });
+
+    // The paste path: the guard's third door clears the store and opens the
+    // send confirm in the SAME tick, so the modal never observes a closed
+    // state between them. An open/closed edge guard left focus on the old
+    // dialog's Cancel — which is the button that discards the upload.
+    it("re-focuses when one request REPLACES another without the dialog closing", async () => {
+      render(() => <ConfirmModal />);
+      openWith("cancel", vi.fn());
+      await waitFor(() =>
+        expect(document.activeElement).toBe(screen.getByTestId("confirm-modal-cancel")),
+      );
+
+      openWith("confirm", vi.fn());
+
+      await waitFor(() =>
+        expect(document.activeElement).toBe(screen.getByTestId("confirm-modal-confirm")),
+      );
     });
   });
 });

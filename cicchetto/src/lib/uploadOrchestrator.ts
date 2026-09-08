@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { previewKindOf } from "./attachmentPreview";
 import type { ChannelKey } from "./channelKey";
 import { type ConfirmAttachment, dismissConfirm, requestConfirm } from "./confirmDialog";
 import { formatBytes } from "./formatBytes";
@@ -695,19 +696,41 @@ async function prepareVideo(
 // of the same photo, so the id is minted here and never derived.
 let nextAttachmentId = 0;
 
-type StagedFile = { id: string; file: File };
+// The attachment is minted WITH the staged file and never recomputed. Solid's
+// `<For>` diffs by reference, so a row rebuilt on every read would dispose and
+// recreate EVERY row on any removal — which since #1964 is visible: a playing
+// audio preview stops and resets, a text preview is re-read off disk, and both
+// object URLs churn. Deriving once is also the cheaper shape.
+type StagedFile = { id: string; file: File; attachment: ConfirmAttachment };
 
-// A picture is the only preview worth showing: for every other category the
-// bytes say nothing a human can check at a glance, and the name is what
-// distinguishes `contract-final.pdf` from `contract-draft.pdf`. The blob is
-// handed over raw — ConfirmModal mints and revokes the object URL, because the
-// row's unmount is the only event that knows when it stops being needed.
-function toAttachment(staged: StagedFile): ConfirmAttachment {
+// #1964 — the preview is of the file's ACTUAL type.
+//
+// This used to answer a thumbnail for images and nothing for anything else, on
+// the argument that "a picture is the only preview worth showing: for every
+// other category the bytes say nothing a human can check at a glance, and the
+// name is what distinguishes `contract-final.pdf` from `contract-draft.pdf`".
+// That reasoning assumes a name the OPERATOR chose. The paste path (#816)
+// names every file `paste.txt`, in every window, so on the one door where the
+// operator cannot possibly know what is inside, the dialog showed a byte count
+// and an empty box. `previewKindOf` decides what each staged file can be shown
+// as; a file with no renderer (PDF, office documents) still answers null and
+// keeps the placeholder. The blob is handed over raw — ConfirmModal mints and
+// revokes the object URL, because the row's unmount is the only event that
+// knows when it stops being needed.
+function toAttachment(id: string, file: File): ConfirmAttachment {
+  const kind = previewKindOf(file.type);
   return {
-    id: staged.id,
-    label: staged.file.name,
-    detail: formatBytes(staged.file.size),
-    thumbnail: categoryOf(staged.file.type) === "image" ? staged.file : null,
+    id,
+    label: file.name,
+    // Gabriele's ruling (2026-09-08): when there is no preview, SAY so. cic
+    // has no PDF or office renderer — the media viewer has four arms and a
+    // 📄 link deliberately falls through to the browser (MircText.tsx) — so a
+    // preview for those types would mean building a viewer first. The honest
+    // row is the name, the size and a plain statement; the old empty-box glyph
+    // read as a picture that failed to load, which is a different claim.
+    detail:
+      kind === null ? `${formatBytes(file.size)} · preview not supported` : formatBytes(file.size),
+    preview: kind === null ? null : { kind, blob: file },
   };
 }
 
@@ -728,7 +751,9 @@ export function triggerUploads(
   // all describe the same files.
   const normalised: StagedFile[] = rawFiles.map((raw) => {
     nextAttachmentId += 1;
-    return { id: `picked-${nextAttachmentId}`, file: normalizeUploadFile(raw) };
+    const id = `picked-${nextAttachmentId}`;
+    const file = normalizeUploadFile(raw);
+    return { id, file, attachment: toAttachment(id, file) };
   });
 
   // Everything past the privacy notice. A closure because the notice may have
@@ -798,8 +823,13 @@ export function triggerUploads(
       // No third door: there is no other route to "post this file here". Cancel
       // and Send are the whole question.
       alternative: null,
+      // #1964 — the one dialog in cic where Enter means yes. The files are
+      // already staged by a gesture the operator made, and this confirm is
+      // opt-in: it exists to be READ, and the key you press after reading was
+      // discarding the batch. See `ConfirmRequest.defaultButton`.
+      defaultButton: "confirm",
       attachments: {
-        items: (): ConfirmAttachment[] => staged().map(toAttachment),
+        items: (): ConfirmAttachment[] => staged().map((s) => s.attachment),
         onRemove: (id: string): void => {
           const rest = staged().filter((s) => s.id !== id);
           setStaged(rest);

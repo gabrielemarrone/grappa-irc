@@ -1280,11 +1280,54 @@ describe("the confirm gate (#1883)", () => {
     expect(attachments().every((a) => a.detail !== "")).toBe(true);
   });
 
-  it("an image carries a thumbnail source; a non-image carries none", () => {
+  // #1964 — the preview is of the file's ACTUAL type, not image-or-nothing.
+  // The text row is the case the issue was filed for: a pasted block arrives
+  // as `paste.txt`, so before this the dialog showed a constant name, a byte
+  // count and an empty box.
+  it("each staged file carries the preview kind its own type can be shown as", () => {
     ackPrivacy();
-    triggerUploads(key, slug, channel, [img("a.png"), sampleNonImage()]);
-    expect(attachments()[0]?.thumbnail).not.toBeNull();
-    expect(attachments()[1]?.thumbnail).toBeNull();
+    triggerUploads(key, slug, channel, [
+      img("a.png"),
+      sampleNonImage(),
+      new File(["%PDF-1.4"], "spec.pdf", { type: "application/pdf" }),
+    ]);
+    expect(attachments()[0]?.preview?.kind).toBe("image");
+    expect(attachments()[1]?.preview?.kind).toBe("text");
+    // Still null, and deliberately: there is no PDF renderer anywhere in cic
+    // (the viewer has four arms and a 📄 link falls through to the browser),
+    // so this row gains no viewer — it SAYS there is no preview instead.
+    expect(attachments()[2]?.preview).toBeNull();
+    expect(attachments()[2]?.detail).toContain("preview not supported");
+    // …and the rows that DO preview say nothing of the sort.
+    expect(attachments()[0]?.detail).not.toContain("preview");
+    expect(attachments()[1]?.detail).not.toContain("preview");
+  });
+
+  // Solid's <For> diffs by REFERENCE. A row rebuilt on every read disposes and
+  // recreates every row on any removal, which since #1964 is visible: a playing
+  // audio preview stops and resets, a text preview is re-read off disk, and
+  // both object URLs churn. Identity is the observable that pins it.
+  it("each row keeps its identity across reads and across a removal", () => {
+    ackPrivacy();
+    triggerUploads(key, slug, channel, [img("a.png"), img("b.png"), img("c.png")]);
+    const before = attachments();
+    expect(attachments()[0]).toBe(before[0]);
+
+    confirmRequest()?.attachments?.onRemove(before[1]?.id as string);
+
+    const after = attachments();
+    expect(after.map((a) => a.label)).toEqual(["a.png", "c.png"]);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[2]);
+  });
+
+  // The blob handed to the modal is the file itself — the row shows the
+  // operator their OWN bytes, not a re-encoded copy.
+  it("the preview blob is the staged file", () => {
+    ackPrivacy();
+    const file = img("a.png");
+    triggerUploads(key, slug, channel, [file]);
+    expect(attachments()[0]?.preview?.blob).toBe(file);
   });
 
   it("Send uploads exactly the picked files to the picked window", () => {

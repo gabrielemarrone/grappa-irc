@@ -147,6 +147,7 @@ const leaveChannelRequest = (onConfirm: () => void): ConfirmRequest => ({
   onConfirm,
   alternative: null,
   attachments: null,
+  defaultButton: "cancel",
 });
 
 let handlers: KeybindingHandlers;

@@ -5,8 +5,8 @@ defmodule Grappa.Repo.CheckoutDeadlineReachTest do
 
   ## Why the question is load-bearing
 
-  Production stacks THREE waits on one write, and nothing had ever
-  checked them against each other:
+  Production stacks THREE waits on one write, and when this file was
+  written nothing had ever checked them against each other:
 
       busy_retry budget   1_500ms   config/config.exs
       checkout deadline  15_000ms   Ecto's default `:timeout`, not overridden anywhere
@@ -17,16 +17,32 @@ defmodule Grappa.Repo.CheckoutDeadlineReachTest do
   kind, `:interrupted`, and named its cause: the checkout deadline
   firing, which disconnects the holder (`db_connection`'s
   `ConnectionPool.handle_info({:timeout, …})` → `Holder.handle_disconnect/2`)
-  and cancels the statement. That deadline sits BETWEEN the other two
-  numbers, so which one governs is not a detail.
+  and cancels the statement. That deadline sat BETWEEN the other two
+  numbers, so which one governed was not a detail.
+
+  🔴 **That stack is now HISTORY, and this file is part of why.** The four
+  numbers were subsequently chosen together as a ladder, and both ends
+  moved: `busy_timeout` is `300` and the checkout deadline is pinned
+  explicitly at `15_000` (with `queue_target` chosen at `1_500` alongside).
+  So in production today the deadline is no longer the middle number — it
+  is the OUTER bound, fifty times the DB-side wait, and the ordering this
+  file was written to disambiguate is no longer ambiguous there.
+
+  The file keeps its value for two reasons and is not deleted: the
+  measurement below is what established that the caller sees `busy_locked`
+  under EITHER ordering (so the ladder could be re-ordered without changing
+  how faults are named), and it remains the guard that says so if either
+  number moves again.
 
   ## Method
 
   ONE independent variable per test: **which of the two numbers is
   smaller.** Same engine, same real held write lock, same statement; the
   verdict is named by production's own `BusyRetry.classify/1`, never by a
-  literal here. Magnitudes are scaled down with the RATIO preserved
-  (production is 15_000 : 30_000, i.e. 1:2; this runs 300 : 600) — the
+  literal here. Magnitudes are scaled down with the RATIO preserved as it
+  stood when the reading was taken (production was then 15_000 : 30_000,
+  i.e. 1:2; this runs 300 : 600 — and note the ladder has since inverted
+  that ratio in prod, which is the point of the note above) — the
   same methodology `Grappa.Repo.BusyRetryBudgetReachTest` justifies for
   the budget, and it keeps the file under two seconds.
 

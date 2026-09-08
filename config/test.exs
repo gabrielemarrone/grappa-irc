@@ -14,7 +14,20 @@ config :grappa, Grappa.Repo,
   # true still works — Sandbox owns the conn per test; concurrency
   # comes from interleaved checkouts, not concurrent file writes.
   pool_size: 1,
+  # 🔴 This env deliberately does NOT mirror the production contention
+  # ladder (`config/runtime.exs`), and the reason is `pool_size: 1` right
+  # above: the Sandbox serialises checkouts per test, so there is no
+  # cross-connection file-lock contention for a short `busy_timeout` to
+  # convert into retries. Keeping the generous value here is what makes a
+  # slow CI runner queue rather than fail. The suites that DO exercise
+  # contention build their own repo with explicit timings and never read
+  # this block — `Grappa.Repo.BusyRetryBudgetReachTest` and
+  # `Grappa.Repo.CheckoutDeadlineReachTest`.
   busy_timeout: 30_000,
+  # Pinned in lockstep with runtime.exs / dev.exs (REV-B/C3 reasoning):
+  # Ecto's own default is this value, so it changes nothing and cannot be
+  # moved out from under us by a dep bump.
+  timeout: 15_000,
   # REV-B / C3 (2026-05-22 codebase review): pin PRAGMAs in lockstep
   # with config/runtime.exs and config/dev.exs. See runtime.exs for
   # the full rationale — dep major-version default flip would silently
@@ -23,7 +36,7 @@ config :grappa, Grappa.Repo,
   foreign_keys: :on,
   # CI runner is slower than local dev (single-vCPU + coveralls
   # instrumentation overhead). Default DBConnection queue_target=50ms /
-  # queue_interval=1000ms triggers `queue_timeout` on Sandbox checkout
+  # queue_interval=2000ms triggers `queue_timeout` on Sandbox checkout
   # under sustained load even though the conn would have become
   # available shortly. Bumped both to give CI headroom; the cap is
   # still bounded so genuine deadlocks surface as failures rather

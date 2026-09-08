@@ -50853,3 +50853,119 @@ Neither is the IME case covered: like `ComposeBox` before it, this handler has
 no `isComposing` guard, so an Enter that confirms a candidate mid-composition
 submits. That is a shared gap of the two surfaces and wants one issue over both,
 not a divergence introduced on one of them here._
+<!-- entry #1985 -->
+
+---
+
+## 2026-09-09 — #1985: a parked network leaves the sidebar, and the cold load is where the disappearance bites
+
+An operator with two parked networks carries two rows that cannot be acted
+upon: every channel under them is unreachable, selecting one bounces to home,
+and on mobile they push live channels below the fold. vjt, on `#grappa`:
+*"they don't serve any purpose there"*.
+
+### The ruling, and what is NOT a ruling
+
+**Q1 is verbatim.** The issue offered two shapes — hard disappearance vs a
+collapsed/on-demand section — and vjt chose the first on 2026-09-07:
+*"sparisce se è disconnected (parked)"*. While `connection_state == parked`
+the network and every row under it leave the sidebar and come back on
+reconnect. Option 2 is dropped; #450 (collapsible network groups) stays a
+separate concern. When the cold-load orphan below was put to him on
+2026-09-08, the answer was equally flat: *"redirigi a home"*.
+
+**Q2 is an INFERENCE, and confirmation is still pending.** Choosing the
+redirect implies that the one door for re-reading a parked window's history
+dies — `selection.ts`'s bucket-D redirect is transition-only precisely so an
+operator can navigate BACK to a parked window, and with no row and no restore
+there is nothing left to navigate back to. That question was written in the
+same line as Q1 and the ruling did not address it in words, so it is being
+treated as accepted collateral by the session that relayed it, not as
+something vjt said. **What holds the loss up is that the network itself does
+not become invisible:** `$home` still renders a parked network as a
+disconnected row with its `connection_state_reason` and a `[Reconnect]` chip
+(`HomePane.tsx:438,463`). If a dedicated door for a parked network's history
+is wanted, that is a NEW issue, not a piece of this one.
+
+**`failed` is out of scope and the asymmetry is deliberate.** A failed network
+keeps its greyed row IN PLACE: a failure is something the operator must see
+and act on. `failing` stays outside both sets for #1675's reason — it is
+retrying on its own and has a way back. Three states, three treatments, and a
+future generalisation to "any non-connected state" would silently take all
+three.
+
+### The cold load is the part the issue did not know about
+
+The live park path was already covered and is not what broke. `selection.ts`'s
+bucket-D effect redirects to home when a network the operator is looking at
+transitions INTO `parked`, and it is transition-only by design:
+`lastConnectionState` starts empty and `prev === undefined` skips the first
+observation.
+
+A cold load is exactly the case with no previous value to transition from. So
+on a reload nothing walks the selection back, while #35's restore hands the
+saved window straight back — and for `kind: "server"` its gate is only "the
+network still exists", with `connection_state` deliberately not consulted
+(`selection.ts:296-303` spells out why). Before this change that was harmless:
+the row sat there greyed and the operator read history. After the
+disappearance it is a pane the sidebar draws no row for.
+
+Cured in the restore's EXISTING validity gate rather than by widening bucket
+D. Bucket D firing on a non-transition would make every boot re-decide the
+selection for every network; the restore gate already asks "is the saved
+window still somewhere the operator can be", and this is one more clause in
+that same question. The gate is TERMINAL, unlike the provisional `$home` below
+it — a non-latching gate would re-attempt on every resource update and pull
+focus off home the moment the operator hit `[Reconnect]`, which is a delayed
+jump nobody asked for.
+
+### Where the filter goes, and what it takes with it
+
+One filter, at the ONE `<For>` over networks in `Sidebar.tsx`. The header, the
+channels, the queries and the synthetic pseudo-rows all render inside that
+loop, so dropping the network drops all four by construction. The fourth is
+the one that argues for the placement: pseudo-rows project from
+`windowStateByChannel`, a store no network-level filter would think to
+consult, so a per-branch filter would have left them behind.
+
+`parked` comes OUT of `NETWORK_GREYED_STATES`, which now reads `["failed"]`.
+Not tidying — the set answers "which network states grey the section", and
+parked can no longer reach that cascade because it no longer renders. Two
+statements of one policy is how the next reader picks the wrong one.
+
+The `<Show>` guard around the loop still counts the RAW list. Its fallback
+says "no networks", which is true of zero networks bound and false of two
+parked ones; with everything parked the sidebar draws the home row and stops.
+That is the honest rendering, and it needs no new string.
+
+The predicate is its own module (`lib/networkParked.ts`) rather than a
+function in `lib/networks.ts`, for a testing reason that is also a design one.
+`networks.ts` is a resource singleton, so every suite that touches it replaces
+it wholesale with `vi.mock`; a predicate living there would be mocked
+alongside the resources at every call site and could only ever be tested
+through a mirror of itself. Extracted, it is measured directly and the Sidebar
+and Shell suites run the real rule.
+
+### Limits, stated
+
+**Not device-verified.** The gates here are jsdom + the pure predicate; the
+mutation was run in both directions (disabling the filter reds exactly the
+disappearance assertions while the failed / failing / visitor /
+no-empty-claim controls stay green, and disabling the predicate reds those
+plus its own). Whether the sidebar READS right with two parked networks on a
+phone is dogfood.
+
+**BottomBar is untouched, and that is a scope call, not an oversight.** The
+mobile strip is a separate `<For each={networks()}>` in `BottomBar.tsx` with
+no greying of its own, so a parked network still shows there. The ruling names
+the sidebar; the issue's own motivation cites the mobile fold. The question
+was raised and not answered, and widening on a guess is what the ruling exists
+to prevent.
+
+**`ComposeBox.tsx` keeps its own `NETWORK_GREYED_STATES = {parked, failed}`
+and was left alone deliberately.** It is what makes any residual parked window
+readable but not writable, and it is a different question (can I type here)
+from the one this slice answers (is there a row).
+
+_Code + tests. No wire change, no protocol bump, no server change. Deploy:
+cic bundle only._

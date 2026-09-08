@@ -1,9 +1,11 @@
 import { type Component, For, Show } from "solid-js";
 import CloseButton from "./CloseButton";
+import type { Network } from "./lib/api";
 import { ownNickForNetwork } from "./lib/api";
 import { awayByNetwork } from "./lib/awayStatus";
 import { channelKey } from "./lib/channelKey";
 import { mentionsBundleBySlug } from "./lib/mentionsWindow";
+import { isNetworkParked } from "./lib/networkParked";
 import { channelsBySlug, isAdmin, networkBySlug, networks, user } from "./lib/networks";
 import { navPseudoChannelsForNetwork } from "./lib/pseudoChannels";
 import { queryWindowsByNetwork } from "./lib/queryWindows";
@@ -94,7 +96,15 @@ import WindowBadges from "./WindowBadges";
 // compose box on every network that blinks. The state is still visible:
 // HomePane routes anything that is not `connected` to the disconnected
 // row, which renders the word AND `connection_state_reason`.
-const NETWORK_GREYED_STATES = new Set(["parked", "failed"]);
+//
+// issue 1985 — `parked` is no longer in this set either, and for the
+// opposite reason: it does not need greying because it does not RENDER.
+// A parked network leaves the sidebar entirely (`isNetworkParked`, the
+// shared predicate in lib/networks.ts), so the only network state that can
+// still reach the cascade below is `failed`. Leaving `parked` here would be
+// a second, unreachable statement of the parked policy, and the next reader
+// would take it for the live one.
+const NETWORK_GREYED_STATES = new Set(["failed"]);
 
 // #96 — a row's state, spoken. Every non-live sidebar row is rendered muted +
 // italic and NOTHING else: a screen reader gets no signal at all, and the
@@ -146,6 +156,22 @@ const Sidebar: Component<Props> = (props) => {
   };
 
   const isNetworkGreyed = (slug: string): boolean => networkGreyedState(slug) !== null;
+
+  // issue 1985 — the networks the sidebar actually draws. A parked network is
+  // dropped here, at the ONE loop, rather than by each row branch deciding for
+  // itself: the header, the channels, the queries and the pseudo-rows are all
+  // rendered inside it, so removing the network removes all four by
+  // construction and none of them can be forgotten later.
+  //
+  // The `<Show>` around the loop deliberately still counts the RAW list. It
+  // answers "does this operator have any network bound at all", and its
+  // fallback says "no networks" — a truthful sentence about zero networks and
+  // a lie about two parked ones. With every network parked the sidebar draws
+  // the home row and nothing else, which is the honest rendering of the
+  // ruling: the networks are still there, `$home` still lists them with their
+  // [Reconnect] chip, they are just not windows right now.
+  const visibleNetworks = (): Network[] =>
+    (networks() ?? []).filter((network) => !isNetworkParked(network));
 
   // Network cascade wins over the per-window state deliberately: when the
   // credential is parked, EVERY row under it is unreachable regardless of
@@ -276,7 +302,7 @@ const Sidebar: Component<Props> = (props) => {
         when={(networks()?.length ?? 0) > 0}
         fallback={<p class="muted sidebar-empty">no networks</p>}
       >
-        <For each={networks()}>
+        <For each={visibleNetworks()}>
           {(network) => (
             <>
               {/* #96 — the per-network <ul> is the grouping the sidebar draws

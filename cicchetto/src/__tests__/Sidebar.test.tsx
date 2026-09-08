@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let mockNetworkConnectionState: Record<string, string | undefined> = {};
 let mockNetworkConnectionReason: Record<string, string | null | undefined> = {};
+// issue 1985 — the hide narrows on `kind` before it reads
+// `connection_state`, so proving the narrow needs a network that is NOT a
+// user network. Mutable here rather than a second entry in the `networks()`
+// array: an extra network would add rows to every other test in this file.
+let mockNetworkKind: Record<string, string | undefined> = {};
 // UX-4 bucket N — mutable holder so individual tests can flip the
 // admin gate on/off. `isAdmin()` in Sidebar drives the new admin row
 // visibility; default false to keep pre-N tests unchanged.
@@ -35,7 +40,9 @@ vi.mock("../lib/networks", () => ({
       // Tests here exercise the user branch — visitors don't have a
       // connection_state to grey out, so the visitor variant is
       // covered by an explicit absence test below.
-      kind: "user",
+      get kind() {
+        return mockNetworkKind.freenode ?? "user";
+      },
       id: 1,
       slug: "freenode",
       nick: "vjt",
@@ -60,7 +67,7 @@ vi.mock("../lib/networks", () => ({
   networkBySlug: (slug: string) => {
     if (slug !== "freenode") return undefined;
     return {
-      kind: "user",
+      kind: mockNetworkKind.freenode ?? "user",
       id: 1,
       slug: "freenode",
       nick: "vjt",
@@ -236,6 +243,7 @@ beforeEach(() => {
   mockWindowState = {};
   mockNetworkConnectionState = {};
   mockNetworkConnectionReason = {};
+  mockNetworkKind = {};
   mockAwayByNetwork = {};
   mockMentionsBundles = {};
   mockSelectedChannel = null;
@@ -567,27 +575,26 @@ describe("Sidebar", () => {
   });
 
   // CP19 T32 parked-window — per-network derivation overlay. When the
-  // network's credential `connection_state ∈ {parked, failed}`, the
-  // network header gets `.sidebar-network-greyed` AND every channel/
-  // query row under it derives as greyed regardless of its individual
-  // `windowStateByChannel` entry. Source: `networkBySlug[slug]` (refreshed
-  // via the user-topic `connection_state_changed` event arm in
-  // `userTopic.ts`). Per CLAUDE.md "Don't duplicate state — derive it"
-  // — the cascade is one conditional in `isGreyed`, not a parallel state
-  // map. Symmetric on `:failed` (server-side terminal failure).
+  // network's credential `connection_state == failed`, the network header
+  // gets `.sidebar-network-greyed` AND every channel/query row under it
+  // derives as greyed regardless of its individual `windowStateByChannel`
+  // entry. Source: `networkBySlug[slug]` (refreshed via the user-topic
+  // `connection_state_changed` event arm in `userTopic.ts`). Per CLAUDE.md
+  // "Don't duplicate state — derive it" — the cascade is one conditional in
+  // `isGreyed`, not a parallel state map.
+  //
+  // issue 1985 — `parked` USED to cascade here too, and every assertion in
+  // this block was written against it. It no longer reaches the cascade at
+  // all: a parked network leaves the sidebar, so there is no header to grey
+  // and no row to cascade onto. The rules this block protects are unchanged
+  // and are now stated on `failed`, the one state that still renders greyed
+  // in place. The disappearance itself lives in its own block below.
   //
   // UX-5 BH (2026-05-19): the legacy `<section class="sidebar-network">`
   // wrapper was killed; the per-network `<ul>` now carries
   // `.sidebar-network-section` + the `.sidebar-network-greyed` class.
   // `.closest("section")` is replaced by `.closest(".sidebar-network-section")`.
-  describe("CP19 T32 — per-network parked/failed derivation overlay", () => {
-    it("network header gets .sidebar-network-greyed when connection_state=parked", () => {
-      mockNetworkConnectionState = { freenode: "parked" };
-      render(() => <Sidebar />);
-      const header = screen.getByText("freenode").closest(".sidebar-network-section");
-      expect(header?.classList.contains("sidebar-network-greyed")).toBe(true);
-    });
-
+  describe("CP19 T32 — per-network failed derivation overlay", () => {
     it("network header gets .sidebar-network-greyed when connection_state=failed", () => {
       mockNetworkConnectionState = { freenode: "failed" };
       render(() => <Sidebar />);
@@ -602,12 +609,14 @@ describe("Sidebar", () => {
       expect(header?.classList.contains("sidebar-network-greyed")).toBe(false);
     });
 
-    it("channel rows cascade greyed when network is parked, even if window state is joined", () => {
+    it("channel rows cascade greyed when network is failed, even if window state is joined", () => {
       // Critical derivation rule: stale `windowStateByChannel` entries
-      // (which retain the pre-park values until the GenServer is dead +
-      // a reconnect re-emits) MUST NOT win over the network-level park.
-      // If they did, /disconnect would leave channels visually live.
-      mockNetworkConnectionState = { freenode: "parked" };
+      // (which retain the pre-failure values until the GenServer is dead +
+      // a reconnect re-emits) MUST NOT win over the network-level state.
+      // If they did, a failed network would leave channels visually live.
+      // Stated on `failed` since issue 1985 — a parked network no longer
+      // draws the rows this rule is about.
+      mockNetworkConnectionState = { freenode: "failed" };
       mockWindowState = { "freenode #italia": "joined" };
       render(() => <Sidebar />);
       const li = screen.getByText("#italia").closest("li");
@@ -624,8 +633,8 @@ describe("Sidebar", () => {
       expect(btn?.classList.contains("sidebar-window-greyed")).toBe(true);
     });
 
-    it("query rows cascade greyed when network is parked", () => {
-      mockNetworkConnectionState = { freenode: "parked" };
+    it("query rows cascade greyed when network is failed", () => {
+      mockNetworkConnectionState = { freenode: "failed" };
       render(() => <Sidebar />);
       const li = screen.getByText("alice").closest("li");
       const btn = li?.querySelector(".sidebar-window-btn");
@@ -650,12 +659,12 @@ describe("Sidebar", () => {
       ).toBe(false);
     });
 
-    it("network header tooltip carries the connection_state_reason when parked", () => {
-      mockNetworkConnectionState = { freenode: "parked" };
-      mockNetworkConnectionReason = { freenode: "testing parked state" };
+    it("network header tooltip carries the connection_state_reason when failed", () => {
+      mockNetworkConnectionState = { freenode: "failed" };
+      mockNetworkConnectionReason = { freenode: "testing failed state" };
       render(() => <Sidebar />);
       const h3 = screen.getByText("freenode");
-      expect(h3.getAttribute("title")).toBe("testing parked state");
+      expect(h3.getAttribute("title")).toBe("testing failed state");
     });
 
     it("network header tooltip is absent when connected (no reason to show)", () => {
@@ -664,6 +673,97 @@ describe("Sidebar", () => {
       render(() => <Sidebar />);
       const h3 = screen.getByText("freenode");
       expect(h3.getAttribute("title")).toBeNull();
+    });
+  });
+
+  // issue 1985 — a parked network LEAVES the sidebar. vjt's ruling
+  // (2026-09-07, option 1 of the issue): "sparisce se è disconnected
+  // (parked)" — the network and every row under it are gone while
+  // `connection_state == parked`, and come back when it reconnects. No
+  // collapsed section, no parked area (option 2 dropped; #450 stays separate).
+  //
+  // `failed` is the deliberate asymmetry and the block above still owns it: a
+  // failure is something the operator must SEE, so a failed network keeps its
+  // greyed row in place. Every test here that names `parked` has a `failed`
+  // twin asserting the opposite outcome — the pair is what makes this a
+  // measurement of the rule rather than of the filter's existence.
+  describe("issue 1985 — a parked network leaves the sidebar", () => {
+    it("draws no section at all for a parked network", () => {
+      mockNetworkConnectionState = { freenode: "parked" };
+      const { container } = render(() => <Sidebar />);
+      expect(container.querySelector(".sidebar-network-section")).toBeNull();
+      expect(screen.queryByText("freenode")).toBeNull();
+    });
+
+    it("takes the channel rows down with it", () => {
+      mockNetworkConnectionState = { freenode: "parked" };
+      render(() => <Sidebar />);
+      expect(screen.queryByText("#italia")).toBeNull();
+      expect(screen.queryByText("#azzurra")).toBeNull();
+      expect(screen.queryByText("#bnc")).toBeNull();
+    });
+
+    it("takes the query rows down with it", () => {
+      mockNetworkConnectionState = { freenode: "parked" };
+      render(() => <Sidebar />);
+      expect(screen.queryByText("alice")).toBeNull();
+    });
+
+    it("takes a synthetic pseudo-row down with it (a row that is NOT in channelsBySlug)", () => {
+      // The pseudo-row branch projects from `windowStateByChannel`, a store
+      // the network filter never consults. Dropping the whole network at the
+      // ONE loop is what takes this fourth row class with it; a per-branch
+      // filter would have had to remember this one.
+      mockNetworkConnectionState = { freenode: "parked" };
+      mockWindowState = { "freenode #invite-only": "failed" };
+      render(() => <Sidebar />);
+      expect(screen.queryByText("#invite-only")).toBeNull();
+    });
+
+    it("a FAILED network keeps its section — the asymmetry is the product decision", () => {
+      mockNetworkConnectionState = { freenode: "failed" };
+      const { container } = render(() => <Sidebar />);
+      expect(container.querySelector(".sidebar-network-section")).not.toBeNull();
+      expect(screen.getByText("freenode")).toBeInTheDocument();
+      expect(screen.getByText("#italia")).toBeInTheDocument();
+    });
+
+    it("a CONNECTED network keeps its section", () => {
+      mockNetworkConnectionState = { freenode: "connected" };
+      const { container } = render(() => <Sidebar />);
+      expect(container.querySelector(".sidebar-network-section")).not.toBeNull();
+      expect(screen.getByText("#italia")).toBeInTheDocument();
+    });
+
+    it("a FAILING network keeps its section (#1675 — it is retrying on its own)", () => {
+      // Guards the ruling against being generalised to "any non-connected
+      // state": #1675 put `failing` deliberately outside the greyed set, and
+      // it is outside the hidden set for the same reason.
+      mockNetworkConnectionState = { freenode: "failing" };
+      const { container } = render(() => <Sidebar />);
+      expect(container.querySelector(".sidebar-network-section")).not.toBeNull();
+    });
+
+    it("a VISITOR network is never hidden — the predicate narrows on kind first", () => {
+      // A visitor has no credential row to park, so `connection_state` is not
+      // part of its wire shape at all. The value is planted here anyway: if
+      // the narrow were dropped, this network would vanish, and that is
+      // exactly the regression the narrow exists to prevent.
+      mockNetworkKind = { freenode: "visitor" };
+      mockNetworkConnectionState = { freenode: "parked" };
+      const { container } = render(() => <Sidebar />);
+      expect(container.querySelector(".sidebar-network-section")).not.toBeNull();
+      expect(screen.getByText("freenode")).toBeInTheDocument();
+    });
+
+    it("does NOT claim 'no networks' when the only network is parked", () => {
+      // The `<Show>` guard still counts the RAW list on purpose. "no networks"
+      // is a sentence about zero networks bound; saying it while one is parked
+      // would be a fast path describing what it DID instead of what it
+      // OBSERVED (CLAUDE.md log honesty). The sidebar draws home and stops.
+      mockNetworkConnectionState = { freenode: "parked" };
+      const { container } = render(() => <Sidebar />);
+      expect(container.querySelector(".sidebar-empty")).toBeNull();
     });
   });
 
@@ -1177,17 +1277,20 @@ describe("Sidebar", () => {
       expect(screen.getByRole("button", { name: /^#new\s*\(pending\)/ })).toBeInTheDocument();
     });
 
-    it("a parked NETWORK speaks the cascade on the header AND on every row under it", () => {
-      mockNetworkConnectionState = { freenode: "parked" };
+    it("a failed NETWORK speaks the cascade on the header AND on every row under it", () => {
+      // Stated on `failed` since issue 1985: a parked network draws no rows,
+      // so there is nothing left for it to speak. The cascade itself is
+      // unchanged.
+      mockNetworkConnectionState = { freenode: "failed" };
       render(() => <Sidebar />);
-      expect(screen.getByRole("button", { name: /^freenode\s*\(parked\)/ })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /^#italia\s*\(parked\)/ })).toBeInTheDocument();
-      // The DM row derives from the same cascade — a parked network takes the
+      expect(screen.getByRole("button", { name: /^freenode\s*\(failed\)/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^#italia\s*\(failed\)/ })).toBeInTheDocument();
+      // The DM row derives from the same cascade — a failed network takes the
       // query windows down with it.
-      expect(screen.getByRole("button", { name: /^alice\s*\(parked\)/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^alice\s*\(failed\)/ })).toBeInTheDocument();
     });
 
-    it("the network cascade OUTRANKS a row's own state (parked network, invited window)", () => {
+    it("the network cascade OUTRANKS a row's own state (failed network, invited window)", () => {
       mockNetworkConnectionState = { freenode: "failed" };
       mockWindowState = { "freenode #italia": "invited" };
       render(() => <Sidebar />);

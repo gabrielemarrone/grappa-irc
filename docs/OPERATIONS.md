@@ -3287,6 +3287,32 @@ consumers too, and these caps are THIS image's concern. That is the
 same reasoning the boot-time migration switch below uses for living in
 the entrypoint rather than in `Grappa.Application`.
 
+**Corollary for the substrates with no entrypoint — the jail, the `.deb`
+and the `.rpm`.** Because the caps live in the entrypoint,
+`GRAPPA_MAX_USERS` and `GRAPPA_DIRTY_SCHEDULERS` are read by NOTHING on
+those substrates: rc.d and the systemd unit exec the release directly.
+That is the intended consequence of the paragraph above, not a gap. **The
+lever that does work there is `ERL_ZFLAGS` itself**, and it needs no code:
+the jail's rc.d sources its env file and exports every `^[A-Z_]` name in
+it, systemd loads the same file via `EnvironmentFile`, and `erlexec`
+appends the value to the release's boot flags. Both
+`grappa.env.example`s document it, with `+SDio` as the flag worth knowing.
+
+**Sizing `+SDio`, and what it does not buy.** Every exqlite call — reads
+included — runs inside an `ERL_NIF_DIRTY_JOB_IO_BOUND` NIF, so a writer
+waiting on SQLite's file lock occupies a dirty-IO scheduler for the whole
+wait. ERTS fixes the default at **10 regardless of CPU count** (measured:
+a 6-CPU node reports 10, and so does the same node booted `+S 16:16`),
+which is why `pool_size` is a constant chosen below 10 rather than derived
+from the hardware, and why `Grappa.Repo.check_dirty_io_reserve/2` warns at
+boot when that relation is lost. ⚠️ Raising `+SDio` buys **reserve while a
+writer is parked**, never write throughput — SQLite has exactly one writer
+— and it does not shorten a stall. Measured read-only on a healthy prod
+node, the dirty-IO run queue was non-empty in 1 sample out of 400 (max
+depth 1): at steady state these threads are not the constraint, so the
+default is usually the right answer, most of all on a small VPS where each
+one is an OS thread with its own allocator carriers.
+
 **The `/data` ownership split.** On a fresh anonymous `/data` volume
 Docker inherits the image's `grappa` ownership, so the entrypoint's
 `mkdir -p` succeeds; a root-owned BIND mount is the operator's to

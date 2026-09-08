@@ -48862,3 +48862,90 @@ cascade, never what a browser paints.
 _Deploy: **HOT**, cic bundle only — no server change, no migration, no wire
 change, no protocol bump: nothing here leaves the client except the two REST
 calls the two buttons already made._
+<!-- entry #1964 -->
+
+---
+
+## 2026-09-08 — #1964: the confirm previews what it is asking about, and Enter means yes
+
+#1883 put a file list in the confirm dialog so "Send this?" could be answered,
+and gave the row an image thumbnail. The argument for stopping there is quoted
+in the code it justified: *"a picture is the only preview worth showing: for
+every other category the bytes say nothing a human can check at a glance, and
+the name is what distinguishes `contract-final.pdf` from `contract-draft.pdf`"*.
+
+That reasoning assumes a name the OPERATOR chose. On the paste-as-.txt door
+(#816) the name is the constant `paste.txt`, for every paste in every window,
+so on the one door where the operator cannot know what is inside, the dialog
+showed a constant name, a byte count and an empty box. Gabriele reported it
+from the paste path and ruled the fix (2026-09-08): show the preview for the
+file's ACTUAL type, reusing the wiring that already exists.
+
+### Reuse means the viewer's vocabulary, not its components
+
+`MediaViewerModal` switches on `MediaKind` (`image | video | audio | text`) and
+its image/video/audio arms are `href: string`-driven, so a `blob:` URL of a
+local file would work in them unchanged. What is NOT reusable is the component:
+it is a full-screen modal with dismiss gestures, and the confirm needs a 2.5rem
+row. So the reuse is at the level that survives — the kind vocabulary and the
+element shapes — and `ConfirmAttachment` now carries
+`preview: {kind: MediaKind, blob} | null` instead of `thumbnail: Blob | null`.
+
+`attachmentPreview.previewKindOf/1` maps a MIME to that kind, and it is NOT
+`categoryOf`: `UploadCategory` also has four members, but `document` is one
+bucket holding `text/plain`, `text/markdown`, PDF, ODT, ODS, DOCX and XLSX.
+Only the two text types have a renderer in cic, so `document` splits on the
+base MIME and everything else answers `null` and keeps the placeholder. There
+is no PDF or office renderer anywhere in the client and this slice did not
+invent one.
+
+**The text arm is the one that could not reuse the viewer**, and the reason is
+mechanical: `TextPane` reads through `textResource.ts`, which fetches with a
+`Range` header, and a blob: URL does not honour Range. So a staged text file is
+read from the File itself — `blob.slice(0, 8 KiB).text()`, head only, then
+`splitLines` (the viewer's own splitter) and the first four rows. A truncated
+read drops its last row: a byte slice can land mid-line and mid-codepoint, so
+that row is not a line the file has.
+
+**Audio gets a player, not a glyph.** For sound there is no picture to
+recognise — listening IS the preview, and `<audio controls>` is what the viewer
+gives a clicked audio link. It does not fit a 2.5rem box, so the row became a
+column: the first line keeps #1883's shape exactly (media box, name, size, ×)
+and anything taller stacks under it. Video keeps the box, with
+`preload="metadata"` and a `#t=0.1` fragment to ask for a frame rather than a
+black poster.
+
+### Enter, and the reversal it required
+
+#195 focused Cancel unconditionally, "so a stray Enter dismisses, never
+leaves". That is right for a dialog that leaves a channel, drops a network,
+floods a room or deletes a theme. It is wrong for this one: the operator has
+already picked, dropped or pasted the file, the confirm is opt-in and was
+switched on to LOOK at what is going out, and Enter — the key you press after
+reading — discarded the batch. `ConfirmRequest.defaultButton` is now explicit
+at all ten call sites; nine say `"cancel"` and the upload confirm says
+`"confirm"`.
+
+Two things fell out of implementing it, both measured in a browser rather than
+reasoned:
+
+1. **The focus effect was keyed on an open/closed EDGE**, and the `<Show>` is
+   unkeyed, so a request REPLACED by another never re-focused. That is exactly
+   the paste path: the guard's "Upload as .txt" door clears the store and opens
+   the send confirm in the same tick, so the intermediate `null` is never
+   observed. Now keyed on the request object, which also preserves #195's other
+   half (a re-render with the same request does not re-steal focus).
+2. **A row removal dropped focus to `<body>`.** The × the operator presses
+   unmounts with its row, so the next Enter answered nothing — in the one
+   dialog where Enter is supposed to send. The modal hands focus back to the
+   request's default button after a removal.
+
+### Not done, and why
+
+The constant `paste.txt` filename is untouched. With the first lines rendered,
+the dialog now says what is going out, which was the complaint; changing the
+name changes the URL peers see on IRC, and that is a separate decision from
+fixing a blind dialog.
+
+_Deploy: **HOT**, cic bundle only — no server change, no wire change, no
+protocol bump._

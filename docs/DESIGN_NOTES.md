@@ -49542,3 +49542,89 @@ Across all 326 markers there are three findings and all three are same-commit:
 zero false positives observed, and no reachable case constructed. Should one
 ever turn up, the honest cure is to read the lines the branch ADDS rather than
 the file — a larger change than this gap justified today.
+<!-- entry #2017 -->
+
+---
+
+## 2026-09-09 — #2017: the archive row that was deleted and recreated
+
+`ux-2-mobile-archive:54` failed three times reading "the deleted archive row
+does not disappear". It disappears. It is deleted and then RECREATED, and the
+recreating write is the spec's own PART coming back from upstream. Recorded
+because the symptom points at the wrong layer and cost three sightings before
+anyone read the timestamps.
+
+### The mechanism
+
+Server log and Playwright trace of run 34285217206, both failing attempts,
+agreeing to the millisecond: the archive DELETE commits (`204 in 4ms`,
+`DELETE FROM "messages" ... "#spec-w0"`), and 7 ms later the session process —
+logged with no `request_id`, so not an HTTP call — inserts a `:part` row for
+that channel. The archive is derived from scrollback, so the entry returns
+carrying exactly that row's `server_time` as its new `last_activity`. The
+re-fetch 7 ms later reads it back.
+
+The echo is late because the connection spent its penalty budget on connect
+plus autojoin: the PART send logs `headroom_s=-1.155`, and PART-sent to
+echo-ingested measured **1.002 s** and **1.003 s** across the two attempts,
+while the spec reaches its delete tap at ~989 ms. The margin was **13 ms** and
+**8 ms** — a deterministic mechanism with a photo-finish outcome, which is why
+it wore the costume of a flake.
+
+### Why the timeout was never the knob
+
+Nothing removes the new row until the `afterEach` JOIN five seconds later, so
+a larger budget buys a slower red — the assertion had already polled nine
+times and seen `1` every time. Every DB operation in the window is
+sub-millisecond to low-single-digit (`db=0.1ms`…`2.6ms`, `queue=0.1ms`): there
+is no lock wait here and nothing a storage-side timeout could reach. The one
+delay that decides the test is IRC fake-lag, on the far side of the socket
+from SQLite.
+
+### The cure, and its shape
+
+`awaitPartEcho` is the PART-side twin of the lesson `listChannelNames` already
+carried for JOIN (#793): the request only ASKS. It delegates to
+`assertMessagePersisted` with `kind: "part"`, which `m9-cicchetto-part-x-click`
+already used — the verb existed; what did not exist was a name for using it as
+a SETUP BARRIER rather than as a claim. That distinction is the whole reason
+for the wrapper, and it is why m9's direct call was left alone.
+
+Applied to all three specs that DELETE archive state (`ux-1-archive-delete`,
+`ux-2-mobile-archive`, `ux-z-cluster-journey`), not only the one that went red:
+identical shape, and the two journey specs additionally assert the scrollback
+is empty afterwards, which the same stray row breaks. **The direction matters
+and is the reason the blast radius stops there:** specs asserting the entry is
+PRESENT need no barrier, because a late echo can only recreate an entry, never
+remove one.
+
+### Proved by mutation, both directions
+
+A three-arm throwaway probe on the real stack, contract deliberately mixed so
+that three greens would indict the probe rather than bless the cure. Arm A (no
+barrier, delete driven over the API so it lands ~8 ms after the PART instead of
+the UI's ~990 ms) FAILED as required, on `not.toContain` with
+`archive after echo = ["#spec-w0"]`. Arm B (with barrier) passed, the archive
+still empty 2 s later. Arm C (barrier on a nick that never parted) FAILED on
+the 5 s ceiling — without it, a barrier matching anything would also be green.
+
+**Arm B's number is the evidence the barrier observes rather than sleeps:** it
+reported 2016 ms at a 100 ms poll granularity, i.e. the fake-lag as it actually
+was on that stack — twice the 1.002 s measured in CI. A disguised sleep prints
+its own constant on every substrate.
+
+Driving arm A's delete over the API rather than the UI is what made the red
+reproducible: at 13 ms of margin the UI path is a coin toss, and a negative
+control you cannot summon is not a control.
+
+### Left open, deliberately
+
+Whether the server SHOULD let an in-flight echo repopulate a just-emptied
+archive entry is a product question, escalated rather than answered here. The
+barrier holds under either ruling — it waits for an event that happens in both
+worlds. Worth carrying forward: on a real network that window is WIDER than the
+1 s measured on the testnet, not narrower, so the same race is reachable by a
+user who parts, opens archive, and deletes.
+
+_Test-only. No wire change, no protocol bump, no production code touched.
+Deploy: nothing to deploy._

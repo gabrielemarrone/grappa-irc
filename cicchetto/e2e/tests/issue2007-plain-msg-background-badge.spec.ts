@@ -21,11 +21,23 @@
 //
 // The body carries NO mention of the operator's nick and no highlight token:
 // the mention path is server-owned (`window_counts.mentions`) and masks the
-// defect — that is exactly what invalidated the reporter's first round.
+// defect — that is exactly what invalidated the reporter's own first round.
 // `assertMessagePersisted` runs BEFORE the badge assertion so that a red
 // separates "the server never got the line" (harness fault) from "the server
 // has it and the badge is still absent" (the defect).
+//
+// TWO ENTRIES, ONE BODY. The reporter is on a mobile PWA, and the badge is a
+// DIFFERENT element there — `sidebarMessageBadge` resolves
+// `.bottom-bar-msg-unread` under a mobile viewport and `.sidebar-msg-unread`
+// otherwise. A desktop-only green therefore says nothing about the platform
+// the defect was reported on. The tags are how a spec reaches the mobile
+// projects (`@touch` → chromium-pixel-touch, `@webkit` → webkit-iphone-15),
+// and they are EXCLUSIVE: `chromium` carries `grepInvert: /@webkit|@touch/`,
+// so tagging the one entry would have MOVED it off the desktop rather than
+// widened it. Hence a tagged entry and an untagged one over a shared body —
+// three projects, no second copy of the scenario to drift.
 
+import type { Page } from "@playwright/test";
 import {
   composeSend,
   loginAs,
@@ -37,20 +49,19 @@ import { IrcPeer } from "../fixtures/ircClient";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
-const PEER_NICK = "i2007-peer";
 // The BACKGROUND window — the one whose badge is under test.
 const BACKGROUND_CHANNEL = AUTOJOIN_CHANNELS[0];
 // A plain line: no operator nick, no highlight token, nothing that could
 // route down the server-owned mention path and mask the count.
 const MESSAGE_BODY = "issue2007: plain line into a backgrounded window";
 
-test("issue 2007 — plain PRIVMSG to a background channel bumps its msg-unread badge while parked on ANOTHER real channel", async ({
-  page,
-}) => {
+// `variant` keeps the per-run channel and the peer nick disjoint between the
+// desktop and mobile entries: the projects can run concurrently against the
+// one shared testnet, and two peers on one nick would collide upstream.
+async function backgroundBadgeScenario(page: Page, variant: string): Promise<void> {
   const vjt = specUser();
-  // Fresh per-run channel so parallel workers never share it, and so parking
-  // here cannot collide with the autojoin channel under test.
-  const parkChannel = `#i2007park-${Date.now()}`;
+  const parkChannel = `#i2007${variant}-${Date.now()}`;
+  const peerNick = `i2007-${variant}`;
 
   await loginAs(page, vjt);
 
@@ -65,7 +76,7 @@ test("issue 2007 — plain PRIVMSG to a background channel bumps its msg-unread 
     await composeSend(page, `/join ${parkChannel}`);
     await selectChannel(page, NETWORK_SLUG, parkChannel, { ownNick: specNick() });
 
-    const peer = await IrcPeer.connect({ nick: PEER_NICK });
+    const peer = await IrcPeer.connect({ nick: peerNick });
     try {
       await peer.join(BACKGROUND_CHANNEL);
       peer.privmsg(BACKGROUND_CHANNEL, MESSAGE_BODY);
@@ -91,4 +102,16 @@ test("issue 2007 — plain PRIVMSG to a background channel bumps its msg-unread 
   } finally {
     await composeSend(page, `/part ${parkChannel}`).catch(() => {});
   }
+}
+
+test("issue 2007 — plain PRIVMSG to a background channel bumps its msg-unread badge while parked on ANOTHER real channel", async ({
+  page,
+}) => {
+  await backgroundBadgeScenario(page, "d");
+});
+
+test("@webkit @touch issue 2007 — the same background badge holds on the mobile layouts, where the badge is a different element", async ({
+  page,
+}) => {
+  await backgroundBadgeScenario(page, "m");
 });

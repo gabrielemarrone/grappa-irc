@@ -15,6 +15,8 @@ defmodule Grappa.Repo do
     otp_app: :grappa,
     adapter: Ecto.Adapters.SQLite3
 
+  require Logger
+
   alias Grappa.Repo.LockWatch
 
   # #506 — pre-switch the database to WAL on a SINGLE connection before the pool
@@ -41,10 +43,69 @@ defmodule Grappa.Repo do
   @impl Ecto.Repo
   def init(context, config) do
     if context == :supervisor do
+      check_dirty_io_reserve(config, :erlang.system_info(:dirty_io_schedulers))
       {:ok, prepare_database!(config)}
     else
       {:ok, config}
     end
+  end
+
+  @doc """
+  Reports, at pool start, when `pool_size` leaves no dirty-IO reserve.
+
+  `@spec check_dirty_io_reserve(keyword(), pos_integer()) :: :ok` — always
+  `:ok`; the only effect is a `Logger.warning` when the reserve is gone.
+
+  ## Why the two numbers have to be compared at all
+
+  Every exqlite call runs inside a `ERL_NIF_DIRTY_JOB_IO_BOUND` NIF, in the
+  CALLING process, and a writer waiting on SQLite's file lock sleeps INSIDE
+  that NIF for up to `busy_timeout` — occupying a dirty-IO scheduler for
+  the whole wait while doing no work. So `pool_size` is not only a
+  connection count: it is the number of dirty-IO schedulers the Repo alone
+  can hold at once. When it reaches the scheduler count, a saturated pool
+  can occupy every one of them, and #1715 already measures what queues
+  behind that occupancy — every `persistent_term` write and every module
+  load in the VM, for the length of the wait.
+
+  ## Why a check and not a well-chosen constant
+
+  The two numbers come from different worlds and neither side can see the
+  other. `pool_size` is ours (`POOL_SIZE`, `config/runtime.exs`); the
+  dirty-IO count is the BEAM's, it is **not** derived from the hardware,
+  and on the substrates that exec the release directly — the FreeBSD jail,
+  the packaged systemd host — nothing in this repo sets `+SDio`, so it is
+  whatever ERTS defaults to. A constant that is correct today is correct
+  only until either side moves, and `GRAPPA_DIRTY_SCHEDULERS` lets an
+  operator move the BEAM side with no floor applied when it is set
+  explicitly (`bin/start.sh` floors only the UNSET case).
+
+  ## Why it warns rather than raises
+
+  The reserve being gone is the posture production ships today, so raising
+  would refuse to boot the very deployments this is meant to inform. The
+  operator must SEE it; the node must still run — and the line names both
+  numbers because whoever reads it in `journalctl` has neither the config
+  nor a running shell.
+  """
+  @spec check_dirty_io_reserve(keyword(), pos_integer()) :: :ok
+  def check_dirty_io_reserve(config, dirty_io_schedulers) do
+    pool_size = Keyword.fetch!(config, :pool_size)
+
+    if pool_size >= dirty_io_schedulers do
+      Logger.warning(
+        "Grappa.Repo: pool_size=#{pool_size} leaves no dirty-IO reserve — this BEAM has " <>
+          "#{dirty_io_schedulers} dirty-IO scheduler(s). Every SQLite call runs inside a " <>
+          "dirty-IO NIF, and a writer waiting on the file lock occupies its scheduler for " <>
+          "the whole wait, so a saturated pool can occupy all of them and stall work that " <>
+          "has nothing to do with the database (see #1715). Lower POOL_SIZE below " <>
+          "#{dirty_io_schedulers}, or raise the dirty-IO count (+SDio). NOTE: DBConnection's " <>
+          "own pool-exhaustion error advises RAISING pool_size — that advice does not hold " <>
+          "here, because the ceiling is the scheduler count and not the pool."
+      )
+    end
+
+    :ok
   end
 
   # Everything that must happen on ONE serial connection, before the pool (or

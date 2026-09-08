@@ -49101,3 +49101,96 @@ assert.
 _Deploy: **COLD** — server modules changed (`ISupport`, `EventRouter`,
 `Identifier`, `Session.Server`) plus the cic bundle. No wire change, no
 protocol bump._
+<!-- entry #2003 -->
+
+---
+
+## 2026-09-08 — #2003: `CLAUDE.md` said `:interactive`; the release runs `-mode embedded`, and the number that backed it is withdrawn
+
+`CLAUDE.md`'s #1715 paragraph carried four claims about the runtime it
+describes. One was false, one was unsourced, one is about to go stale under a
+slice in flight, and the rule they all propped up turns out not to have needed
+any of them.
+
+### The false one: the release is not interactive
+
+The paragraph read *"the release runs `:interactive` and its `vm.args` sets no
+`-mode`"*. The second half is true and the first does not follow from it — the
+flag is supplied by the START SCRIPT, not by the args file.
+
+Measured twice, independently:
+
+* **On the live node.** `RELEASE_MODE=embedded` read out of pid 45683's
+  *environment* with `procstat -e` (jail `grappa-new`, release 1.5.3). The
+  explicit variable, not a glance at a command line.
+* **Off-prod, from the build artefacts.** The repo ships no `rel/`, so
+  `mix release` writes Elixir's stock template, whose `vm.args` sets no `-mode`
+  and says so in a comment. The generated `bin/grappa` then supplies it with a
+  **default of its own**: `RELEASE_MODE="${RELEASE_MODE:-"embedded"}"` (line
+  31), passed as `--erl "-mode $RELEASE_MODE"` (line 85) from the shell
+  function that both `start` and `daemon` call. `RELEASE_MODE` appears **0
+  times** in the whole repo (positive control: the same grep recipe hits
+  `RELEASE_COOKIE` in 36 files), and `infra/freebsd/rc.d/grappa` reaches the
+  release through one door — `grappa_runas "daemon"` — exporting `RELEASE_TMP`,
+  `LANG`, `RUN_ERL_LOG_*` and `PATH`, and no `RELEASE_MODE`.
+
+So embedded is nobody's choice: it is the Elixir release default and the repo
+has never overridden it. Residual gap, named rather than papered over: `su -m`
+preserves the invoking environment, so a `RELEASE_MODE` exported outside the
+repo could override it — which the `procstat -e` reading rules out for the
+running node.
+
+### The unsourced one: the cold-module census is deleted, not re-measured
+
+*"2464 of 3063 modules are still cold (80 %), 265 of `Grappa.*` alone"* had no
+recorded provenance. It is removed rather than re-taken, on three grounds, and
+the third is the one that generalises:
+
+1. **Nobody recorded which node it came from.** An unsourced number is cited as
+   measured by the next reader; that is how it survived this long.
+2. **It cannot describe this substrate.** `releases/<vsn>/start.script` carries
+   **317** distinct `Elixir.Grappa*` modules among 1372 total, all inside
+   `primLoad` directives, and embedded mode loads exactly that set at boot. The
+   census was therefore almost certainly taken on a NON-release node — docker's
+   `mix phx.server` or an `iex -S mix`, where interactive genuinely is the mode.
+3. 🔴 **A correct re-measurement would still be the wrong evidence.** The number
+   counts MODULE RESIDENCY. The rule it was supporting depends on LOGGER-CACHE
+   residency. Those are different axes, and no value of the first is evidence
+   for the second. **A rule may not cite a number that does not measure it** —
+   that is the transferable lesson, and it is why re-measuring was declined even
+   though the measurement is cheap to describe.
+
+### The rule survives, and it never depended on `-mode`
+
+The priming rule (`LockWatch.prime_logger_module_cache/0`, #1731) stands
+unchanged. #1715's hazard has two legs and they part company here:
+
+* **The `persistent_term` leg is intact on every substrate.** A module's first
+  log line does a `persistent_term:put` via `logger_config:allow/2`. Embedded
+  mode loads CODE; it does not populate Logger's per-module cache. A preloaded
+  module that has never logged still owes that put. Nothing about `-mode`
+  touches this.
+* **The module-load leg does not reach the release.** Under embedded the boot
+  script has already loaded the tree, and a module outside it fails fast rather
+  than reaching the code server. That leg is live only where the node really is
+  interactive: docker/dev.
+
+So the rule was right and its stated reason was wrong — a worse failure than a
+wrong rule, because the reasoning is what the next reader reuses.
+
+### The one about to go stale: don't restate `busy_timeout`
+
+The paragraph pinned the window as *"`busy_timeout` (`30_000` in every env
+today)"*. A slice in flight moves it to ~300 ms in prod and dev, keeping 30_000
+only in `:test`, so "in every env today" stops being true.
+
+**Deliberately NOT corrected by writing the new number in.** The two changes can
+land in either order, and a file asserting a value that has not merged yet is
+the same defect mirrored. The form chosen instead: **name the SSOT and drop the
+value** (`config/runtime.exs`, per-env), and supply the field scale from a
+**dated measurement that cannot go stale** — the 29 holds logged 2026-09-08 ran
+31.1–94.1 s. A knob moves; a dated observation does not. This is the shape to
+reuse whenever `CLAUDE.md` needs to convey a magnitude that lives in config.
+
+_Docs-only. No code, no wire change, no protocol bump. Deploy: **nothing** —
+`CLAUDE.md` is instruction, not runtime._

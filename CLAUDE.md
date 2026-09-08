@@ -713,31 +713,59 @@ not the surrounding code.**
   is exactly what the silent regime produces.
 - **🔴 A dirty NIF parked on a SQLite write-lock wait blocks every
   `persistent_term` write and every module load in the VM, for the whole
-  wait (#1715).** The window is `busy_timeout` (`30_000` in every env
-  today) — the 133 s seen in `lock_watch_test` is that file's own
+  wait (#1715).** The window is `busy_timeout` — **per-env, and
+  `config/runtime.exs` is the SSOT: do not restate the value here, it
+  moves** — while the 133 s seen in `lock_watch_test` is that file's own
   `@waiter_budget_ms`, **never** a production number, and quoting it as
-  one is the mistake this line exists to stop. **What blocks:** *every*
+  one is the mistake this line exists to stop. For the field scale, cite
+  a DATED measurement instead of a live knob: the 29 holds logged on
+  2026-09-08 ran 31.1–94.1 s. **What blocks:** *every*
   `persistent_term:put/2` and `erase/1` — **word-sized ones too**, which
   trigger no global GC of their own but queue behind somebody else's, and
   the shipped docs do not lead you to expect that; *every* **module's
   first log line** (`logger_config:allow/2:67` **is** a put); and *every*
   **module load** — that is, every module **not yet loaded**, since an
   already-loaded one short-circuits in `code:ensure_loaded/1` and never
-  reaches the code server. ⚠️ **That is not a small set on a warm node:**
-  measured on a booted node, 2464 of 3063 modules are still cold (80 %),
-  265 of `Grappa.*` alone, because the release runs `:interactive` and its
-  `vm.args` sets no `-mode`. **The rule: a module that may log DURING a
-  write-lock wait buys its Logger cache key at boot**
-  (`LockWatch.prime_logger_module_cache/0`, #1731) — the observer whose
-  job is to report the wait is otherwise its own casualty. **Name the
+  reaches the code server.
+  **⚠️ The module-load leg does NOT reach the release, and a retracted
+  number used to say it did (#2003).** This paragraph claimed *"2464 of
+  3063 modules are still cold (80 %), 265 of `Grappa.*` alone, because
+  the release runs `:interactive` and its `vm.args` sets no `-mode`"*.
+  **The release runs `-mode embedded`** — read on the live node
+  (`RELEASE_MODE=embedded` in pid 45683's environment, `procstat -e`) and
+  derivable entirely off-prod: the repo ships no `rel/`, so the generated
+  `bin/grappa` supplies the flag from its OWN default
+  (`RELEASE_MODE="${RELEASE_MODE:-"embedded"}"`, line 31) and
+  `RELEASE_MODE` appears **0 times** anywhere in the repo. The `vm.args`
+  half was true; the conclusion drawn from it was not, because the flag
+  comes from the start script and not from the args file.
+  🔴 **The census is DELETED, not re-measured**, on three grounds: nobody
+  recorded which node produced it (an unsourced number gets cited as
+  measured by the next reader); it cannot describe this substrate
+  (`releases/<vsn>/start.script` carries **317** `Elixir.Grappa*` modules
+  inside `primLoad`, all loaded at boot under embedded); and a *correct*
+  re-measurement would still be the WRONG EVIDENCE for the rule it was
+  supporting — module residency and Logger-cache residency are different
+  axes. **A rule may not cite a number that does not measure it.**
+  **🔴 The rule STANDS, on the other leg, and never depended on `-mode`:
+  a module that may log DURING a write-lock wait buys its Logger cache
+  key at boot** (`LockWatch.prime_logger_module_cache/0`, #1731) — the
+  observer whose job is to report the wait is otherwise its own
+  casualty. Embedded mode loads CODE; it does not populate Logger's
+  per-module cache, so a preloaded module that has never logged still
+  owes its `persistent_term:put` on its first line. That leg holds on
+  every substrate. The module-load leg is live only where the node really
+  is interactive — docker/dev's `mix phx.server`, `iex -S mix` — which is
+  also the likeliest provenance of the deleted census. **Name the
   observers; never blanket-prime.** Not for cost — blanket priming
   measures sub-millisecond, five orders below the bug — but for **scope**:
   the modules that must log under contention are enumerable (they live
-  around the Repo), and 265 primed cold modules is unfalsifiable
+  around the Repo), and priming the whole tree is unfalsifiable
   maintenance that will drift (design-discipline (1) and (5)). The
   mechanism is measured in the field and **never reproduced on a bench**;
   its final causal link is **inferred**, not measured. Measurements, the
-  2×2×2 and the three retractions: DESIGN_NOTES 2026-08-24.
+  2×2×2 and the three retractions: DESIGN_NOTES 2026-08-24; the embedded
+  correction and the census retraction: DESIGN_NOTES 2026-09-08.
 - **Sandbox per test (`async: true`).** Never share sandbox across
   tests. `use Grappa.DataCase, async: true`.
 - **PubSub topic naming: `grappa:` prefix mandatory.** Topics are

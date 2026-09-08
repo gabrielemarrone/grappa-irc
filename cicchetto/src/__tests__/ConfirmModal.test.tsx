@@ -322,6 +322,26 @@ describe("ConfirmModal (#195)", () => {
       expect(source.textContent).not.toContain("epsilon");
     });
 
+    // A text row renders a <pre> of lines read from the Blob, so a URL there
+    // would pin the Blob for the dialog's life and be handed to nothing.
+    it("mints no object URL for a text row", async () => {
+      const create = vi.spyOn(URL, "createObjectURL");
+      render(() => <ConfirmModal />);
+      withAttachments(
+        [
+          attachment({
+            label: "paste.txt",
+            preview: { kind: "text", blob: new Blob(["a\nb"], { type: "text/plain" }) },
+          }),
+        ],
+        vi.fn(),
+      );
+
+      await screen.findByTestId("confirm-modal-attachment-source");
+      expect(create).not.toHaveBeenCalled();
+      create.mockRestore();
+    });
+
     it("a row with nothing renderable keeps the placeholder and mints no URL", () => {
       const create = vi.spyOn(URL, "createObjectURL");
       render(() => <ConfirmModal />);

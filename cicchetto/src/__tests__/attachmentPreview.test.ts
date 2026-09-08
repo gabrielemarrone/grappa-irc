@@ -68,12 +68,38 @@ describe("readTextPreview (#1964)", () => {
     expect(await readTextPreview(blob(""), TEXT_PREVIEW_LINES)).toEqual([""]);
   });
 
-  // The read is a HEAD read, so the last row of a cut is not a line the file
-  // has — and on a byte boundary it may not even be valid UTF-8. It is dropped.
+  // The read is a HEAD read, so the last row of a cut may not be a line the
+  // file has — and on a byte boundary it may not even be valid UTF-8.
   it("drops the partial last line when the file is longer than the head read", async () => {
-    const long = `first\n${"x".repeat(16 * 1024)}`;
-    const lines = await readTextPreview(long ? blob(long) : blob(""), TEXT_PREVIEW_LINES);
+    const lines = await readTextPreview(
+      blob(`first\n${"x".repeat(16 * 1024)}`),
+      TEXT_PREVIEW_LINES,
+    );
     expect(lines).toEqual(["first"]);
+  });
+
+  // …but "drop the last row" has two cases where it would show LESS than the
+  // truth, and both were live until the #1964 review.
+  //
+  // A file whose first line is longer than the head read yields exactly ONE
+  // partial row, and dropping it returns [] — an empty preview box, which is
+  // the defect this whole module exists to remove.
+  it("keeps a truncated first line rather than previewing nothing", async () => {
+    const lines = await readTextPreview(blob("z".repeat(9000)), TEXT_PREVIEW_LINES);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toHaveLength(8 * 1024);
+  });
+
+  // And a cut that lands exactly ON a line boundary leaves every row complete:
+  // splitLines has already dropped the phantom the trailing newline makes, so
+  // dropping again eats a real line. Four 2048-byte lines fill the 8 KiB head
+  // exactly, and the tail past it is what makes the read a cut.
+  it("does not eat a line when the cut lands on a line boundary", async () => {
+    const line = (c: string): string => `${c.repeat(2047)}\n`;
+    const text = `${line("a")}${line("b")}${line("c")}${line("d")}tail`;
+    const lines = await readTextPreview(blob(text), TEXT_PREVIEW_LINES);
+    expect(lines).toHaveLength(4);
+    expect(lines[3]?.startsWith("d")).toBe(true);
   });
 
   // A dialog whose job is to say something about a file must not be the thing

@@ -696,7 +696,12 @@ async function prepareVideo(
 // of the same photo, so the id is minted here and never derived.
 let nextAttachmentId = 0;
 
-type StagedFile = { id: string; file: File };
+// The attachment is minted WITH the staged file and never recomputed. Solid's
+// `<For>` diffs by reference, so a row rebuilt on every read would dispose and
+// recreate EVERY row on any removal — which since #1964 is visible: a playing
+// audio preview stops and resets, a text preview is re-read off disk, and both
+// object URLs churn. Deriving once is also the cheaper shape.
+type StagedFile = { id: string; file: File; attachment: ConfirmAttachment };
 
 // #1964 — the preview is of the file's ACTUAL type.
 //
@@ -712,13 +717,13 @@ type StagedFile = { id: string; file: File };
 // keeps the placeholder. The blob is handed over raw — ConfirmModal mints and
 // revokes the object URL, because the row's unmount is the only event that
 // knows when it stops being needed.
-function toAttachment(staged: StagedFile): ConfirmAttachment {
-  const kind = previewKindOf(staged.file.type);
+function toAttachment(id: string, file: File): ConfirmAttachment {
+  const kind = previewKindOf(file.type);
   return {
-    id: staged.id,
-    label: staged.file.name,
-    detail: formatBytes(staged.file.size),
-    preview: kind === null ? null : { kind, blob: staged.file },
+    id,
+    label: file.name,
+    detail: formatBytes(file.size),
+    preview: kind === null ? null : { kind, blob: file },
   };
 }
 
@@ -739,7 +744,9 @@ export function triggerUploads(
   // all describe the same files.
   const normalised: StagedFile[] = rawFiles.map((raw) => {
     nextAttachmentId += 1;
-    return { id: `picked-${nextAttachmentId}`, file: normalizeUploadFile(raw) };
+    const id = `picked-${nextAttachmentId}`;
+    const file = normalizeUploadFile(raw);
+    return { id, file, attachment: toAttachment(id, file) };
   });
 
   // Everything past the privacy notice. A closure because the notice may have
@@ -815,7 +822,7 @@ export function triggerUploads(
       // discarding the batch. See `ConfirmRequest.defaultButton`.
       defaultButton: "confirm",
       attachments: {
-        items: (): ConfirmAttachment[] => staged().map(toAttachment),
+        items: (): ConfirmAttachment[] => staged().map((s) => s.attachment),
         onRemove: (id: string): void => {
           const rest = staged().filter((s) => s.id !== id);
           setStaged(rest);

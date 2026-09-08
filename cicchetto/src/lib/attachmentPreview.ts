@@ -1,6 +1,11 @@
 import type { MediaKind } from "./mediaLink";
 import { splitLines } from "./textResource";
-import { baseMime, categoryOf } from "./uploadCategory";
+import {
+  baseMime,
+  categoryOf,
+  type DOCUMENT_MIMES_OFFICE,
+  type DOCUMENT_MIMES_PORTABLE,
+} from "./uploadCategory";
 
 // #1964 — what a STAGED LOCAL file can be shown as in the upload confirm, and
 // how to read the head of a text one.
@@ -62,17 +67,38 @@ export function previewKindOf(mime: string): MediaKind | null {
       return "video";
     case "audio":
       return "audio";
-    case "document":
-      return TEXT_MIMES.has(baseMime(mime)) ? "text" : null;
+    // Widened lookup, the shape `mimeExtLabel` uses: the map is keyed on the
+    // MIME unions so it cannot drift, but the caller holds a bare string.
+    case "document": {
+      const documents = DOCUMENT_PREVIEW_KIND as Readonly<Record<string, MediaKind | null>>;
+      return documents[baseMime(mime)] ?? null;
+    }
     case null:
       return null;
   }
 }
 
-// The renderable slice of the `document` bucket. A Set of base MIMEs rather
-// than a suffix test on `text/`: `uploadCategory` admits exactly these two
-// text types, and a `text/*` test would claim types the upload itself refuses.
-const TEXT_MIMES: ReadonlySet<string> = new Set(["text/plain", "text/markdown"]);
+// What each member of the `document` bucket can be shown as — and it is keyed
+// on the MIME UNIONS rather than being a set of strings, so a ninth document
+// type added to `uploadCategory` is a compile error here instead of a file
+// that silently previews as an empty box. Same discipline, and for the same
+// stated reason, as `MIME_EXT_LABEL` in that module ("so a 15th MIME added to
+// a list without a label here is a compile error").
+//
+// `null` is a decision, not an omission: cic has no PDF renderer and no office
+// renderer, and this slice reuses viewers rather than inventing them.
+const DOCUMENT_PREVIEW_KIND: Record<
+  (typeof DOCUMENT_MIMES_PORTABLE)[number] | (typeof DOCUMENT_MIMES_OFFICE)[number],
+  MediaKind | null
+> = {
+  "application/pdf": null,
+  "text/plain": "text",
+  "text/markdown": "text",
+  "application/vnd.oasis.opendocument.text": null,
+  "application/vnd.oasis.opendocument.spreadsheet": null,
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": null,
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": null,
+};
 
 /** Rows shown in a confirm-row text preview. Enough to recognise a paste. */
 export const TEXT_PREVIEW_LINES = 4;
@@ -102,9 +128,18 @@ export async function readTextPreview(blob: Blob, maxLines: number): Promise<str
 
   const lines = splitLines(text);
   // A byte slice can land mid-line AND mid-codepoint (UTF-8 decode leaves a
-  // U+FFFD there), so the last row of a truncated read is not a line the file
-  // has — drop it. `splitLines` already drops the phantom row a trailing
-  // newline produces, so this only fires on a genuine cut.
-  if (head.size < blob.size) lines.pop();
+  // U+FFFD there), so a truncated read's last row may not be a line the file
+  // has. Two guards, and each answers a case that showed the operator LESS
+  // than the truth:
+  //
+  //   * `endsWith("\n")` — a cut landing exactly on a line boundary leaves
+  //     every row complete, and `splitLines` has already dropped the phantom
+  //     row the trailing newline produces. Popping there eats a real line.
+  //   * `length > 1` — a file whose FIRST line is longer than the head read (a
+  //     minified blob renamed `.txt`, a single-line log record) yields one
+  //     partial row, and popping it returns `[]`: an empty preview box, which
+  //     is the exact defect #1964 exists to remove. A truncated first line is
+  //     worth more than nothing.
+  if (head.size < blob.size && !text.endsWith("\n") && lines.length > 1) lines.pop();
   return lines.slice(0, maxLines);
 }

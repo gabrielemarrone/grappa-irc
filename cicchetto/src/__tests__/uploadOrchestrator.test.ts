@@ -1298,6 +1298,24 @@ describe("the confirm gate (#1883)", () => {
     expect(attachments()[2]?.preview).toBeNull();
   });
 
+  // Solid's <For> diffs by REFERENCE. A row rebuilt on every read disposes and
+  // recreates every row on any removal, which since #1964 is visible: a playing
+  // audio preview stops and resets, a text preview is re-read off disk, and
+  // both object URLs churn. Identity is the observable that pins it.
+  it("each row keeps its identity across reads and across a removal", () => {
+    ackPrivacy();
+    triggerUploads(key, slug, channel, [img("a.png"), img("b.png"), img("c.png")]);
+    const before = attachments();
+    expect(attachments()[0]).toBe(before[0]);
+
+    confirmRequest()?.attachments?.onRemove(before[1]?.id as string);
+
+    const after = attachments();
+    expect(after.map((a) => a.label)).toEqual(["a.png", "c.png"]);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[2]);
+  });
+
   // The blob handed to the modal is the file itself — the row shows the
   // operator their OWN bytes, not a re-encoded copy.
   it("the preview blob is the staged file", () => {

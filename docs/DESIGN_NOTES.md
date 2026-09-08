@@ -48904,8 +48904,13 @@ mechanical: `TextPane` reads through `textResource.ts`, which fetches with a
 `Range` header, and a blob: URL does not honour Range. So a staged text file is
 read from the File itself — `blob.slice(0, 8 KiB).text()`, head only, then
 `splitLines` (the viewer's own splitter) and the first four rows. A truncated
-read drops its last row: a byte slice can land mid-line and mid-codepoint, so
-that row is not a line the file has.
+read drops its last row, because a byte slice can land mid-line and
+mid-codepoint — but only when that row is really partial. The review found both
+exceptions: a cut landing exactly on a newline leaves every row complete (and
+`splitLines` has already dropped the phantom), so dropping again eats a real
+line; and a file whose FIRST line is longer than the head yields one partial
+row, where dropping it returns `[]` — an empty box, the very defect this
+change removes.
 
 **Audio gets a player, not a glyph.** For sound there is no picture to
 recognise — listening IS the preview, and `<audio controls>` is what the viewer
@@ -48939,6 +48944,22 @@ reasoned:
    unmounts with its row, so the next Enter answered nothing — in the one
    dialog where Enter is supposed to send. The modal hands focus back to the
    request's default button after a removal.
+
+### What the review changed
+
+An adversarial pass over the branch found no critical issue and four medium
+ones, all fixed here rather than filed. Two are recorded above (the truncation
+guards, and the `MediaKind` coupling note); the other two:
+
+* **Row identity.** `items()` minted a fresh `ConfirmAttachment` on every read,
+  and Solid's `<For>` diffs by REFERENCE — so removing one row disposed and
+  recreated every row. Invisible while the only preview was an `<img>`; visible
+  the moment one of them is a PLAYING `<audio>`, which stopped and reset to
+  zero. The attachment is now minted once, beside the staged file.
+* **The document split was a stringly `Set`.** `uploadCategory` types
+  `MIME_EXT_LABEL` on the MIME unions precisely "so a 15th MIME added to a list
+  without a label here is a compile error"; the preview map now does the same,
+  so a ninth document type cannot silently preview as an empty box.
 
 ### Not done, and why
 

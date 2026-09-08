@@ -24,19 +24,25 @@ import { createOverlayLock } from "./lib/overlayScrollLock";
 // mounted once per Shell layout branch (mobile + desktop). Replaces the
 // removed #172 hold-to-close gesture.
 //
-// Cancel is the SAFE default: it takes initial focus (so a stray Enter
-// dismisses, never leaves), and backdrop-click + Esc both dismiss without
-// firing. Only the explicit affirmative button runs the carried action.
-// Structure mirrors DeleteAccountModal (backdrop-nested dialog + overlay
-// scroll-lock), the closest existing confirm-shaped modal.
+// Backdrop-click and Esc always dismiss without firing; only the explicit
+// affirmative button runs the carried action. Structure mirrors
+// DeleteAccountModal (backdrop-nested dialog + overlay scroll-lock), the
+// closest existing confirm-shaped modal.
+//
+// #1964 — which button takes INITIAL FOCUS, and therefore what a bare Enter
+// answers, is now the request's own call (`ConfirmRequest.defaultButton`).
+// #195's "Cancel is the SAFE default" still describes nine of the ten call
+// sites and the reasoning for it has not changed; the upload confirm is the
+// exception, and the argument for it lives beside that field rather than being
+// re-stated here.
 //
 // 1883 — an OPTIONAL attachment list sits between the body and the buttons,
 // for requests whose question is about FILES. It is the same chrome, not a
-// second modal: the file-upload confirm gets the same scrim, the same Esc, the
-// same Cancel-first focus order as every other confirm in cic, and cic gains
-// no new overlay to keep consistent. The rows arrive pre-formatted (see
-// ConfirmAttachment) — this component decides layout and object-URL lifetime,
-// nothing else.
+// second modal: the file-upload confirm gets the same scrim and the same Esc
+// as every other confirm in cic, and cic gains no new overlay to keep
+// consistent. The rows arrive pre-formatted (see ConfirmAttachment) — this
+// component decides layout, object-URL lifetime and how each preview kind is
+// rendered, nothing else.
 
 // One attachment row. Its OWN component so the object URL can be minted and
 // revoked by the row's lifecycle: `onCleanup` here fires when the row leaves —
@@ -69,9 +75,13 @@ const AttachmentRow: Component<{
   // Read once, not reactively: `<For>` hands each row a stable item object, so
   // a row's preview never changes under it — a re-mint would only churn URLs.
   const preview = props.item.preview;
-  const src = preview === null ? null : URL.createObjectURL(preview.blob);
-  if (src !== null) onCleanup(() => URL.revokeObjectURL(src));
   const kind = preview?.kind ?? null;
+  // No URL for a text row: it renders a `<pre>` of lines read from the Blob, so
+  // a URL there would pin the Blob for the dialog's life and be handed to
+  // nothing.
+  const src =
+    preview === null || preview.kind === "text" ? null : URL.createObjectURL(preview.blob);
+  if (src !== null) onCleanup(() => URL.revokeObjectURL(src));
 
   // Async, hence a resource: the dialog paints at once and the lines land when
   // the disk answers. A read that fails resolves to `[]` (see
@@ -109,10 +119,13 @@ const AttachmentRow: Component<{
             />
           </Match>
           <Match when={src !== null && kind === "video"}>
-            {/* No caption track and no `controls`: this is a still frame
-                standing in for a picture, so it carries nothing to operate and
-                nothing to caption. It is decorative for the same reason as the
-                image's empty alt — the filename beside it is the label. */}
+            {/* No caption track and no `controls`: a still frame standing in
+                for a picture, with nothing to operate and nothing to caption.
+                `aria-hidden` rather than the image's `alt=""` because an empty
+                alt REMOVES an `<img>` from the a11y tree while an unnamed
+                `<video>` stays in it and is announced ahead of the filename
+                that labels it. */}
+            {/* biome-ignore lint/a11y/noAriaHiddenOnFocusable: without `controls` a <video> is not in the tab order, so hiding it traps no focus */}
             <video
               class="confirm-modal-attachment-thumb"
               data-testid="confirm-modal-attachment-video"
@@ -120,6 +133,7 @@ const AttachmentRow: Component<{
               preload="metadata"
               muted
               playsinline
+              aria-hidden="true"
             />
           </Match>
         </Switch>

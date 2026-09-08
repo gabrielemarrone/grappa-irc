@@ -35,7 +35,10 @@ import type { MediaKind } from "./mediaLink";
 // below for why each was necessary. The store stays domain-agnostic the same
 // way `alternative` does — it carries a pre-formatted row (label, detail, an
 // optional blob and the kind to render it as) and a removal closure, and knows
-// nothing about uploads, MIME categories or byte formatting. The MODAL owns the object-URL lifecycle for the blob, because
+// nothing about uploads, MIME types or byte formatting. It does now name
+// `MediaKind`, a type-only import: that is the RENDERING vocabulary the media
+// viewer already speaks, not a domain fact about uploads, and the alternative
+// was a second four-member union meaning the same four things. The MODAL owns the object-URL lifecycle for the blob, because
 // the row's own mount/unmount is the only thing that knows when the URL stops
 // being needed.
 

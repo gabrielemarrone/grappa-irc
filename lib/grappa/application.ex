@@ -519,7 +519,7 @@ defmodule Grappa.Application do
     end
   end
 
-  # max_restarts: 60, max_seconds: 60 — the ROOT supervisor ran on OTP's
+  # max_restarts: 80, max_seconds: 120 — the ROOT supervisor ran on OTP's
   # DEFAULT 3-in-5s until 2026-09-08, which is a default and never was a
   # decision: `SessionSupervisor` twenty lines up carries an argued
   # 10_000/60, so the silence here read as "considered" when it was
@@ -537,15 +537,37 @@ defmodule Grappa.Application do
   # ~31 top-level children and most of them touch the Repo, so the default
   # made "the DB is briefly busy" and "kill the node" the same event.
   #
-  # Where the two numbers come from:
+  # Where the two numbers come from — anchored to MEASURED HOLD DURATIONS,
+  # deliberately not to `busy_timeout`:
   #
-  #   max_seconds: 60 — twice `busy_timeout` (30_000, every env), i.e. the
-  #     window has to be able to CONTAIN one saturation episode. A window
-  #     shorter than the stall splits one degradation across two budgets and
-  #     measures nothing.
-  #   max_restarts: 60 — ~2 full sweeps of the ~31-child tree: every
-  #     top-level singleton may die TWICE inside one degradation and the node
-  #     lives. The measured peak is 5, so this clears it 12x over.
+  #   max_seconds: 120 — the window must be able to CONTAIN one saturation
+  #     episode, because a window shorter than the episode counts a
+  #     fragment: the budget then means "restarts per arbitrary slice"
+  #     rather than "restarts per degradation". The 29 stalls logged on
+  #     2026-09-08 fall in three tight clusters — 22 at 31_060–31_457 ms,
+  #     6 at 62_604–62_810 ms, 1 at 94_055 ms — i.e. ratios 1:2:3 off a
+  #     ~31 s unit, so the long ones are two and three units back to back.
+  #     120 s contains the 94 s worst case with margin.
+  #   max_restarts: 80 — worst legitimate case is every top-level child
+  #     dying once per tick for the whole window: the periodic children run
+  #     a 60 s cadence (`reaper_interval_ms/0`) and `init/1` re-arms the
+  #     timer rather than re-querying, so a 120 s window gives each of the
+  #     ~31 children TWO chances to die: ~62. The budget must sit ABOVE
+  #     that, and 80 leaves room for roughly nine more children before the
+  #     derivation needs revisiting. The measured burst peak is 5, so this
+  #     clears it 16x over.
+  #
+  # 🔴 Why NOT `busy_timeout`, which an earlier draft of this comment used:
+  # `busy_timeout` bounds how long a WAITER blocks before giving up. What
+  # this window has to span is the HOLD — how long the winner keeps
+  # RESERVED — and the two are causally unrelated. `LockWatch`'s
+  # `acquired/0` is the first statement inside the transaction fun, which
+  # `DBConnection` only reaches after `BEGIN IMMEDIATE` returns `{:ok, _}`,
+  # so the logged `held_ms` is possession and never queueing. That the two
+  # numbers resembled each other (30 s vs 31 s) was coincidence, and it is
+  # about to stop being one: `busy_timeout` is moving to ~300 ms, under
+  # which the old formula would have produced `max_seconds: 0.6` — which is
+  # the clearest possible proof the relation was never there.
   #
   # Deliberately NOT the sibling's 10_000/60. Under `SessionSupervisor` the
   # children are homogeneous, ephemeral, and restarting IS the recovery
@@ -557,8 +579,8 @@ defmodule Grappa.Application do
   #
   # What must STILL kill the node, on purpose: a non-transient fault — an
   # Endpoint that cannot bind, a Vault with the wrong key, a Repo that
-  # cannot open the file, or any child in a tight crash-loop. 60-in-60 is
-  # 1 restart/s sustained, so a tight loop trips it in well under a minute
+  # cannot open the file, or any child in a tight crash-loop. A tight loop
+  # spends the budget at its own rate, not the window's, so it still trips
   # and the node exits where rc.d can see it. A node that restart-loops
   # forever while looking alive is strictly WORSE for an operator than one
   # that dies.
@@ -566,9 +588,9 @@ defmodule Grappa.Application do
   # ⚠️ What this does NOT cure, stated so nobody reads it as fixed: death 2
   # above. `Grappa.Bootstrap` is `use Task, restart: :transient` and re-runs
   # its credential READ on every restart, so it re-enters the saturated pool
-  # immediately — measured at ~2.8 restarts/s, which exhausts 60-in-60 in
-  # ~21s, well inside a 31s stall. That is a child that does not degrade,
-  # not a budget that is too small, and raising the budget to cover it would
+  # immediately — measured at ~2.8 restarts/s, which exhausts 80 restarts in
+  # ~29s, well inside the 31s hold that causes it. That is a child that does
+  # not degrade, not a budget that is too small, and raising it to cover this would
   # be buying the immortality rejected two paragraphs up. The cure is the
   # `{:error, :db_unavailable}` verb already used in 45 files under `lib/`
   # (`Accounts.Reaper` is the in-house model: "sweep dropped, retrying next
@@ -581,7 +603,7 @@ defmodule Grappa.Application do
   """
   @spec root_supervisor_opts() :: [Supervisor.option()]
   def root_supervisor_opts do
-    [strategy: :one_for_one, name: Grappa.Supervisor, max_restarts: 60, max_seconds: 60]
+    [strategy: :one_for_one, name: Grappa.Supervisor, max_restarts: 80, max_seconds: 120]
   end
 
   # Bootstrap is opt-in via the `:start_bootstrap` flag (true in dev/prod,

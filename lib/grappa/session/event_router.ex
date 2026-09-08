@@ -3970,7 +3970,7 @@ defmodule Grappa.Session.EventRouter do
   # guessing one — an absent key is the documented back-compat path.
   defp sender_meta(%Message{}), do: %{}
 
-  # #25: content kinds whose sender shows an irssi-style @/%/+ glyph. The
+  # #25: content kinds whose sender shows an irssi-style grade glyph. The
   # glyph must reflect the sender's grade AT SEND TIME, not their current
   # grade — so it's snapshotted into meta here, not derived live by cic.
   # S17 — derived from the schema SSOT (`Message` here is the IRC parser

@@ -4225,7 +4225,7 @@ defmodule Grappa.Session.Server do
           kind: kind,
           sender: state.nick,
           body: fragment,
-          # #25: snapshot the operator's own channel-grade glyph (@/%/+)
+          # #25: snapshot the operator's own channel-grade glyph
           # so a later MODE change can't retroactively re-prefix their
           # own outbound lines. Mirror of EventRouter.put_sender_prefix
           # for the inbound side; nil → %{} for DM targets / plain grade.

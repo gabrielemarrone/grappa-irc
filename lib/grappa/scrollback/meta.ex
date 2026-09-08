@@ -67,14 +67,14 @@ defmodule Grappa.Scrollback.Meta do
 
   ## Per-kind expected shapes
 
-      :privmsg | :action | :topic   →  %{} OR %{sender_prefix: "@" | "%" | "+"}
+      :privmsg | :action | :topic   →  %{} OR %{sender_prefix: <membership sigil>}
                                                                  (#25: content rows on a channel
                                                                   snapshot the sender's grade glyph
                                                                   at SEND time so a later MODE change
                                                                   can't retroactively re-prefix them;
                                                                   absent for plain senders / DMs /
                                                                   $server. :topic carries %{}.)
-      :notice                       →  %{} OR %{sender_prefix: "@" | "%" | "+"}
+      :notice                       →  %{} OR %{sender_prefix: <membership sigil>}
                                     OR %{numeric: 1..999, severity: :ok | :error,
                                          raw_params: [String.t()]}
                                                                  (server numerics route to :notice

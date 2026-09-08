@@ -35,7 +35,7 @@ import {
   selectChannel,
   sidebarWindow,
 } from "../fixtures/cicchettoPage";
-import { joinChannel, partChannel } from "../fixtures/grappaApi";
+import { awaitPartEcho, joinChannel, partChannel } from "../fixtures/grappaApi";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
@@ -61,6 +61,10 @@ test("UX-1 — × on archive entry confirms + deletes scrollback permanently", a
   // PART so the channel moves into archive.
   await partChannel(vjt.token, NETWORK_SLUG, CHANNEL);
   await expect(sidebarWindow(page, NETWORK_SLUG, CHANNEL)).toHaveCount(0, { timeout: 5_000 });
+
+  // Barrier before the delete: a late PART echo recreates the archive entry
+  // AND puts a row back in the scrollback this spec later asserts is empty.
+  await awaitPartEcho(vjt.token, NETWORK_SLUG, CHANNEL, specNick());
 
   // Open the grouped ArchiveModal — the ONE archive surface post-#473,
   // replacing the retired desktop Sidebar `<details class="sidebar-archive">`.

@@ -33,7 +33,13 @@ import { nickColorVar } from "./lib/nickColor";
 // pre-existing CSS layout rules still apply. The `.nick` baseline is
 // always present.
 
-export type PrefixGlyph = "@" | "%" | "+" | "";
+// issue 1999 — this was the closed union `"@" | "%" | "+" | ""`, which is
+// the SAME hardcoded triple `memberSigil` and `tierRank` carried, expressed
+// as a type. The membership set is per-network (005 PREFIX), so the glyph
+// can be any advertised sigil — `~` founder and `&` admin most commonly.
+// `""` still means "no glyph"; the empty-string check in the component is
+// the contract, not the union.
+export type PrefixGlyph = string;
 
 export type NickTextProps = {
   nick: string;
@@ -53,18 +59,22 @@ export type NickTextProps = {
   noColor?: boolean;
 };
 
-const prefixClass = (prefix: PrefixGlyph): string => {
-  switch (prefix) {
-    case "@":
-      return "nick-prefix nick-prefix-op";
-    case "%":
-      return "nick-prefix nick-prefix-halfop";
-    case "+":
-      return "nick-prefix nick-prefix-voiced";
-    default:
-      return "nick-prefix";
-  }
+// The theme carries a colour token for the three classic grades only
+// (`--mode-op` / `--mode-halfop` / `--mode-voiced`). A sigil outside that
+// set — `~`, `&`, or anything else a network advertises — renders bold on
+// the inherited `--fg` via the bare `.nick-prefix` baseline. That is a
+// deliberate stop, not an oversight: inventing a hue per sigil is a theme
+// decision, and every theme in `themes/` would have to answer it. The glyph
+// itself is what disambiguates the grade, and it is now rendered at all —
+// which is the fix (issue 1999). Adding `--mode-founder`/`--mode-admin` is
+// a follow-up with a design owner, not a guess made here.
+const CLASSIC_PREFIX_CLASS: Record<string, string> = {
+  "@": "nick-prefix nick-prefix-op",
+  "%": "nick-prefix nick-prefix-halfop",
+  "+": "nick-prefix nick-prefix-voiced",
 };
+
+const prefixClass = (prefix: PrefixGlyph): string => CLASSIC_PREFIX_CLASS[prefix] ?? "nick-prefix";
 
 const NickText: Component<NickTextProps> = (props) => {
   const cls = () => (props.extraClass ? `nick ${props.extraClass}` : "nick");

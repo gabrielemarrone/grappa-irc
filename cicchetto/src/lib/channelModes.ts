@@ -225,7 +225,7 @@ const MEMBERSHIP_MODE_NAMES: Record<string, string> = {
  * A reverse lookup on PREFIX is safe; reading RANK out of it is NOT — the
  * map crosses the wire alphabetical by mode letter (see `editorSigils`).
  */
-function membershipLevelName(sigil: string, prefix: Record<string, string>): string {
+export function membershipLevelName(sigil: string, prefix: Record<string, string>): string {
   const letter = Object.keys(prefix).find((l) => prefix[l] === sigil);
   if (letter === undefined) return sigil;
   return MEMBERSHIP_MODE_NAMES[letter] ?? `mode +${letter}`;

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { channelKey } from "../lib/channelKey";
+import { DEFAULT_ISUPPORT, sigilRank } from "../lib/isupport";
 
 vi.mock("../lib/api", () => ({
   setOn401Handler: vi.fn(),
@@ -382,6 +383,8 @@ describe("members.applyPresenceEvent", () => {
   });
 });
 
+const BAHAMUT = sigilRank(DEFAULT_ISUPPORT);
+
 describe("members.sortMembers (bucket J)", () => {
   it("orders by tier: op > halfop > voice > plain", async () => {
     const { sortMembers } = await import("../lib/members");
@@ -391,7 +394,7 @@ describe("members.sortMembers (bucket J)", () => {
       { nick: "op", modes: ["@"] },
       { nick: "halfop", modes: ["%"] },
     ];
-    const sorted = sortMembers(input);
+    const sorted = sortMembers(input, BAHAMUT);
     expect(sorted.map((m) => m.nick)).toEqual(["op", "halfop", "voice", "plain"]);
   });
 
@@ -402,7 +405,7 @@ describe("members.sortMembers (bucket J)", () => {
       { nick: "Alice", modes: [] },
       { nick: "bob", modes: [] },
     ];
-    const sorted = sortMembers(input);
+    const sorted = sortMembers(input, BAHAMUT);
     expect(sorted.map((m) => m.nick)).toEqual(["Alice", "bob", "carol"]);
   });
 
@@ -413,7 +416,7 @@ describe("members.sortMembers (bucket J)", () => {
       { nick: "alice", modes: ["@"] },
       { nick: "Bob", modes: ["@"] },
     ];
-    const sorted = sortMembers(input);
+    const sorted = sortMembers(input, BAHAMUT);
     expect(sorted.map((m) => m.nick)).toEqual(["alice", "Bob", "Zoe"]);
   });
 
@@ -429,7 +432,7 @@ describe("members.sortMembers (bucket J)", () => {
       { nick: "opZ", modes: ["@"] },
       { nick: "halfopA", modes: ["%"] },
     ];
-    const sorted = sortMembers(input);
+    const sorted = sortMembers(input, BAHAMUT);
     expect(sorted.map((m) => m.nick)).toEqual([
       "opA",
       "opZ",
@@ -448,14 +451,14 @@ describe("members.sortMembers (bucket J)", () => {
       { nick: "b", modes: [] },
       { nick: "a", modes: ["@"] },
     ];
-    const sorted = sortMembers(input);
+    const sorted = sortMembers(input, BAHAMUT);
     expect(sorted).not.toBe(input);
     expect(input.map((m) => m.nick)).toEqual(["b", "a"]);
   });
 
   it("empty input returns empty array", async () => {
     const { sortMembers } = await import("../lib/members");
-    expect(sortMembers([])).toEqual([]);
+    expect(sortMembers([], BAHAMUT)).toEqual([]);
   });
 
   it("a member with multiple modes ([@, +]) ranks by highest tier (op)", async () => {
@@ -467,7 +470,70 @@ describe("members.sortMembers (bucket J)", () => {
       { nick: "opvoiced", modes: ["@", "+"] },
       { nick: "voiced", modes: ["+"] },
     ];
-    const sorted = sortMembers(input);
+    const sorted = sortMembers(input, BAHAMUT);
     expect(sorted.map((m) => m.nick)).toEqual(["opvoiced", "voiced", "plain"]);
+  });
+});
+
+describe("members.sortMembers rank comes from the network's PREFIX (issue 1999)", () => {
+  const RICH = ["~", "&", "@", "%", "+"];
+
+  it("founder and admin sort ABOVE op", async () => {
+    // The issue's third acceptance criterion. `tierRank` knew `@ % +` only,
+    // so `~` and `&` fell through to the plain tier and a channel's founder
+    // was rendered at the BOTTOM of the pane, below every lurker.
+    const { sortMembers } = await import("../lib/members");
+    const input = [
+      { nick: "plain", modes: [] },
+      { nick: "op", modes: ["@"] },
+      { nick: "founder", modes: ["~"] },
+      { nick: "voice", modes: ["+"] },
+      { nick: "admin", modes: ["&"] },
+      { nick: "halfop", modes: ["%"] },
+    ];
+
+    expect(sortMembers(input, RICH).map((m) => m.nick)).toEqual([
+      "founder",
+      "admin",
+      "op",
+      "halfop",
+      "voice",
+      "plain",
+    ]);
+  });
+
+  it("rank is the RUN's, so the same roster orders differently per network", async () => {
+    // Two networks, one roster, two truths — which is the whole reason rank
+    // cannot be a module constant. On a network that never advertised `~`
+    // the founder is not a grade at all and sorts alphabetically as plain.
+    const { sortMembers } = await import("../lib/members");
+    const input = [
+      { nick: "zed", modes: ["@"] },
+      { nick: "founder", modes: ["~"] },
+    ];
+
+    expect(sortMembers(input, RICH).map((m) => m.nick)).toEqual(["founder", "zed"]);
+    expect(sortMembers(input, ["@", "+"]).map((m) => m.nick)).toEqual(["zed", "founder"]);
+  });
+
+  it("alpha tie-break still applies within a rich tier", async () => {
+    const { sortMembers } = await import("../lib/members");
+    const input = [
+      { nick: "Zoe", modes: ["~"] },
+      { nick: "alice", modes: ["~"] },
+      { nick: "Bob", modes: ["~"] },
+    ];
+
+    expect(sortMembers(input, RICH).map((m) => m.nick)).toEqual(["alice", "Bob", "Zoe"]);
+  });
+
+  it("an empty rank run flattens to pure alpha rather than throwing", async () => {
+    const { sortMembers } = await import("../lib/members");
+    const input = [
+      { nick: "b", modes: ["@"] },
+      { nick: "a", modes: [] },
+    ];
+
+    expect(sortMembers(input, []).map((m) => m.nick)).toEqual(["a", "b"]);
   });
 });

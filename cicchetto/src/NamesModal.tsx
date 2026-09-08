@@ -1,4 +1,5 @@
 import { type Component, For, Show } from "solid-js";
+import { prefixForSlug, sigilRankForSlug } from "./lib/casemapping";
 import { memberSigil } from "./lib/memberSigil";
 import type { MemberEntry } from "./lib/memberTypes";
 import { dismissNamesModal, namesModalBySlug } from "./lib/namesModal";
@@ -25,25 +26,40 @@ import NickText, { type PrefixGlyph } from "./NickText";
 // exact MembersPane left-click verb pair). Dismiss via ×, Esc, or
 // backdrop. Ephemeral — dismissing just drops the store entry.
 
-// Section buckets in irssi precedence order. A member lands in the
-// highest tier it holds (an op who is also voiced shows under
-// Operators). Predicates are mutually exclusive by the not-higher
-// guards, so each member appears in exactly one section.
-const SECTIONS: { label: string; inTier: (modes: string[]) => boolean }[] = [
-  { label: "Operators", inTier: (m) => m.includes("@") },
-  { label: "Halfops", inTier: (m) => !m.includes("@") && m.includes("%") },
-  { label: "Voices", inTier: (m) => !m.includes("@") && !m.includes("%") && m.includes("+") },
-  {
-    label: "Users",
-    inTier: (m) => !m.includes("@") && !m.includes("%") && !m.includes("+"),
-  },
-];
+// issue 1999 — the section ladder used to be this hardcoded array of four
+// mutually-exclusive `@ % +` predicates, so on a PREFIX-rich network a
+// founder fell through every guard and was listed under "Users". Sections
+// are now GENERATED, one per sigil the network advertised, in the order it
+// advertised them (`sigilRankForSlug`), plus the trailing plain bucket. A
+// member lands in the section of their HIGHEST-ranked sigil, which
+// `memberSigil` already decides — bucketing by its answer makes the
+// sections exclusive by construction rather than by hand-written
+// not-higher guards.
+//
+// The LABELS are a display vocabulary this modal owns, keyed by mode
+// letter. That is the same split `channelModes.MEMBERSHIP_MODE_NAMES`
+// makes and for the same reason: the SET and the RANK are the network's
+// and must never be hardcoded, but a Title-Case plural heading is cic's
+// own copy, and it differs from the lowercase singular that prose surface
+// wants ("delivered to ops and voice only"). A letter nobody named renders
+// as `mode +<letter>` — the same generic shape `modeDescription` uses.
+const SECTION_LABELS: Record<string, string> = {
+  q: "Founders",
+  a: "Admins",
+  o: "Operators",
+  h: "Halfops",
+  v: "Voices",
+};
+
+const PLAIN_SECTION_LABEL = "Users";
+
+const sectionLabel = (letter: string): string => SECTION_LABELS[letter] ?? `mode +${letter}`;
 
 // modes → NickText prefix glyph. memberSigil returns " " for plain;
-// NickText's PrefixGlyph union treats plain as "" (no leading-space
-// span). Same translation MembersPane's `sigilToPrefix` does.
-const toPrefix = (modes: string[]): PrefixGlyph => {
-  const sigil = memberSigil(modes);
+// NickText treats plain as "" (no leading-space span). Same translation
+// MembersPane's `sigilToPrefix` does.
+const toPrefix = (modes: string[], rank: readonly string[]): PrefixGlyph => {
+  const sigil = memberSigil(modes, rank);
   return sigil === " " ? "" : sigil;
 };
 
@@ -83,11 +99,25 @@ const NamesModal: Component = () => {
   return (
     <Show when={bundle()} keyed>
       {(b) => {
-        const sections = (): { label: string; members: MemberEntry[] }[] =>
-          SECTIONS.map((s) => ({
-            label: s.label,
-            members: b.members.filter((m) => s.inTier(m.modes)),
-          })).filter((s) => s.members.length > 0);
+        const rank = (): string[] => sigilRankForSlug(b.network);
+        const prefixMap = (): Record<string, string> => prefixForSlug(b.network);
+        // One bucket per advertised sigil, rank order, then plain. The label
+        // is looked up by the sigil's mode LETTER, reverse-resolved through
+        // the network's own PREFIX map — never by the sigil character, which
+        // means nothing without the network that advertised it.
+        const sections = (): { label: string; members: MemberEntry[] }[] => {
+          const run = rank();
+          const letters = prefixMap();
+          const buckets = run.map((sigil) => ({
+            label: sectionLabel(Object.keys(letters).find((l) => letters[l] === sigil) ?? sigil),
+            members: b.members.filter((m) => memberSigil(m.modes, run) === sigil),
+          }));
+          buckets.push({
+            label: PLAIN_SECTION_LABEL,
+            members: b.members.filter((m) => memberSigil(m.modes, run) === " "),
+          });
+          return buckets.filter((s) => s.members.length > 0);
+        };
         const total = (): number => b.members.length;
         return (
           // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop close-on-outside; Esc via the shared overlay stack (keybindings → runTopmostOverlayEscape)
@@ -132,7 +162,7 @@ const NamesModal: Component = () => {
                                 class="names-modal-nick"
                                 onClick={() => onNickClick(b.network, m.nick)}
                               >
-                                <NickText nick={m.nick} prefix={toPrefix(m.modes)} />
+                                <NickText nick={m.nick} prefix={toPrefix(m.modes, rank())} />
                               </button>
                             </li>
                           )}

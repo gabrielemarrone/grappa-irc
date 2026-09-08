@@ -1,5 +1,6 @@
 import { type Component, createMemo, createSignal, For, Show } from "solid-js";
 import { ownNickForNetwork } from "./lib/api";
+import { sigilRankForSlug } from "./lib/casemapping";
 import { channelKey } from "./lib/channelKey";
 import { getColoredNicklist } from "./lib/colorNicklist";
 import { casemappingForNetwork } from "./lib/isupport";
@@ -60,12 +61,23 @@ export type Props = {
   onMemberSelect?: () => void;
 };
 
-const tierClass = (modes: string[]): string => {
-  if (modes.includes("@")) return "member-op";
-  if (modes.includes("%")) return "member-halfop";
-  if (modes.includes("+")) return "member-voiced";
-  return "member-plain";
+// The `<li>` tier class. Retained for the sortMembers contract and for
+// reviewer-facing diagnosis (see themes/default.css) — the per-tier colour
+// cascade moved onto the prefix span in BC2.
+//
+// issue 1999 — keyed off the member's rendered SIGIL rather than a
+// hardcoded `@ % +` scan, so the class always agrees with the glyph beside
+// it. The theme names only the three classic grades; a sigil outside that
+// set gets `member-plain`, the same deliberate stop `prefixClass` takes in
+// NickText, since no stylesheet in `themes/` answers for it yet.
+const CLASSIC_TIER_CLASS: Record<string, string> = {
+  "@": "member-op",
+  "%": "member-halfop",
+  "+": "member-voiced",
 };
+
+const tierClass = (modes: string[], rank: readonly string[]): string =>
+  CLASSIC_TIER_CLASS[memberSigil(modes, rank)] ?? "member-plain";
 
 // Translate member modes to the NickText prefix glyph contract.
 // memberSigil/1 returns " " for plain (column-alignment in the
@@ -76,8 +88,8 @@ const tierClass = (modes: string[]): string => {
 // span (the `@` / `%` / `+` chars are wider than a space anyway, so
 // the pre-existing alignment was approximate; per-mode color makes
 // the tier obvious without the padding).
-const sigilToPrefix = (modes: string[]): PrefixGlyph => {
-  const sigil = memberSigil(modes);
+const sigilToPrefix = (modes: string[], rank: readonly string[]): PrefixGlyph => {
+  const sigil = memberSigil(modes, rank);
   return sigil === " " ? "" : sigil;
 };
 
@@ -102,16 +114,23 @@ type MenuFor = { nick: string; x: number; y: number } | null;
 
 const MembersPane: Component<Props> = (props) => {
   const key = () => channelKey(props.networkSlug, props.channelName);
-  // UX-4 bucket J: render order is op > halfop > voice > plain, alpha
-  // within tier (case-insensitive per RFC 2812 §2.2). `sortMembers/1`
-  // owns the rule; MembersPane is the sole consumer today but the
-  // helper sits in lib/members.ts alongside the data store so the
+  // issue 1999 — the network's advertised sigil run, highest rank first.
+  // Drives BOTH the sort tier and the rendered glyph, so the order of the
+  // pane and the sigil on each row can never disagree. Reactive: a 005
+  // arriving after the pane mounted re-ranks it.
+  const rank = createMemo((): string[] => sigilRankForSlug(props.networkSlug));
+  // UX-4 bucket J: render order is highest advertised grade first, plain
+  // last, alpha within tier (case-insensitive per RFC 2812 §2.2).
+  // `sortMembers/2` owns the rule; MembersPane is the sole consumer today
+  // but the helper sits in lib/members.ts alongside the data store so the
   // sort contract co-locates with the source-of-truth shape.
   // `createMemo` caches the sorted array reference across reactive
-  // reads — only re-sorts when `membersByChannel` or `key()` actually
-  // changes (i.e. once per WS event burst per channel, not once per
-  // For-each iteration).
-  const list = createMemo((): MemberEntry[] => sortMembers(membersByChannel()[key()] ?? []));
+  // reads — only re-sorts when `membersByChannel`, `key()` or the rank
+  // actually change (i.e. once per WS event burst per channel, not once
+  // per For-each iteration).
+  const list = createMemo((): MemberEntry[] =>
+    sortMembers(membersByChannel()[key()] ?? [], rank()),
+  );
   const state = (): string | undefined => windowStateByChannel()[key()];
 
   // C5.1: context menu state — which nick was right-clicked + screen coords.
@@ -191,7 +210,7 @@ const MembersPane: Component<Props> = (props) => {
           <ul>
             <For each={list()}>
               {(m) => (
-                <li class={tierClass(m.modes)}>
+                <li class={tierClass(m.modes, rank())}>
                   <button
                     type="button"
                     class="member-name"
@@ -205,7 +224,7 @@ const MembersPane: Component<Props> = (props) => {
                         open list live on toggle. */}
                     <NickText
                       nick={m.nick}
-                      prefix={sigilToPrefix(m.modes)}
+                      prefix={sigilToPrefix(m.modes, rank())}
                       noColor={!getColoredNicklist()}
                     />
                     {/* M2 — gender badge, text content (not CSS ::before)

@@ -136,26 +136,34 @@ export const applyPresenceEvent = exports_.applyPresenceEvent;
 export const seedFromTest = exports_.seedFromTest;
 
 // UX-4 bucket J (2026-05-19) — tier rank for MembersPane sort order.
-// Mirrors the sigil precedence in `memberSigil.ts`: op (@) outranks
-// halfop (%), halfop outranks voice (+), voice outranks plain. Lower
-// rank value = higher position (op = 0 on top).
+// The tier IS the index into the network's advertised sigil run (highest
+// rank first, from `sigilRank`), so lower value = higher position. Plain
+// takes `rank.length`, one past every real index whatever the run's size.
 //
-// Server-side `Grappa.Session.EventRouter.@user_mode_prefixes` is the
-// allowed set of per-user modes (o/h/v); any other prefix on a member's
-// `modes` array would mean wire contract drift, so this fn doesn't
-// need a defensive fallback for unknown prefixes — the entry falls
-// through to plain (rank 3) on its own.
-const tierRank = (modes: readonly string[]): 0 | 1 | 2 | 3 => {
-  if (modes.includes("@")) return 0;
-  if (modes.includes("%")) return 1;
-  if (modes.includes("+")) return 2;
-  return 3;
+// issue 1999 — this used to be a hardcoded `@ > % > +` ladder, and the
+// comment here claimed the server only ever admits `o/h/v`. #216 had
+// already made that false: the membership set is per-network, from the 005
+// PREFIX. Consequence once the server stopped gluing sigils to nicks — a
+// founder's `["~"]` matched no branch, fell to plain, and the channel's
+// founder rendered at the BOTTOM of the pane, below every lurker.
+//
+// A sigil the network never advertised is not a grade: `findIndex` misses
+// and the member falls to plain, the same posture `memberSigil` takes.
+const tierRank = (modes: readonly string[], rank: readonly string[]): number => {
+  const tier = rank.findIndex((sigil) => modes.includes(sigil));
+  return tier === -1 ? rank.length : tier;
 };
 
 /**
- * Returns a new array with members sorted by tier (op > halfop > voice
- * > plain) and case-insensitive alpha within each tier. Pure — does
- * not mutate the input.
+ * Returns a new array with members sorted by advertised grade (highest
+ * first, plain last) and case-insensitive alpha within each tier. Pure —
+ * does not mutate the input.
+ *
+ * `rank` is the network's sigil run — `sigilRankForSlug(slug)` at the
+ * render site. Passed in rather than read from the store so this stays a
+ * pure function; it is required rather than defaulted because a wrong
+ * default here silently reorders someone's pane (CLAUDE.md: no default
+ * arguments, they create silent degradation paths).
  *
  * Used by MembersPane to keep the right-pane order stable across MODE
  * events: `+o alice` moves alice to the top, `-o alice` drops her
@@ -167,9 +175,9 @@ const tierRank = (modes: readonly string[]): 0 | 1 | 2 | 3 => {
  * Alpha tie-breaker is case-insensitive per RFC 2812 §2.2 — IRC nicks
  * are case-insensitive, so sort order MUST match.
  */
-export const sortMembers = (members: ChannelMembers): ChannelMembers =>
+export const sortMembers = (members: ChannelMembers, rank: readonly string[]): ChannelMembers =>
   [...members].sort((a, b) => {
-    const rankDiff = tierRank(a.modes) - tierRank(b.modes);
+    const rankDiff = tierRank(a.modes, rank) - tierRank(b.modes, rank);
     if (rankDiff !== 0) return rankDiff;
     return a.nick.toLowerCase().localeCompare(b.nick.toLowerCase());
   });

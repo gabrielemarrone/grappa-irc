@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_ISUPPORT, sigilRank } from "../lib/isupport";
 import {
   NICK_PALETTE_SIZE,
   nickColorIndex,
@@ -150,20 +151,44 @@ describe("nickColorVar", () => {
 });
 
 describe("snapshotSenderPrefix (#25)", () => {
+  // issue 1999 — the accepted set is the network's advertised run, not a
+  // hardcoded triple. `BAHAMUT` comes from production code rather than a
+  // literal so the seed cannot drift out from under these cases.
+  const BAHAMUT = sigilRank(DEFAULT_ISUPPORT);
+  const RICH = ["~", "&", "@", "%", "+"];
+
   it("returns the snapshotted glyph from meta.sender_prefix", () => {
-    expect(snapshotSenderPrefix({ sender_prefix: "@" })).toBe("@");
-    expect(snapshotSenderPrefix({ sender_prefix: "%" })).toBe("%");
-    expect(snapshotSenderPrefix({ sender_prefix: "+" })).toBe("+");
+    expect(snapshotSenderPrefix({ sender_prefix: "@" }, BAHAMUT)).toBe("@");
+    expect(snapshotSenderPrefix({ sender_prefix: "%" }, BAHAMUT)).toBe("%");
+    expect(snapshotSenderPrefix({ sender_prefix: "+" }, BAHAMUT)).toBe("+");
   });
 
   it("returns '' when the key is absent (plain sender / pre-#25 row)", () => {
-    expect(snapshotSenderPrefix({})).toBe("");
-    expect(snapshotSenderPrefix({ new_nick: "x" })).toBe("");
+    expect(snapshotSenderPrefix({}, BAHAMUT)).toBe("");
+    expect(snapshotSenderPrefix({ new_nick: "x" }, BAHAMUT)).toBe("");
   });
 
-  it("returns '' for a malformed / non-glyph value (never a live guess)", () => {
-    expect(snapshotSenderPrefix({ sender_prefix: "~" })).toBe("");
-    expect(snapshotSenderPrefix({ sender_prefix: 1 })).toBe("");
-    expect(snapshotSenderPrefix({ sender_prefix: null })).toBe("");
+  it("returns '' for a malformed / non-string value (never a live guess)", () => {
+    expect(snapshotSenderPrefix({ sender_prefix: 1 }, BAHAMUT)).toBe("");
+    expect(snapshotSenderPrefix({ sender_prefix: null }, BAHAMUT)).toBe("");
+    expect(snapshotSenderPrefix({ sender_prefix: ["@"] }, BAHAMUT)).toBe("");
+  });
+
+  it("renders a founder's snapshot on a network that advertises it", () => {
+    // The server writes whichever sigil the 005 PREFIX named
+    // (`Identifier.member_prefix/2`). Dropping `~` here left a founder's
+    // scrollback rows looking like a plain member's — the members-pane
+    // defect, one surface over.
+    expect(snapshotSenderPrefix({ sender_prefix: "~" }, RICH)).toBe("~");
+    expect(snapshotSenderPrefix({ sender_prefix: "&" }, RICH)).toBe("&");
+  });
+
+  it("still drops a sigil THIS network never advertised", () => {
+    // Not a passthrough: `meta.sender_prefix` is `term()` on the wire, so a
+    // row from an old backup or a future server can carry anything, and an
+    // unvalidated value would reach the DOM as a glyph. On bahamut `~` names
+    // no grade, so it renders as none.
+    expect(snapshotSenderPrefix({ sender_prefix: "~" }, BAHAMUT)).toBe("");
+    expect(snapshotSenderPrefix({ sender_prefix: "!" }, RICH)).toBe("");
   });
 });

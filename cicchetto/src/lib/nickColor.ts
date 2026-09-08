@@ -72,9 +72,9 @@ import { asciiFold } from "./nickEquals";
 //
 // ## Scrollback sender prefix
 //
-// Members-pane nicks carry the CURRENT prefix via `memberSigil` (op `@`,
-// halfop `%`, voiced `+`, plain ` `), and that pane is the only surface
-// where a live grade belongs — "now" is genuinely its subject.
+// Members-pane nicks carry the CURRENT prefix via `memberSigil` (the
+// network's highest advertised grade, plain ` `), and that pane is the only
+// surface where a live grade belongs — "now" is genuinely its subject.
 //
 // A scrollback row is not. It is a RECORD of a past event, so the only
 // glyph it may show is `snapshotSenderPrefix` below: the grade the SERVER
@@ -131,7 +131,22 @@ export const nickColorVar = (nick: string): string => `var(--nick-color-${nickCo
 // before #25 landed — so cic never falls back to a live-derived guess
 // (which is exactly the bug). `meta` is the untyped wire bag, so the
 // value is validated against the three glyphs here.
-export const snapshotSenderPrefix = (meta: Record<string, unknown>): "@" | "%" | "+" | "" => {
+// issue 1999 — the accepted set is the network's advertised run, not the
+// `@ % +` triple this used to test against. The server snapshots whichever
+// sigil the 005 PREFIX named (`Identifier.member_prefix/2`), so on a
+// PREFIX-rich network a founder's rows carried `~` and this dropped it: the
+// row rendered as a plain sender, which is the same defect the members pane
+// had, one surface over.
+//
+// Still a WHITELIST rather than a passthrough: `meta.sender_prefix` is
+// `term()` on the wire, so a row restored from an old backup or written by a
+// future server can carry anything, and an unvalidated value would go
+// straight into the DOM as a glyph. A sigil this network does not advertise
+// names no grade cic could render, so it degrades to no glyph.
+export const snapshotSenderPrefix = (
+  meta: Record<string, unknown>,
+  rank: readonly string[],
+): string => {
   const p = meta.sender_prefix;
-  return p === "@" || p === "%" || p === "+" ? p : "";
+  return typeof p === "string" && rank.includes(p) ? p : "";
 };

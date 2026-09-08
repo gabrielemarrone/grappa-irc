@@ -85,8 +85,32 @@ vi.mock("../lib/colorNicklist", () => ({
 
 import MembersPane from "../MembersPane";
 
-beforeEach(() => {
+// issue 1999 — "the network is unresolved" is a STATE for the whole
+// duration of a test, not a property of ONE call. The two cases below used
+// `mockReturnValueOnce([])`, which pins a CALL INDEX instead: the moment
+// MembersPane made one more `networks()` call during render than it used
+// to (the `sigilRankForSlug` hop the advertised-rank memo needs), the empty
+// array was consumed by the render and the click handler saw the seeded
+// network — so the test failed while the production behaviour it asserts
+// was intact. Measured: with the rank memo, `networks()` is called once by
+// render and once by the click; with that one path stubbed, zero and once.
+//
+// `unresolveNetworks()` sets the state and `beforeEach` restores the seed,
+// so the assertion no longer depends on how many times the component reads
+// the store. Curing the SETUP, never the assert.
+const SEEDED_NETWORKS = [
+  { id: 1, slug: "freenode", nick: "vjt", inserted_at: "x", updated_at: "y" },
+];
+
+const unresolveNetworks = async (): Promise<void> => {
+  const { networks } = await import("../lib/networks");
+  vi.mocked(networks).mockReturnValue([] as never);
+};
+
+beforeEach(async () => {
   vi.clearAllMocks();
+  const { networks } = await import("../lib/networks");
+  vi.mocked(networks).mockReturnValue(SEEDED_NETWORKS as never);
   mockMembers = {};
   mockWindowState = {};
   coloredHolder.current = false;
@@ -115,6 +139,44 @@ describe("MembersPane", () => {
     // `@vjt` / `+alice` above.
     expect(plain?.textContent).toContain("bob");
     expect(plain?.textContent).not.toContain(" bob");
+  });
+
+  it("renders a PREFIX-rich roster: founder on top, its sigil drawn (issue 1999)", async () => {
+    // The pane's half of the reported defect. Pre-fix, `~founder` reached
+    // cic with the sigil glued to the nick (server side) AND, once that was
+    // peeled, `memberSigil`/`tierRank` still knew only `@ % +`: the founder
+    // rendered with no glyph, in `member-plain`, at the BOTTOM of the list.
+    //
+    // The rank is seeded through the real store + the real `slug → id` hop,
+    // not stubbed, so this also covers `sigilRankForSlug` finding the
+    // network the mock declares.
+    const { seedIsupport, DEFAULT_ISUPPORT } = await import("../lib/isupport");
+    seedIsupport(1, {
+      ...DEFAULT_ISUPPORT,
+      prefix: { q: "~", a: "&", o: "@", h: "%", v: "+" },
+      prefixOrder: ["q", "a", "o", "h", "v"],
+    });
+
+    mockWindowState = { "freenode #italia": "joined" };
+    mockMembers = {
+      "freenode #italia": [
+        { nick: "zed", modes: [] },
+        { nick: "opper", modes: ["@"] },
+        { nick: "boss", modes: ["~"] },
+        { nick: "admin", modes: ["&"] },
+      ],
+    };
+
+    render(() => <MembersPane networkSlug="freenode" channelName="#italia" />);
+
+    const rows = [...document.querySelectorAll(".members-pane li")];
+    expect(rows.map((li) => li.textContent)).toEqual(["~boss", "&admin", "@opper", "zed"]);
+
+    // The theme names only the three classic grades, so `~`/`&` land on
+    // `member-plain` by design (NickText's `prefixClass` takes the same
+    // stop). The GLYPH is what carries the grade, and it is drawn — which
+    // is the fix. A colour token for founder/admin is a theme decision.
+    expect(document.querySelector(".member-op")?.textContent).toBe("@opper");
   });
 
   it("renders the count in the heading when state=joined + non-empty list", () => {
@@ -234,8 +296,7 @@ describe("MembersPane", () => {
   });
 
   it("onMemberSelect is NOT called when network is unresolved (early-return short-circuits the side-effect chain)", async () => {
-    const { networks } = await import("../lib/networks");
-    vi.mocked(networks).mockReturnValueOnce([] as never);
+    await unresolveNetworks();
     mockWindowState = { "freenode #italia": "joined" };
     mockMembers = { "freenode #italia": [{ nick: "alice", modes: [] }] };
     const onMemberSelect = vi.fn();
@@ -250,12 +311,7 @@ describe("MembersPane", () => {
   });
 
   it("left-click is a no-op when network is unresolved (race: list arrives before networks)", async () => {
-    const { networks } = await import("../lib/networks");
-    // Cast: the mock factory above types `networks` as a `vi.fn(() => [...])`
-    // with the seed array's literal type; an empty replacement on a single
-    // call needs the matching shape. `as []` widens the empty literal
-    // appropriately for the once-call.
-    vi.mocked(networks).mockReturnValueOnce([] as never);
+    await unresolveNetworks();
     const qw = await import("../lib/queryWindows");
     const sel = await import("../lib/selection");
     mockWindowState = { "freenode #italia": "joined" };

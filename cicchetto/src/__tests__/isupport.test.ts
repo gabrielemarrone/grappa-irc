@@ -15,6 +15,8 @@ import {
   isupportEntryFromWire,
   isupportForNetwork,
   seedIsupport,
+  sigilRank,
+  sigilRankForNetwork,
 } from "../lib/isupport";
 import { nickEquals } from "../lib/nickEquals";
 import { narrowIsupportChanged } from "../lib/wireNarrow";
@@ -243,5 +245,72 @@ describe("isupport → nick fold composition (#1861)", () => {
 
     seedIsupport(53, isupportEntryFromWire(narrowed));
     expect(casemappingForNetwork(53)).toBe("ascii");
+  });
+});
+
+describe("isupport → membership sigil rank (issue 1999)", () => {
+  it("DEFAULT_ISUPPORT's rank is the bahamut/Azzurra run, highest first", () => {
+    expect(sigilRank(DEFAULT_ISUPPORT)).toEqual(["@", "%", "+"]);
+  });
+
+  it("a PREFIX-rich network ranks founder and admin ABOVE op", () => {
+    // The client twin of `Grappa.Session.ISupport.sigils/1`. Every surface
+    // that renders or orders a membership sigil reads this run instead of
+    // the `@ % +` triple `memberSigil` and `tierRank` used to hardcode.
+    const entry: IsupportEntry = {
+      ...DEFAULT_ISUPPORT,
+      prefix: { q: "~", a: "&", o: "@", h: "%", v: "+" },
+      prefixOrder: ["q", "a", "o", "h", "v"],
+    };
+
+    expect(sigilRank(entry)).toEqual(["~", "&", "@", "%", "+"]);
+  });
+
+  it("the rank is NOT the map's value order", () => {
+    // The guard `editorSigils` earned the hard way (#1302): the map crosses
+    // the wire as a JSON object whose key order is the server runtime's —
+    // alphabetical by mode letter — which on `(qaohv)` puts `o` in the
+    // MIDDLE. Reading rank off the map is the defect, not the shortcut.
+    const entry: IsupportEntry = {
+      ...DEFAULT_ISUPPORT,
+      prefix: { a: "&", h: "%", o: "@", q: "~", v: "+" },
+      prefixOrder: ["q", "a", "o", "h", "v"],
+    };
+
+    expect(Object.values(entry.prefix)).not.toEqual(sigilRank(entry));
+    expect(sigilRank(entry)).toEqual(["~", "&", "@", "%", "+"]);
+  });
+
+  it("an EMPTY prefixOrder falls back to the default run, never to []", () => {
+    // A server predating #1302 publishes no order at all. `[]` would read as
+    // "this network has no membership levels", which would silently disable
+    // every sigil and flatten the pane — strictly worse than assuming the
+    // bahamut run every production network advertises anyway. Same posture
+    // `editorSigils` takes for an order it cannot resolve.
+    const entry: IsupportEntry = { ...DEFAULT_ISUPPORT, prefixOrder: [] };
+
+    expect(sigilRank(entry)).toEqual(["@", "%", "+"]);
+  });
+
+  it("a letter the map cannot resolve is skipped, not rendered as undefined", () => {
+    const entry: IsupportEntry = {
+      ...DEFAULT_ISUPPORT,
+      prefix: { o: "@", v: "+" },
+      prefixOrder: ["o", "q", "v"],
+    };
+
+    expect(sigilRank(entry)).toEqual(["@", "+"]);
+  });
+
+  it("sigilRankForNetwork resolves a seeded network, and defaults for an unseeded one", () => {
+    seedIsupport(1999, {
+      ...DEFAULT_ISUPPORT,
+      prefix: { q: "~", o: "@", v: "+" },
+      prefixOrder: ["q", "o", "v"],
+    });
+
+    expect(sigilRankForNetwork(1999)).toEqual(["~", "@", "+"]);
+    expect(sigilRankForNetwork(19_991)).toEqual(["@", "%", "+"]);
+    expect(sigilRankForNetwork(null)).toEqual(["@", "%", "+"]);
   });
 });

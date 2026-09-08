@@ -12,7 +12,7 @@ import {
 } from "solid-js";
 import LusersCard from "./LusersCard";
 import { isContentKind, ownNickForNetwork, type ScrollbackMessage } from "./lib/api";
-import { casemappingForSlug } from "./lib/casemapping";
+import { casemappingForSlug, sigilRankForSlug } from "./lib/casemapping";
 import { acceptInvite, confirmJoinChannel } from "./lib/channelJoin";
 import { channelKey, decodeChannelKey } from "./lib/channelKey";
 import { statusmsgDescription } from "./lib/channelModes";
@@ -755,7 +755,7 @@ const renderBody = (msg: ScrollbackMessage, handlers: NickHandlers): JSX.Element
     if (!msg.channel) return "";
     const casemapping = casemappingForSlug(handlers.networkSlug);
     if (isContentKind(msg.kind) && nickEquals(nick, msg.sender, casemapping)) {
-      return snapshotSenderPrefix(msg.meta);
+      return snapshotSenderPrefix(msg.meta, sigilRankForSlug(handlers.networkSlug));
     }
     return "";
   };

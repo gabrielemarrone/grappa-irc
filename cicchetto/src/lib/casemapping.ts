@@ -13,7 +13,12 @@
 // wireTypes) and keeps the pure fold in `nickEquals.ts` free of the
 // solid-js resource graph.
 
-import { type Casemapping, casemappingForNetwork } from "./isupport";
+import {
+  type Casemapping,
+  casemappingForNetwork,
+  prefixForNetwork,
+  sigilRankForNetwork,
+} from "./isupport";
 import { networkIdBySlug } from "./networks";
 
 /**
@@ -27,3 +32,28 @@ import { networkIdBySlug } from "./networks";
  */
 export const casemappingForSlug = (slug: string): Casemapping =>
   casemappingForNetwork(networkIdBySlug(slug) ?? null);
+
+/**
+ * The membership sigils the network behind `slug` advertised, highest rank
+ * first (issue 1999), or the bahamut/Azzurra run when the slug names no
+ * known network.
+ *
+ * Lives here for exactly the reason `casemappingForSlug` does: `isupport.ts`
+ * keys 005 facts by network ID, most of cic is keyed by slug, and this is
+ * the module that already owns the `slug → id` hop. Putting it in
+ * `isupport.ts` would drag `networks.ts` into that store and cost it its
+ * leaf status.
+ */
+export const sigilRankForSlug = (slug: string): string[] =>
+  sigilRankForNetwork(networkIdBySlug(slug) ?? null);
+
+/**
+ * The membership letter→sigil map the network behind `slug` advertised, or
+ * the bahamut/Azzurra default. The third resident of this slug→id hop.
+ *
+ * Safe for lookups in either direction (that is what NamesModal's section
+ * labels need: sigil → letter, to name the level). NOT safe as an order —
+ * use `sigilRankForSlug` for that. `prefixForNetwork` says why.
+ */
+export const prefixForSlug = (slug: string): Record<string, string> =>
+  prefixForNetwork(networkIdBySlug(slug) ?? null);

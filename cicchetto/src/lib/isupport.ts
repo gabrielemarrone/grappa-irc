@@ -197,6 +197,50 @@ export function prefixForNetwork(networkId: number | null): Record<string, strin
 }
 
 /**
+ * The membership SIGILS this network advertised, HIGHEST RANK FIRST —
+ * `["~", "&", "@", "%", "+"]` on `PREFIX=(qaohv)~&@%+`. The client twin of
+ * `Grappa.Session.ISupport.sigils/1`, and the ONE place a surface that
+ * renders or orders a membership sigil may read the set from.
+ *
+ * issue 1999 — `memberSigil` and `tierRank` each carried their own `@ % +`
+ * copy of this. Once the server stopped gluing sigils to nicks, a founder's
+ * `["~"]` matched neither: drawn without a sigil, and sorted to the BOTTOM
+ * of the members pane.
+ *
+ * Rank is `prefixOrder`'s, never the map's — `Object.values` comes back
+ * alphabetical BY MODE LETTER, which on `(qaohv)` puts `o` in the MIDDLE
+ * (the mis-rank #1302 found in `editorSigils`). An EMPTY order — a server
+ * predating that field — falls back to the bahamut run rather than to `[]`:
+ * `[]` would read as "this network has no membership levels" and silently
+ * flatten every pane, which is strictly worse than assuming the run every
+ * production network advertises anyway. A letter the map cannot resolve is
+ * skipped rather than emitted as `undefined`.
+ */
+export function sigilRank(entry: IsupportEntry): string[] {
+  const resolve = (e: IsupportEntry): string[] => {
+    const out: string[] = [];
+    for (const letter of e.prefixOrder) {
+      const sigil = e.prefix[letter];
+      if (sigil !== undefined) out.push(sigil);
+    }
+    return out;
+  };
+
+  const run = resolve(entry);
+  return run.length > 0 ? run : resolve(DEFAULT_ISUPPORT);
+}
+
+/**
+ * `sigilRank` for a network id, or the bahamut/Azzurra run for an unseeded
+ * network / a null id. Sibling of `prefixForNetwork` — the per-fact
+ * accessor, so a caller that needs the rank does not carry the whole entry.
+ */
+export function sigilRankForNetwork(networkId: number | null): string[] {
+  if (networkId === null) return sigilRank(DEFAULT_ISUPPORT);
+  return sigilRank(isupportForNetwork(networkId));
+}
+
+/**
  * How this network folds identifiers (#1861), or the bahamut/Azzurra
  * default `"ascii"` for an unseeded network / a null id. Sibling of
  * `chantypesForNetwork` — the store-reading half of the nick fold, whose

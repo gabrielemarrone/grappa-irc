@@ -580,6 +580,10 @@ defmodule Grappa.Vhosts do
   `last_client_prefix64/1` when no client is attached then — the #543
   mode-2 (`static_mapping_with_reservations`) "last-known /64" fallback.
 
+  Writes ONLY when the derived key differs from the stored one, so a
+  reconnect from the same network opens no write transaction at all
+  (2004). The stored value is unaffected either way.
+
   Always returns `:ok`: a capture failure must never fail the client
   connect. A persist error (e.g. the subject row vanished mid-connect)
   is best-effort but LOGGED, never silently swallowed (CLAUDE.md
@@ -589,6 +593,54 @@ defmodule Grappa.Vhosts do
   def record_client_source({_, _} = subject, remote_ip) do
     hex = Base.encode16(SourceMapping.client_key(remote_ip))
 
+    if hex == UserSettings.get_last_client_prefix64(subject) do
+      :ok
+    else
+      persist_client_source(subject, hex)
+    end
+  end
+
+  # 2004 — the "has it changed?" question is asked OUTSIDE the write
+  # transaction, and that placement IS the fix rather than a detail of it.
+  # `UserSettings.put_last_client_prefix64/2` routes through `update_data/2`
+  # = `Repo.BusyRetry.run(fn -> Repo.immediate_transaction(fun) end)`, so
+  # `BEGIN IMMEDIATE` takes SQLite's single writer lock BEFORE anything can
+  # know there is nothing to write. Ecto then declines to emit the UPDATE
+  # for an unchanged changeset — but the row init inside still issues an
+  # `INSERT … ON CONFLICT DO NOTHING` (measured, not inferred: it shows up
+  # in the query telemetry `Grappa.VhostsClientSourceWriteTest` captures),
+  # and the lock was taken regardless. Between two reconnects of the same
+  # client the `/64` is normally IDENTICAL, so on reconnect churn the
+  # transaction now DISAPPEARS instead of merely getting shorter.
+  #
+  # 🔴 Reads `UserSettings.get_last_client_prefix64/1`, NEVER this module's
+  # own `last_client_prefix64/1`: the latter falls back to
+  # `last_known_client_key/1`, which calls straight back into here — the
+  # guard would recurse without end. The raw store read is the correct
+  # compare anyway, because `hex` is precisely what gets STORED.
+  #
+  # It skips the WRITE, never the VALUE. The guard fires only when the store
+  # ALREADY holds exactly what this call would have written, so mode 2's
+  # `last_client_prefix64/1` (#543) reads the same key either way and no
+  # session is newly HELD with `:no_client_source`. The two ordering-critical
+  # callers named in `GrappaWeb.UserSocket.detach_client_source_capture/2`
+  # are safe by that same token: `Visitors.Login` (#645) needs the sample
+  # PERSISTED before it spawns the anchor session, and a skip means it
+  # already is; `last_known_client_key/1` (#647) runs only when nothing is
+  # stored, so it never skips and pays one extra SELECT on a path walked
+  # once per subject.
+  #
+  # A value stored in some other spelling (lowercase base16, or the garbage
+  # a miscoded writer left — `last_client_prefix64/1` tolerates both) simply
+  # compares unequal and is rewritten: the guard self-heals rather than
+  # pinning a bad value in place.
+  #
+  # 🔴 This is NOT a cure for the write-lock stall. It removes THIS
+  # possession of the lock. WHY a holder sits in `RESERVED` for tens of
+  # seconds is still unmeasured, inside the NIF (#1687) — the guard is not a
+  # diagnosis and must not be read as one.
+  @spec persist_client_source(Subject.t(), String.t()) :: :ok
+  defp persist_client_source(subject, hex) do
     case UserSettings.put_last_client_prefix64(subject, hex) do
       {:ok, _} ->
         :ok

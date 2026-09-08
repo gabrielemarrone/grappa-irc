@@ -20,13 +20,20 @@ defmodule Grappa.VhostsClientSourceWriteTest do
 
   ## What the Sandbox cannot buy, stated up front
 
-  These tests assert on the write STATEMENTS the transaction carries, not on
-  the `BEGIN IMMEDIATE` spelling of the frame around them, and that is a
-  limit rather than a preference: under the Sandbox every transaction is
-  nested and every mode is a `SAVEPOINT` — measured, and written down in
-  `Grappa.UserSettingsConcurrencyTest`'s moduledoc. So a green here proves
-  the writer lock is not REACHED; it does not re-prove how
-  `Grappa.Repo.immediate_transaction/1` spells the acquisition.
+  What the capture actually sees on the failing path, verbatim, is a bare
+  `begin` followed by the `INSERT … ON CONFLICT DO NOTHING` that
+  `get_or_init!/1` issues to init the row. So the frame IS observable here —
+  but the word `IMMEDIATE` is not in it, and these tests therefore cannot
+  tell `Grappa.Repo.immediate_transaction/1` apart from a plain
+  `Repo.transaction/1`. A green proves the writer lock is never REACHED; it
+  does not re-prove how the acquisition is spelled. (`Grappa.Repo`'s own
+  moduledoc owns that spelling, and `Grappa.UserSettingsConcurrencyTest`
+  measured that the distinction is invisible under the Sandbox.)
+
+  The INSERT is worth naming on its own: an unchanged sample emits no
+  UPDATE, because Ecto declines an empty changeset — but the row init inside
+  the transaction is a WRITE statement that runs anyway. The lock is not
+  merely taken for a no-op, it is taken and then written through.
 
   It also does not prove anything about the stall the sample was found in.
   Removing this holder removes THIS possession of the lock — why a holder

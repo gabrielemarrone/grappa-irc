@@ -49344,3 +49344,102 @@ across the whole window. #340 rejected deferral; there is none here.
 _Deploy: **COLD** — `config/runtime.exs` is read at boot, and the release lib
 directory is unchanged only for hot-reloadable modules. `BEGIN IMMEDIATE`
 (#524) is untouched and out of scope._
+<!-- entry #2004 -->
+
+---
+
+## 2026-09-08 — 2004: the client-source sample stops taking the writer lock to write nothing
+
+`Grappa.Vhosts.record_client_source/2` fires on every client connect and puts
+one key — the subject's last-known client `/64` — into the shared
+`user_settings.data` blob. It did so unconditionally. Between two reconnects of
+the same client that key is normally IDENTICAL, so the write transaction opened,
+took SQLite's single-writer `RESERVED`, and committed a change nobody made. In
+w1's review of the 2026-09-08 stall episodes, **21 of 29** trace to this call.
+
+### The guard belongs OUTSIDE the transaction, and that placement is the fix
+
+`UserSettings.put_last_client_prefix64/2` routes through the one write path,
+`update_data/2` = `Repo.BusyRetry.run(fn -> Repo.immediate_transaction(fun) end)`.
+So `BEGIN IMMEDIATE` takes the lock **before** anything can know the value is
+unchanged. Asking "has it changed?" inside the transaction would shorten the
+hold; asking it outside removes the transaction outright on reconnect churn.
+`UserSettings.get_last_client_prefix64/1` already existed, so the comparison
+cost nothing to buy.
+
+**Measured, and it is more than the issue claimed.** The issue and its follow-up
+comment describe a SELECT and a COMMIT around an UPDATE Ecto declines to emit.
+The query telemetry captured in `Grappa.VhostsClientSourceWriteTest` shows the
+unchanged path emitting, verbatim, a bare `begin` and then
+
+```
+INSERT INTO "user_settings" (…) ON CONFLICT (user_id) WHERE user_id IS NOT NULL DO NOTHING RETURNING "id"
+```
+
+— the row init inside `get_or_init!/1`. The UPDATE is indeed absent, but a WRITE
+statement runs regardless: the lock was not merely taken for a no-op, it was
+taken and then written through. The correction strengthens the case rather than
+weakening it, which is why it is recorded here instead of quietly dropped.
+
+### Why the guard sits in `Vhosts` and not in the setter
+
+`UserSettings.get_last_client_prefix64/1`'s own doc calls the key **"a dumb
+string store"** and delegates interpretation to `Vhosts`. A skip-if-unchanged
+rule is a policy about a SAMPLE — "this reading is best-effort and redundant
+between reconnects" — and that policy belongs to the domain that owns the
+sample. Putting it in the setter would also have created a per-key exception
+inside a module whose other setters have none, which is the half-migrated shape
+CLAUDE.md warns propagates itself.
+
+The `#1375` one-write-path invariant is untouched: when the value DOES change,
+the write still goes through `update_data/2`, still holding read and write in
+one transaction. `Grappa.UserSettingsConcurrencyTest` calls the setter directly
+and so still exercises it.
+
+### 🔴 The recursion trap, worth naming because the issue's wording invites it
+
+The guard must read `UserSettings.get_last_client_prefix64/1` — **never**
+`Vhosts.last_client_prefix64/1`. The latter falls back to
+`last_known_client_key/1` (#647), which calls straight back into
+`record_client_source/2`: a guard spelled with it recurses without end. The
+issue says only "`get_last_client_prefix64/1` already exists", and the two
+modules' functions are one word apart.
+
+### It skips the WRITE, never the VALUE
+
+The guard fires only when the store ALREADY holds exactly what the call would
+have written, so mode 2 (#543) reads the same key either way and no session is
+newly HELD with `:no_client_source`. The three callers enumerated in
+`GrappaWeb.UserSocket.detach_client_source_capture/2` are safe by that same
+token: the detached WS capture is the churn this targets; `Visitors.Login`
+(#645) needs the sample PERSISTED before it spawns the anchor session, and a
+skip means it already is; `last_known_client_key/1` (#647) runs only when
+nothing is stored, so it never skips and pays one extra SELECT on a path walked
+once per subject. A value stored in another spelling compares unequal and is
+rewritten — the guard self-heals rather than pinning bad data.
+
+### 🔴 Not a cure for the stall, and the beneficiary has moved
+
+This removes THIS possession of the lock. **Why a holder sits in `RESERVED` for
+tens of seconds is still unmeasured**, inside the NIF (#1687); the OS-level
+route (`procstat -kk` on the dirty thread at the next stall) has not been taken.
+Do not read the guard as a diagnosis.
+
+⚠️ vjt has decided **Postgres for this instance; SQLite stays for
+self-hosters.** That does not invalidate the work — it moves who benefits, and
+the priority with it. Judging this against prod would be the wrong yardstick.
+
+### What the test can and cannot prove
+
+The tests assert on the write STATEMENTS, because the captured frame is a bare
+`begin` with no `IMMEDIATE` in it: they cannot tell
+`Repo.immediate_transaction/1` apart from a plain `Repo.transaction/1`, and
+`Grappa.UserSettingsConcurrencyTest` already measured that the distinction is
+invisible under the Sandbox. A green proves the writer lock is never REACHED —
+nothing about how the acquisition is spelled. Two of the five cases guard the
+other direction (the value stays readable after a skip; a genuinely roamed
+prefix still writes), because a guard that skipped the VALUE would break mode 2
+silently.
+
+_Code + docs. No wire change, no protocol bump. Deploy: hot — one context
+module, no supervision-tree or schema change._

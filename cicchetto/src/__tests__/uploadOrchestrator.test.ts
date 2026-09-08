@@ -1293,9 +1293,14 @@ describe("the confirm gate (#1883)", () => {
     ]);
     expect(attachments()[0]?.preview?.kind).toBe("image");
     expect(attachments()[1]?.preview?.kind).toBe("text");
-    // Still null, and deliberately: there is no PDF renderer anywhere in cic,
-    // so this row keeps the neutral placeholder rather than gaining a viewer.
+    // Still null, and deliberately: there is no PDF renderer anywhere in cic
+    // (the viewer has four arms and a 📄 link falls through to the browser),
+    // so this row gains no viewer — it SAYS there is no preview instead.
     expect(attachments()[2]?.preview).toBeNull();
+    expect(attachments()[2]?.detail).toContain("preview not supported");
+    // …and the rows that DO preview say nothing of the sort.
+    expect(attachments()[0]?.detail).not.toContain("preview");
+    expect(attachments()[1]?.detail).not.toContain("preview");
   });
 
   // Solid's <For> diffs by REFERENCE. A row rebuilt on every read disposes and

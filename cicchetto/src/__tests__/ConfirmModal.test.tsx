@@ -276,6 +276,12 @@ describe("ConfirmModal (#195)", () => {
       const video = screen.getByTestId("confirm-modal-attachment-video");
       // The media fragment is what asks for a frame instead of a black poster.
       expect(video.getAttribute("src")).toMatch(/^blob:.*#t=0\.1$/);
+      // Playable, not a still: a video is a thing that moves, so checking the
+      // operator picked the right take means watching it.
+      expect(video.hasAttribute("controls")).toBe(true);
+      expect(video.getAttribute("aria-label")).toBe("Play clip.mp4");
+      // It is NOT the head thumbnail — a control bar is unusable at 2.5rem, so
+      // it takes a full-width block under the row like the sound player.
       expect(screen.queryByTestId("confirm-modal-attachment-thumb")).toBeNull();
     });
 
@@ -342,11 +348,20 @@ describe("ConfirmModal (#195)", () => {
       create.mockRestore();
     });
 
-    it("a row with nothing renderable keeps the placeholder and mints no URL", () => {
+    // The row that cannot be previewed shows NO box at all. #1883's neutral ☐
+    // glyph kept rows the same height, but it reads as a picture that failed
+    // to load — a different claim from "this type has no viewer" — and the
+    // rows stopped being uniform when audio and text previews arrived.
+    it("a row with nothing renderable shows no box at all, and mints no URL", () => {
       const create = vi.spyOn(URL, "createObjectURL");
       render(() => <ConfirmModal />);
-      withAttachments([attachment({ label: "spec.pdf", preview: null })], vi.fn());
+      withAttachments(
+        [attachment({ label: "spec.pdf", detail: "2 KB · preview not supported", preview: null })],
+        vi.fn(),
+      );
 
+      expect(screen.getByText("2 KB · preview not supported")).toBeInTheDocument();
+      expect(document.querySelector(".confirm-modal-attachment-icon")).toBeNull();
       expect(screen.queryByTestId("confirm-modal-attachment-thumb")).toBeNull();
       expect(screen.queryByTestId("confirm-modal-attachment-video")).toBeNull();
       expect(screen.queryByTestId("confirm-modal-attachment-audio")).toBeNull();

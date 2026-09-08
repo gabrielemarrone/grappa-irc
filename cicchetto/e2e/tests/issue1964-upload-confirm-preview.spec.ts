@@ -110,9 +110,11 @@ test("#1964 — each staged file previews as what it actually is", async ({ page
     .poll(() => thumb.evaluate((el) => (el as HTMLImageElement).naturalWidth), { timeout: 5_000 })
     .toBeGreaterThan(0);
 
-  // ── video: a frame, from the same local bytes ───────────────────────────
+  // ── video: playable, from the same local bytes ──────────────────────────
   const video = page.getByTestId("confirm-modal-attachment-video");
   await expect(video).toHaveAttribute("src", /^blob:.*#t=0\.1$/);
+  // A video is a thing that MOVES, so recognising the take means watching it.
+  await expect(video).toHaveAttribute("controls", "");
   // The CSP witness, and the reason it is not `videoWidth`: decoding is the
   // engine's own schedule (a hidden page defers it), but a `media-src` refusal
   // is immediate and lands as MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED — the
@@ -135,9 +137,14 @@ test("#1964 — each staged file previews as what it actually is", async ({ page
   // Capped: this is a head, not a viewer.
   await expect(source).not.toContainText("epsilon five");
 
-  // ── pdf: still nothing, and deliberately — cic has no PDF renderer ──────
+  // ── pdf: no preview, and it SAYS so ─────────────────────────────────────
+  // cic has no PDF renderer — the viewer has four arms and a 📄 link falls
+  // through to the browser — so this row states the limit in words instead of
+  // showing an empty box that reads as a picture which failed to load.
+  const pdfRow = page.getByTestId("confirm-modal-attachment").filter({ hasText: "spec.pdf" });
+  await expect(pdfRow).toContainText("preview not supported");
   // One preview element per renderable row and no more: 5 rows, 4 previews,
-  // and the PDF is the one holding the placeholder.
+  // and the PDF holds none of them.
   await expect(page.getByTestId("confirm-modal-attachment-video")).toHaveCount(1);
   await expect(page.getByTestId("confirm-modal-attachment-audio")).toHaveCount(1);
   await expect(page.getByTestId("confirm-modal-attachment-source")).toHaveCount(1);

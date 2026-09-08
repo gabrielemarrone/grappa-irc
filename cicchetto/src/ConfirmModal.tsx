@@ -1,13 +1,4 @@
-import {
-  type Component,
-  createEffect,
-  createResource,
-  For,
-  Match,
-  onCleanup,
-  Show,
-  Switch,
-} from "solid-js";
+import { type Component, createEffect, createResource, For, onCleanup, Show } from "solid-js";
 import { readTextPreview, TEXT_PREVIEW_LINES } from "./lib/attachmentPreview";
 import {
   acceptConfirm,
@@ -55,11 +46,12 @@ import { createOverlayLock } from "./lib/overlayScrollLock";
 // media viewer's four arms (MediaViewerModal's `<Switch>`), pointed at a
 // `blob:` URL of a file that has not been uploaded yet:
 //
-//   image  an `<img>`, unchanged from #1883.
-//   video  a `<video preload="metadata">`, no controls: at 2.5rem a control bar
-//          is unusable, and the first frame is the thing being recognised. The
-//          `#t=0.1` fragment asks for a frame rather than a black poster on
-//          engines that would otherwise decode nothing until play.
+//   image  an `<img>` thumbnail in the row head, unchanged from #1883.
+//   video  a `<video controls>` on its own line: a video is a thing that moves,
+//          so recognising it means watching it, and a control bar is unusable
+//          at 2.5rem. The `#t=0.1` fragment asks for a frame rather than a
+//          black poster on engines that would otherwise decode nothing until
+//          play.
 //   audio  an `<audio controls>` on its own line, because for sound there is no
 //          picture to recognise — listening IS the preview, and it is the same
 //          element the viewer gives a clicked audio link.
@@ -95,48 +87,28 @@ const AttachmentRow: Component<{
 
   return (
     <li class="confirm-modal-attachment" data-testid="confirm-modal-attachment">
-      {/* The row's first line is the #1883 shape exactly: media box, name and
-          size, remove button. Anything taller than the box (sound, text) goes
-          UNDER it, so a mixed batch still reads as a column of like rows. */}
+      {/* The row's first line is the #1883 shape: thumbnail, name and size,
+          remove button. Only a picture fits it — every preview that needs room
+          to be OPERATED (video, sound) or read (text) goes UNDER it, so a mixed
+          batch still reads as a column of like rows rather than a ragged grid. */}
       <div class="confirm-modal-attachment-head">
-        <Switch
-          fallback={
-            <span class="confirm-modal-attachment-icon" aria-hidden="true">
-              {/* Nothing renderable — a neutral placeholder keeps the rows the
-                  same height so a mixed batch does not read as ragged. */}
-              &#9744;
-            </span>
-          }
-        >
-          <Match when={src !== null && kind === "image"}>
-            <img
-              class="confirm-modal-attachment-thumb"
-              data-testid="confirm-modal-attachment-thumb"
-              src={src ?? ""}
-              // The filename beside it is the accessible label; announcing the
-              // picture too would read the same file twice.
-              alt=""
-            />
-          </Match>
-          <Match when={src !== null && kind === "video"}>
-            {/* No caption track and no `controls`: a still frame standing in
-                for a picture, with nothing to operate and nothing to caption.
-                `aria-hidden` rather than the image's `alt=""` because an empty
-                alt REMOVES an `<img>` from the a11y tree while an unnamed
-                `<video>` stays in it and is announced ahead of the filename
-                that labels it. */}
-            {/* biome-ignore lint/a11y/noAriaHiddenOnFocusable: without `controls` a <video> is not in the tab order, so hiding it traps no focus */}
-            <video
-              class="confirm-modal-attachment-thumb"
-              data-testid="confirm-modal-attachment-video"
-              src={`${src ?? ""}#t=0.1`}
-              preload="metadata"
-              muted
-              playsinline
-              aria-hidden="true"
-            />
-          </Match>
-        </Switch>
+        {/* No fallback box, deliberately. #1883 put a neutral ☐ glyph here to
+            keep rows the same height, but that glyph reads as a picture that
+            failed to load — and the rows stopped being uniform the moment a
+            preview could be a player. A row with nothing to show says
+            "preview not supported" in its detail line instead of miming a
+            broken image, and the rows that preview BELOW the head no longer
+            carry a "no picture here" glyph beside a preview that works. */}
+        <Show when={src !== null && kind === "image"}>
+          <img
+            class="confirm-modal-attachment-thumb"
+            data-testid="confirm-modal-attachment-thumb"
+            src={src ?? ""}
+            // The filename beside it is the accessible label; announcing the
+            // picture too would read the same file twice.
+            alt=""
+          />
+        </Show>
         <span class="confirm-modal-attachment-text">
           <span class="confirm-modal-attachment-name">{props.item.label}</span>
           <span class="confirm-modal-attachment-detail">{props.item.detail}</span>
@@ -153,6 +125,27 @@ const AttachmentRow: Component<{
           &times;
         </button>
       </div>
+      {/* Gabriele's ruling (2026-09-08): the video preview PLAYS. A still frame
+          answers "which clip is this" for a photo-shaped file, but a video is
+          a thing that moves — the operator checking they picked the right take
+          has to watch it. That needs `controls`, and a control bar is unusable
+          at 2.5rem, so the video leaves the head box and takes a full-width
+          block like the sound player. Same reasoning, same shape. */}
+      <Show when={src !== null && kind === "video"}>
+        {/* biome-ignore lint/a11y/useMediaCaption: a staged local upload — no caption track exists or can be authored for it */}
+        <video
+          class="confirm-modal-attachment-video"
+          data-testid="confirm-modal-attachment-video"
+          // The media fragment asks for a frame rather than a black poster on
+          // engines that would otherwise decode nothing until play.
+          src={`${src ?? ""}#t=0.1`}
+          controls
+          playsinline
+          preload="metadata"
+          // Operable, so it needs a name: "video" beside a filename is not one.
+          aria-label={`Play ${props.item.label}`}
+        />
+      </Show>
       <Show when={src !== null && kind === "audio"}>
         {/* biome-ignore lint/a11y/useMediaCaption: a staged local upload — no caption track exists or can be authored for it */}
         <audio

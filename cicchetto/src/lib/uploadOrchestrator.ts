@@ -722,7 +722,14 @@ function toAttachment(id: string, file: File): ConfirmAttachment {
   return {
     id,
     label: file.name,
-    detail: formatBytes(file.size),
+    // Gabriele's ruling (2026-09-08): when there is no preview, SAY so. cic
+    // has no PDF or office renderer — the media viewer has four arms and a
+    // 📄 link deliberately falls through to the browser (MircText.tsx) — so a
+    // preview for those types would mean building a viewer first. The honest
+    // row is the name, the size and a plain statement; the old empty-box glyph
+    // read as a picture that failed to load, which is a different claim.
+    detail:
+      kind === null ? `${formatBytes(file.size)} · preview not supported` : formatBytes(file.size),
     preview: kind === null ? null : { kind, blob: file },
   };
 }

@@ -48912,13 +48912,16 @@ line; and a file whose FIRST line is longer than the head yields one partial
 row, where dropping it returns `[]` — an empty box, the very defect this
 change removes.
 
-**Audio gets a player, not a glyph.** For sound there is no picture to
-recognise — listening IS the preview, and `<audio controls>` is what the viewer
-gives a clicked audio link. It does not fit a 2.5rem box, so the row became a
-column: the first line keeps #1883's shape exactly (media box, name, size, ×)
-and anything taller stacks under it. Video keeps the box, with
-`preload="metadata"` and a `#t=0.1` fragment to ask for a frame rather than a
-black poster.
+**Sound and video get a PLAYER, not a still.** For sound there is no picture
+to recognise — listening IS the preview, and `<audio controls>` is what the
+viewer gives a clicked audio link. Video started as a muted first frame in the
+thumbnail box; Gabriele asked for it to be playable (2026-09-08) and the reason
+holds: a video is a thing that MOVES, so checking you picked the right take
+means watching it, and a still frame answers a question only a photo has. A
+control bar is unusable at 2.5rem, so both take a full-width block and the row
+became a column — the first line keeps #1883's shape (thumbnail, name, size, ×)
+and every preview that must be operated or read stacks under it. The `#t=0.1`
+fragment stays: it asks for a frame rather than a black poster before play.
 
 ### Enter, and the reversal it required
 
@@ -48960,6 +48963,24 @@ guards, and the `MediaKind` coupling note); the other two:
   `MIME_EXT_LABEL` on the MIME unions precisely "so a 15th MIME added to a list
   without a label here is a compile error"; the preview map now does the same,
   so a ninth document type cannot silently preview as an empty box.
+
+### The row with no preview says so
+
+The first cut kept #1883's neutral ☐ glyph for a file with no renderer.
+Gabriele's ruling on seeing it (2026-09-08): that glyph reads as a picture
+that FAILED to load, which is a different claim from "this type has no
+viewer", and it was also being shown beside text and audio previews that
+work. There is no PDF or office renderer anywhere in cic — the media viewer
+has four arms, and a 📄 link deliberately falls through to the browser
+(`MircText.tsx`) — so previewing those types would mean building a viewer
+first, which this slice is not.
+
+So the unpreviewable row now carries no box at all and states the limit in
+words: name, size, `· preview not supported`. It is the CATCH-ALL, not a
+PDF special case — the picker does not pre-filter by category, so an
+arbitrary binary reaches the dialog too, and it gets the same honest row. The
+uniform-row-height argument the glyph existed for had already lapsed: audio
+and text previews are taller than any 2.5rem box.
 
 ### Not done, and why
 

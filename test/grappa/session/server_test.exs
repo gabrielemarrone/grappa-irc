@@ -6848,6 +6848,61 @@ defmodule Grappa.Session.ServerTest do
       :ok = GenServer.stop(pid, :normal, 1_000)
     end
 
+    test "a PREFIX-rich network: bare nicks, advertised sigils, founder above op (issue 1999)" do
+      # The end-to-end server assertion for issue 1999, across all three
+      # hardcoded sites at once, because they are only separable on paper:
+      #
+      #   1. `split_mode_prefix` — `~founder` must key as `founder`. This is
+      #      the reported defect: with the sigil glued on, click-to-query
+      #      addressed a nick that does not exist.
+      #   2. `ISupport.sigils/1` — the run comes from THIS network's 005.
+      #   3. `member_sort_tier` — rank is the advertised order, so founder
+      #      and admin sort ABOVE op. The old tier fn knew `@` and `+` only:
+      #      it did not even rank bahamut's own halfop, so `~`/`&` landed in
+      #      the plain tier at the BOTTOM of the pane.
+      handler = IRCServer.welcome_handler(":irc", "grappa-test")
+
+      {server, port} = IRCServer.start_server(handler)
+
+      {user, network, _} =
+        setup_user_and_network(port, %{autojoin_channels: ["#test"]})
+
+      pid = start_session_for(user, network)
+
+      :ok = IRCServer.await_handshake(server, 1_000)
+      {:ok, _} = IRCServer.wait_for_line(server, &String.starts_with?(&1, "JOIN"), 1_000)
+
+      IRCServer.feed(
+        server,
+        ":irc 005 grappa-test PREFIX=(qaohv)~&@%+ :are supported by this server\r\n"
+      )
+
+      IRCServer.feed(server, ":grappa-test!u@h JOIN :#test\r\n")
+
+      IRCServer.feed(
+        server,
+        ":irc 353 grappa-test = #test :@op_a ~founder plain_a &admin %halfop +voice_a\r\n"
+      )
+
+      IRCServer.feed(server, ":irc 366 grappa-test #test :End\r\n")
+      IRCServer.feed(server, "PING :flush\r\n")
+      {:ok, _} = IRCServer.wait_for_line(server, &(&1 == "PONG :flush\r\n"), 1_000)
+
+      assert {:ok, members} = Session.list_members({:user, user.id}, network.id, "#test")
+
+      assert members == [
+               %{nick: "founder", modes: ["~"], gender: nil},
+               %{nick: "admin", modes: ["&"], gender: nil},
+               %{nick: "op_a", modes: ["@"], gender: nil},
+               %{nick: "halfop", modes: ["%"], gender: nil},
+               %{nick: "voice_a", modes: ["+"], gender: nil},
+               %{nick: "grappa-test", modes: [], gender: nil},
+               %{nick: "plain_a", modes: [], gender: nil}
+             ]
+
+      :ok = GenServer.stop(pid, :normal, 1_000)
+    end
+
     test "no session for (user, network) returns {:error, :no_session}" do
       assert {:error, :no_session} =
                Session.list_members({:user, Ecto.UUID.generate()}, 999_999_999, "#test")

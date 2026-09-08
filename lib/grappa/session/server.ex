@@ -2544,6 +2544,8 @@ defmodule Grappa.Session.Server do
       # M2 — same gender merge as the `members_seeded` broadcast
       # (apply_effects), so `GET /members` and the WS event never
       # disagree on the badge.
+      sigils = session_member_sigils(state)
+
       members =
         state.members
         |> Map.get(channel, %{})
@@ -2551,7 +2553,7 @@ defmodule Grappa.Session.Server do
           gender = Map.get(state.peer_profile_cache, fold_key(state, nick), %{})[:gender]
           %{nick: nick, modes: modes, gender: gender}
         end)
-        |> Enum.sort_by(&{member_sort_tier(&1.modes), &1.nick})
+        |> Enum.sort_by(&{member_sort_tier(&1.modes, sigils), &1.nick})
 
       {:reply, {:ok, members}, state}
     else
@@ -3984,6 +3986,14 @@ defmodule Grappa.Session.Server do
   defp session_casemapping(state),
     do: ISupport.casemapping(Map.get(state, :isupport, ISupport.default()))
 
+  # The network's membership sigils, highest rank first (issue 1999) — the
+  # ONE source both the grade snapshot and the roster sort read. Same
+  # `Map.get` hot-reload shape as `session_casemapping/1`, and the twin of
+  # `EventRouter.member_sigils/1` on the inbound side.
+  @spec session_member_sigils(t()) :: [String.t()]
+  defp session_member_sigils(state),
+    do: ISupport.sigils(Map.get(state, :isupport, ISupport.default()))
+
   # M3b — the authenticated, same-origin serving path a browser fetches
   # a cached peer avatar from — NEVER the raw third-party URL the peer's
   # CTCP AVATAR reply carried. Relative (no `base_url()` needed, unlike
@@ -4259,16 +4269,20 @@ defmodule Grappa.Session.Server do
     end
   end
 
-  # #25: the operator's own channel grade for an outbound content row,
-  # as `%{sender_prefix: "@" | "%" | "+"}` or `%{}` (DM target / plain /
-  # untracked). `key` is ALREADY the network-folded channel window key
-  # (`fold_key/2`, #537) — the same key EventRouter's members map is
-  # keyed under — so the lookup hits directly, no re-fold.
+  # #25: the operator's own channel grade for an outbound content row, as
+  # `%{sender_prefix: <sigil>}` or `%{}` (DM target / plain / untracked).
+  # `key` is ALREADY the network-folded channel window key (`fold_key/2`,
+  # #537) — the same key EventRouter's members map is keyed under — so the
+  # lookup hits directly, no re-fold.
+  #
+  # issue 1999 — the precedence run is the network's, matching the inbound
+  # twin `EventRouter.put_sender_prefix/5`. An operator who is founder on a
+  # PREFIX-rich network used to see their OWN lines rendered plain.
   @spec own_sender_prefix_meta(t(), String.t()) :: map()
   defp own_sender_prefix_meta(state, key) do
     sigils = get_in(state.members, [key, state.nick]) || []
 
-    case Identifier.member_prefix(sigils) do
+    case Identifier.member_prefix(sigils, session_member_sigils(state)) do
       nil -> %{}
       prefix -> %{sender_prefix: prefix}
     end
@@ -5723,13 +5737,15 @@ defmodule Grappa.Session.Server do
     # M2 — merge in the cached peer gender (nil when never queried/
     # answered, e.g. `show_peer_profiles` off) so `Wire.member/1`'s
     # `:gender` key is populated straight from state, no extra fetch.
+    sigils = session_member_sigils(state)
+
     members =
       members_map
       |> Enum.map(fn {nick, modes} ->
         gender = Map.get(state.peer_profile_cache, fold_key(state, nick), %{})[:gender]
         %{nick: nick, modes: modes, gender: gender}
       end)
-      |> Enum.sort_by(&{member_sort_tier(&1.modes), &1.nick})
+      |> Enum.sort_by(&{member_sort_tier(&1.modes, sigils), &1.nick})
 
     # CP24 bucket E web/S8: mark channel as NAMES-seeded so
     # `list_members/3` discriminates `{:ok, :uninitialized}` (pre-NAMES)
@@ -5757,13 +5773,15 @@ defmodule Grappa.Session.Server do
   defp apply_effects([{:names_reply, channel, roster, reply_to} | rest], state) do
     # M2 — same gender merge as :members_seeded/list_members above: one
     # roster shape, one badge source, no parallel view left un-merged.
+    sigils = session_member_sigils(state)
+
     members =
       roster
       |> Enum.map(fn {nick, modes} ->
         gender = Map.get(state.peer_profile_cache, fold_key(state, nick), %{})[:gender]
         %{nick: nick, modes: modes, gender: gender}
       end)
-      |> Enum.sort_by(&{member_sort_tier(&1.modes), &1.nick})
+      |> Enum.sort_by(&{member_sort_tier(&1.modes, sigils), &1.nick})
 
     :ok =
       Broadcaster.to_requester(
@@ -7029,13 +7047,28 @@ defmodule Grappa.Session.Server do
     :ok = ChannelDirectory.ingest(state.subject, state.network_id, rows)
   end
 
-  # mIRC sort: ops (@) → voiced (+) → plain (no prefix). Within tier,
+  # mIRC sort: highest advertised grade first, plain last. Within tier,
   # alphabetical by nick (caller `Enum.sort_by` does the secondary).
-  defp member_sort_tier(modes) do
-    cond do
-      "@" in modes -> 0
-      "+" in modes -> 1
-      true -> 2
+  #
+  # issue 1999 — `sigils` is the network's advertised run, highest rank
+  # first (`ISupport.sigils/1`), and the tier is that run's INDEX. The
+  # hardcoded `cond` this replaces knew `@` and `+` only: it did not rank
+  # bahamut's own halfop (a `%` member sorted into the plain tier, which
+  # only ever looked right because cic re-sorts with a tier fn of its own),
+  # and on a PREFIX-rich network it dropped founder and admin to the BOTTOM
+  # of the pane — the exact inversion the issue reports as its third
+  # acceptance criterion.
+  #
+  # A sigil the network never advertised is not a grade: `Enum.find_index`
+  # misses and the member falls to the plain tier, the same posture
+  # `Identifier.member_prefix/2` takes for an unknown sigil. Plain sorts
+  # last by taking `length(sigils)`, which is one past every real index
+  # whatever the run's size.
+  @spec member_sort_tier([String.t()], [String.t()]) :: non_neg_integer()
+  defp member_sort_tier(modes, sigils) do
+    case Enum.find_index(sigils, &(&1 in modes)) do
+      nil -> length(sigils)
+      tier -> tier
     end
   end
 

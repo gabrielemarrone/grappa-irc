@@ -764,25 +764,34 @@ defmodule Grappa.IRC.Identifier do
 
   def server_sender?(_), do: false
 
-  # Channel-membership sigil precedence: op > halfop > voice. Mirrors
-  # cic's `memberSigil` (@ > % > +) so server snapshot and client render
-  # agree on which glyph a multi-moded member shows.
-  @member_prefix_precedence ["@", "%", "+"]
-
   @doc """
-  The highest-precedence membership sigil (`@`/`%`/`+`) in a member's
-  mode-sigil list, or `nil` for a plain member / empty list / non-list.
+  The highest-ranked membership sigil in a member's mode-sigil list, or
+  `nil` for a plain member / empty list / non-list / a list carrying no
+  sigil this network advertised.
 
   `state.members[channel][nick]` stores sigils (`["@"]`, `["@", "+"]`,
   `[]`); this reduces them to the single glyph cic shows. Used at
   scrollback-persist time to SNAPSHOT a content row's sender grade into
   `meta.sender_prefix`, so a later MODE change can't retroactively
   re-prefix historical lines (#25).
+
+  `precedence` is the network's advertised sigil run, HIGHEST RANK FIRST —
+  `Grappa.Session.ISupport.sigils/1` at both call sites. issue 1999: this
+  used to be a module constant `["@", "%", "+"]`, so on a network
+  advertising founder/admin an `Enum.find` over it returned `nil` for a
+  `["~"]` member and their rows were persisted with NO grade at all, then
+  rendered as a plain user's forever after (the snapshot is the point —
+  it is never recomputed). The run is passed in rather than read here so
+  this module stays a pure identifier module with no edge to the
+  per-network capability table.
+
+  Rank is the RUN's, never the argument list's: a member holding
+  `["@", "&"]` is an admin, whatever order the sigils accumulated in.
   """
-  @spec member_prefix(term()) :: String.t() | nil
-  def member_prefix(sigils) when is_list(sigils) do
-    Enum.find(@member_prefix_precedence, &(&1 in sigils))
+  @spec member_prefix(term(), [String.t()]) :: String.t() | nil
+  def member_prefix(sigils, precedence) when is_list(sigils) and is_list(precedence) do
+    Enum.find(precedence, &(&1 in sigils))
   end
 
-  def member_prefix(_), do: nil
+  def member_prefix(_, precedence) when is_list(precedence), do: nil
 end

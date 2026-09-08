@@ -925,22 +925,51 @@ defmodule Grappa.IRC.IdentifierTest do
     end
   end
 
-  describe "member_prefix/1 (#25 grade-snapshot helper)" do
+  describe "member_prefix/2 (#25 grade-snapshot helper)" do
+    # The precedence run is the CALLER's — `ISupport.sigils/1` on the server,
+    # which is `["@", "%", "+"]` on bahamut/Azzurra. Passed in rather than
+    # read here so `Identifier` stays a pure identifier module with no edge
+    # to the per-network capability table (issue 1999).
+    @bahamut ["@", "%", "+"]
+
     test "returns the highest-precedence sigil (@ > % > +)" do
-      assert Identifier.member_prefix(["@"]) == "@"
-      assert Identifier.member_prefix(["%"]) == "%"
-      assert Identifier.member_prefix(["+"]) == "+"
-      assert Identifier.member_prefix(["+", "@"]) == "@"
-      assert Identifier.member_prefix(["+", "%"]) == "%"
+      assert Identifier.member_prefix(["@"], @bahamut) == "@"
+      assert Identifier.member_prefix(["%"], @bahamut) == "%"
+      assert Identifier.member_prefix(["+"], @bahamut) == "+"
+      assert Identifier.member_prefix(["+", "@"], @bahamut) == "@"
+      assert Identifier.member_prefix(["+", "%"], @bahamut) == "%"
+    end
+
+    test "precedence follows the RUN it is given, not a hardcoded triple" do
+      # issue 1999 — this used to hold a module constant `["@", "%", "+"]`, so
+      # a founder's rows were snapshot with NO `meta.sender_prefix` at all
+      # (`Enum.find` over a run that does not contain `~` returns nil) and
+      # cic rendered them as a plain user's. Ranking must come from the
+      # network's own PREFIX order, the same source the MODE walkers read.
+      rich = ["~", "&", "@", "%", "+"]
+
+      assert Identifier.member_prefix(["~"], rich) == "~"
+      assert Identifier.member_prefix(["@", "~"], rich) == "~"
+      assert Identifier.member_prefix(["+", "&"], rich) == "&"
+      # Order is the RUN's, not the argument's: a founder listed after an op
+      # still outranks the op.
+      assert Identifier.member_prefix(["@", "&", "+"], rich) == "&"
+    end
+
+    test "a sigil the run does not carry is not a grade" do
+      # The inverse: on a `(ov)@+` network a stray `~` names no level cic
+      # could describe, so the row gets no snapshot rather than a glyph the
+      # network never advertised.
+      assert Identifier.member_prefix(["~"], ["@", "+"]) == nil
     end
 
     test "returns nil for a plain member (empty list)" do
-      assert Identifier.member_prefix([]) == nil
+      assert Identifier.member_prefix([], @bahamut) == nil
     end
 
     test "returns nil for non-list input" do
-      assert Identifier.member_prefix(nil) == nil
-      assert Identifier.member_prefix("@") == nil
+      assert Identifier.member_prefix(nil, @bahamut) == nil
+      assert Identifier.member_prefix("@", @bahamut) == nil
     end
   end
 

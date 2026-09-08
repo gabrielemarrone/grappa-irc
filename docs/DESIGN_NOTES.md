@@ -48991,3 +48991,113 @@ fixing a blind dialog.
 
 _Deploy: **HOT**, cic bundle only — no server change, no wire change, no
 protocol bump._
+<!-- entry #1999 -->
+
+---
+
+## 2026-09-08 — #1999: the membership sigil set is the network's, in six places
+
+A user on #grappa (Kerd) reported that clicking a nick in the members pane
+opened a query against `~nick` — a nick that does not exist, so nothing could
+be written in the window. The issue named one cause,
+`EventRouter.split_mode_prefix/1`, which matched a hardcoded `?@ ?% ?+`: a 353
+RPL_NAMREPLY token like `~nick` missed every clause, fell through the
+fallback unchanged, and the sigil became the `state.members` KEY.
+
+That diagnosis was correct and incomplete. Grepping the CLASS rather than the
+reported symptom found the same hardcoded triple in five more places, three of
+them server-side and none named in the issue:
+
+* `Identifier.member_prefix/1` held `["@", "%", "+"]` as a module constant, so
+  `Enum.find` returned nil for a `["~"]` member and a founder's content rows
+  were persisted with NO `meta.sender_prefix`. That one is permanent by
+  design: #25 SNAPSHOTS the grade at persist time precisely so a later MODE
+  cannot re-prefix history, so every row already written keeps the omission.
+* `Session.Server.member_sort_tier/1` knew `@` and `+` only. It did not rank
+  bahamut's OWN halfop — a `%` member sorted into the plain tier — and that
+  survived unseen because cic re-sorts the pane with a tier function of its
+  own. The server order is visible in `GET /members` and in the
+  `names_reply`/`members_seeded` payloads, not in the pane.
+* cic's `memberSigil`, `members.tierRank`, `NamesModal`'s four hand-written
+  not-higher predicates, `WhoModal`'s `Membership` union, `MembersPane`'s
+  `tierClass` and `nickColor.snapshotSenderPrefix` each carried a copy.
+
+### What the fix is
+
+One accessor per side. `ISupport.sigils/1` and cic's `sigilRank` return the
+advertised run, HIGHEST RANK FIRST, composed from `prefix_order` + the lookup
+map — not stored as a third field, because a stored copy is a parallel
+structure that needs housekeeping and will drift. Rank comes from
+`prefix_order` and never from the map: `Map.values/1` / `Object.values` come
+back alphabetical BY MODE LETTER, which on `(qaohv)` puts `o` in the MIDDLE.
+That is the same mis-rank #1302 found in `editorSigils`, and #1302's docstring
+is the reason this was written correctly the first time here.
+
+Deriving the SET rather than widening the literal to `~&@%+` is what makes the
+inverse safe. On a `(ov)@+` network a leading `~` is not a membership sigil,
+and peeling it would silently address a DIFFERENT nick. Unknown stays unknown,
+everywhere: an unadvertised sigil is not a grade for the sort, not a grade for
+the snapshot, and not a glyph for the render.
+
+The peel is GREEDY, and that is a deliberate decoupling rather than support
+for a feature we do not have. `multi-prefix` is not in grappa's CAP REQ, so
+upstream sends the single highest sigil and the run is length 1 in production
+— but a nick can never BEGIN with a sigil (RFC 2812 §2.3.1 `special` is
+`[ ] \ ` _ ^ { | }`, which excludes every PREFIX char), so peeling the whole
+run is unambiguous. Writing it greedily keeps `split_mode_prefix/2` correct
+independently of a CAP decision made in `IRC.AuthFsm`, instead of silently
+keying on `&nick` the day that changes.
+
+### No wire change, and it was measured
+
+`mix grappa.wire_pin --check` answers "wire shape and protocol 14 agree" and
+`gen_wire_types --check` reports in sync after the change. The domain of
+`modes` widened; its SHAPE did not, and `meta.sender_prefix` is `term()` in
+the typespec, appearing in `wireTypes.ts` only as a key NAME. `modes` is
+already `string[]` there, so an old bundle receiving `["~"]` degrades — no
+glyph, plain tier — rather than rejecting the payload. Everything cic needs
+(`prefix`, `prefix_order`) has crossed the wire since #1302. Recorded because
+the #1393d rule bumps on every shape change including additive ones, so "no
+bump" has to be an answer somebody measured, not an omission.
+
+### Two limits taken knowingly
+
+**No colour for a new sigil.** `NickText.prefixClass` and `MembersPane`'s
+`tierClass` keep their three classic branches and fall back to the bare
+`.nick-prefix` baseline / `member-plain`. The theme carries `--mode-op`,
+`--mode-halfop` and `--mode-voiced` and nothing else; inventing a hue per
+sigil is a design decision every theme in `themes/` would have to answer.
+The glyph is what carries the grade, and it is now drawn at all — which was
+the defect. `--mode-founder`/`--mode-admin` wants a design owner.
+
+**The e2e cannot reach the reported case.** Measured on the live stack rather
+than assumed: the bahamut leaf advertises `PREFIX=(ohv)@%+`, solanum
+advertises `PREFIX=(ov)@+`, and solanum's reference.conf carries no
+`use_owner`/`use_admin`/`use_halfop` knob — it has no founder/admin channel
+modes to enable. So `~` and `&` are covered where they CAN be measured:
+server-side by a `list_members` case that drives a real
+`005 PREFIX=(qaohv)~&@%+` through the fake ircd, client-side by unit cases
+that seed the isupport store with the same table. The e2e that DOES exist
+guards the rewrite at the one door nothing else guarded — a real ircd, a real
+353, the real render — and states its own limit in its header. Lifting it
+means adding an ircd that advertises founder/admin as a testnet service,
+which argues against #221's deliberate move from a hand-rolled bahamut mock
+to a real solanum, and is its own slice.
+
+### The test that broke, and why it was the test
+
+Two `MembersPane` cases asserting "the network is unresolved" used
+`mockReturnValueOnce([])`, which pins a CALL INDEX rather than a state. The
+rank memo adds one `networks()` read at render, so the empty array was
+consumed before the click handler ran and both cases failed while the
+production behaviour they assert was intact. Measured both ways before
+touching anything: 1 call after render / 2 after click with the memo, 0 / 1
+with that single path stubbed. Cured in the SETUP — a scoped
+`mockReturnValue` restored by `beforeEach` — never in the assert. General
+rule: `mockReturnValueOnce` on a function the component calls an
+implementation-dependent number of times encodes a call count nobody meant to
+assert.
+
+_Deploy: **COLD** — server modules changed (`ISupport`, `EventRouter`,
+`Identifier`, `Session.Server`) plus the cic bundle. No wire change, no
+protocol bump._

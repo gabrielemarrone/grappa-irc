@@ -158,6 +158,14 @@ const channelsHolder = vi.hoisted(() => {
   };
 });
 
+// issue 1985 — the network `networkBySlug("freenode")` resolves to during a
+// cold load. `null` (the default) reproduces the pre-1985 mock, which returned
+// `undefined` for every slug. Plain holder, not a signal: the restore gate
+// latches on the first pass, so no test needs it to notify mid-render.
+const networkHolder = vi.hoisted(() => ({
+  value: null as { kind: string; id: number; slug: string; connection_state: string } | null,
+}));
+
 vi.mock("@solidjs/router", () => ({
   useNavigate: () => vi.fn(),
 }));
@@ -177,7 +185,12 @@ vi.mock("../lib/networks", () => ({
     const u = userHolder.current;
     return u?.kind === "user" && u.is_admin === true;
   },
-  networkBySlug: () => undefined,
+  // issue 1985 — the cold-load restore gate asks whether the saved window's
+  // network is parked. Default `undefined` keeps every pre-1985 test on the
+  // behaviour it was written against (no network → not parked → restore
+  // proceeds); the 1985 tests opt in by setting the holder.
+  networkBySlug: (slug: string) =>
+    slug === "freenode" ? (networkHolder.value ?? undefined) : undefined,
 }));
 
 // #606 — RailContext's query context auto-fetches WHOIS on select via
@@ -489,6 +502,8 @@ beforeEach(async () => {
   userHolder.current = { kind: "user", id: "u1", name: "vjt", is_admin: false, inserted_at: "x" };
   // UX-4 bucket M default — no token unless a test opts in.
   tokenHolder.value = null;
+  // issue 1985 default — no resolvable network, i.e. the pre-1985 mock.
+  networkHolder.value = null;
 });
 
 describe("Shell — three-pane integration", () => {
@@ -637,6 +652,95 @@ describe("Shell — three-pane integration", () => {
 
     // Reactive restore overrides the provisional $home → #b is selected.
     // (A decide-once arm would have disarmed after $home and never fire this.)
+    await waitFor(() => {
+      expect(selectionState.setSelectedChannelMock).toHaveBeenCalledWith({
+        networkSlug: "freenode",
+        channelName: "#b",
+        kind: "channel",
+      });
+    });
+  });
+
+  it("issue 1985 — a saved window under a PARKED network lands on home, not on the window", async () => {
+    // The orphan the disappearance would otherwise leave: bucket D's park
+    // redirect in selection.ts is transition-only (`prev === undefined` skips
+    // the first observation), and a cold load has no previous value to
+    // transition from — so nothing walked the selection back, and the pane
+    // would have rendered a window the sidebar no longer draws a row for.
+    // vjt's ruling (2026-09-08): redirect to home.
+    networkHolder.value = { kind: "user", id: 1, slug: "freenode", connection_state: "parked" };
+    saveLastFocused("u1", {
+      networkSlug: "freenode",
+      channelName: "#b",
+      kind: "channel",
+    });
+
+    render(() => <Shell />);
+
+    await waitFor(() => {
+      expect(selectionState.setSelectedChannelMock).toHaveBeenCalledWith({
+        networkSlug: "$home",
+        channelName: "$home",
+        kind: "home",
+      });
+    });
+    // #b IS in channelsBySlug — the restore would have fired without the gate,
+    // which is what makes this an assertion about the gate and not about a
+    // missing channel.
+    expect(selectionState.setSelectedChannelMock).not.toHaveBeenCalledWith({
+      networkSlug: "freenode",
+      channelName: "#b",
+      kind: "channel",
+    });
+  });
+
+  it("issue 1985 — home is TERMINAL: the network reconnecting does not yank focus back", async () => {
+    // The gate latches instead of re-attempting. A non-latching gate would
+    // re-run on the next resource update and pull the operator off home the
+    // moment they hit [Reconnect] on `$home` — a delayed jump nobody asked
+    // for, and not what "redirect to home" says.
+    networkHolder.value = { kind: "user", id: 1, slug: "freenode", connection_state: "parked" };
+    saveLastFocused("u1", {
+      networkSlug: "freenode",
+      channelName: "#b",
+      kind: "channel",
+    });
+
+    render(() => <Shell />);
+    await waitFor(() => {
+      expect(selectionState.setSelectedChannelMock).toHaveBeenCalledWith({
+        networkSlug: "$home",
+        channelName: "$home",
+        kind: "home",
+      });
+    });
+
+    // The network comes back and the channel list refetches.
+    networkHolder.value = { kind: "user", id: 1, slug: "freenode", connection_state: "connected" };
+    channelsHolder.current = { freenode: [{ name: "#b", joined: true, source: "autojoin" }] };
+    await Promise.resolve();
+
+    expect(selectionState.setSelectedChannelMock).not.toHaveBeenCalledWith({
+      networkSlug: "freenode",
+      channelName: "#b",
+      kind: "channel",
+    });
+  });
+
+  it("issue 1985 — a saved window under a FAILED network still restores (parked only)", async () => {
+    // The mutation in the other direction. A failed network keeps its greyed
+    // sidebar row, so its saved window still has somewhere to be — the ruling
+    // is about `parked`, and generalising it to "any non-connected state"
+    // would silently take `failed` and `failing` with it.
+    networkHolder.value = { kind: "user", id: 1, slug: "freenode", connection_state: "failed" };
+    saveLastFocused("u1", {
+      networkSlug: "freenode",
+      channelName: "#b",
+      kind: "channel",
+    });
+
+    render(() => <Shell />);
+
     await waitFor(() => {
       expect(selectionState.setSelectedChannelMock).toHaveBeenCalledWith({
         networkSlug: "freenode",

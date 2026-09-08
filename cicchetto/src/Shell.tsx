@@ -38,6 +38,7 @@ import { install, registerHandlers, uninstall } from "./lib/keybindings";
 import { loadLastFocused } from "./lib/lastFocusedChannel";
 import { mentionsBundleBySlug } from "./lib/mentionsWindow";
 import { openMembersPanel, toggleMembersPanel } from "./lib/mobilePanel";
+import { isNetworkParked } from "./lib/networkParked";
 import { channelsBySlug, isAdmin, networkBySlug, networks, user } from "./lib/networks";
 import { nickEquals } from "./lib/nickEquals";
 import { createOverlayLock, overlayCount } from "./lib/overlayScrollLock";
@@ -498,6 +499,8 @@ const Shell: Component = () => {
   // Issue #35 (2026-06-01) — before defaulting to `$home`, restore the
   // last focused channel/query/server window from localStorage
   // (`lib/lastFocusedChannel.ts`). Validity gate:
+  //   * any kind → its network must not be `parked` (issue 1985 — a parked
+  //     network has no sidebar row to point at the restored pane).
   //   * channel → must appear in `channelsBySlug()[slug]`.
   //   * query   → must appear in `queryWindowsByNetwork()[net.id]`.
   //   * server  → its network must be live in `networkBySlug(slug)`.
@@ -559,6 +562,40 @@ const Shell: Component = () => {
     }
 
     const slug = saved.networkSlug;
+    // issue 1985 — a parked network has no sidebar row, so restoring a window
+    // under it would leave a pane the sidebar cannot point at. vjt's ruling
+    // (2026-09-08): redirect to home.
+    //
+    // The gate belongs HERE, in the restore's existing validity check, and not
+    // in selection.ts's bucket-D park redirect. Bucket D is transition-only on
+    // purpose (`prev === undefined` skips the first observation), and a cold
+    // load is exactly where there IS no previous value to transition from —
+    // which is why the disappearance left an orphan pane at reload while the
+    // live park path was already covered. Widening bucket D to fire on a
+    // non-transition would make every boot re-decide the selection for every
+    // network; one clause in the gate that already asks "is the saved window
+    // still somewhere the operator can be" is the same question, asked once.
+    //
+    // TERMINAL, like the no-saved-window branch above and unlike the
+    // provisional `$home` below: the ruling says redirect to home, and a
+    // non-latching gate would keep re-attempting on every resource update and
+    // yank focus off home the moment the operator hit [Reconnect] on `$home`.
+    // Landing home and staying there is what was asked for.
+    //
+    // `parked` only — NOT "any non-connected state". A `failed` network keeps
+    // its greyed sidebar row, so its saved window still has somewhere to be
+    // and must still restore.
+    if (isNetworkParked(networkBySlug(slug))) {
+      if (sel === null) {
+        setSelectedChannel({
+          networkSlug: HOME_WINDOW_SLUG,
+          channelName: HOME_WINDOW_NAME,
+          kind: "home",
+        });
+      }
+      coldLoadDone = true;
+      return;
+    }
     let restored = false;
     if (saved.kind === "channel") {
       const list = cbs[slug] ?? [];

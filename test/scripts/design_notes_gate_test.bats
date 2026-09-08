@@ -27,17 +27,23 @@ setup() {
     REAL_REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 }
 
-# Append one entry, in the shipped shape. The marker — when present — is the
-# FIRST appended line, with no blank before it: measured, that shape loses
-# nothing at all (8 additions before the rebase, 8 after), whereas putting a
-# blank line ahead of the marker still costs that blank (9 → 8). A convention
-# that routinely shrinks the diff by one line would poison the very numstat
-# comparison this whole class is detected by.
+# Append one entry. The marker — when present — is the FIRST appended line,
+# with no blank before it: measured on this fixture, that shape loses nothing
+# at all (7 additions before the rebase, 7 after) against EITHER shape of the
+# other side. A blank ahead of the marker is `lead=blank`, and what it costs
+# depends on what the other branch appended: nothing against a markered entry,
+# but ONE line against an entry in the legacy shape, which is most of the
+# file's history. A convention that shrinks the diff by one line in some
+# configurations and not others would poison the very numstat comparison this
+# whole class is detected by.
 #
 # The marker tag is separate from the heading tag so a case can hand two
 # entries the SAME marker, which is how the copy-paste is reproduced.
 append_entry() {
-    local tag="$1" marker="$2"
+    local tag="$1" marker="$2" lead="$3"
+    if [ "$lead" = blank ]; then
+        printf '\n' >> docs/DESIGN_NOTES.md
+    fi
     if [ "$marker" != no ]; then
         printf '<!-- entry #%s -->\n' "$marker" >> docs/DESIGN_NOTES.md
     fi
@@ -48,8 +54,13 @@ append_entry() {
 # A scratch repo with `merge=union` on the log, one entry already in the base,
 # and one appended on each of `main` and `feat`. Leaves `feat` checked out,
 # NOT yet rebased, so each case controls what happens next.
+#
+# The third argument is the shape of `feat`'s own entry — `no` for the shipped
+# one, `blank` for a stray blank line ahead of the marker. It is spelled at
+# every call site rather than defaulted: which cases feed the gate a malformed
+# entry is exactly what a reader needs to see without scrolling up.
 scratch() {
-    local feat_marker="$1" main_marker="$2"
+    local feat_marker="$1" main_marker="$2" feat_lead="$3"
     REPO="$BATS_TEST_TMPDIR/repo"
     rm -rf "$REPO"
     mkdir -p "$REPO/docs" "$REPO/scripts"
@@ -67,11 +78,11 @@ scratch() {
     git commit -qm base
     git branch feat
 
-    append_entry C "$main_marker"
+    append_entry C "$main_marker" no
     git commit -qam 'main C'
 
     git checkout -q feat
-    append_entry B "$feat_marker"
+    append_entry B "$feat_marker" "$feat_lead"
     git commit -qam 'feat B'
 }
 
@@ -83,7 +94,7 @@ contribution() {
 # ── The oracle: the gate fails on what the driver actually produces ──────────
 
 @test "the gate FAILS on a separator the union driver just ate (#1271)" {
-    scratch no no
+    scratch no no no
 
     local add_before add_after del_after
     add_before="$(contribution 1)"
@@ -107,7 +118,7 @@ contribution() {
 }
 
 @test "with a marker on both sides, nothing is eaten and the gate passes (#1271)" {
-    scratch B C
+    scratch B C no
 
     local add_before add_after
     add_before="$(contribution 1)"
@@ -129,7 +140,7 @@ contribution() {
     # EITHER entry carries a marker, so no flag day and no sweep of old
     # entries. Measured on the side that would otherwise lose its separator —
     # `feat` here carries none.
-    scratch no C
+    scratch no C no
 
     local add_before add_after
     add_before="$(contribution 1)"
@@ -155,7 +166,7 @@ contribution() {
     # missing marker is an author who did not know the convention. Reporting
     # them as one would send the next reader looking for a rebase that never
     # happened.
-    scratch no no
+    scratch no no no
 
     # No rebase: `feat` is well formed apart from the marker.
     run scripts/design-notes-gate.sh main
@@ -169,7 +180,7 @@ contribution() {
     # bug — one line WORSE than before, because the marker collapses with the
     # separator block it was added to protect. Measured, not assumed: this is
     # why the gate has to check uniqueness and not merely presence.
-    scratch C C
+    scratch C C no
 
     local add_before add_after
     add_before="$(contribution 1)"
@@ -191,7 +202,7 @@ contribution() {
     # entries are perfectly well formed, and the NEXT concurrent rebase is the
     # one that pays. This is the only case that isolates the uniqueness check —
     # once the collapse has happened there is a single marker left to count.
-    scratch B C
+    scratch B C no
     printf '<!-- entry #B -->\n\n---\n\n## 2026-01-03 — entry D\n\nbody D\n' \
         >> docs/DESIGN_NOTES.md
     git commit -qam 'feat D, template copied from B'
@@ -218,7 +229,7 @@ contribution() {
     # This case also PINS the reference. The collision does not exist at the
     # merge base — only at the base REF's tip — so a check written against the
     # merge base measures nothing and this case goes red.
-    scratch C C
+    scratch C C no
 
     run scripts/design-notes-gate.sh main
     [ "$status" -eq 1 ]
@@ -232,7 +243,7 @@ contribution() {
     # takes FOUR lines — one more than carrying no marker at all, because the
     # duplicated marker collapses together with the separator block it was
     # added to protect.
-    scratch C C
+    scratch C C no
 
     local add_before add_after del_after
     add_before="$(contribution 1)"
@@ -251,7 +262,80 @@ contribution() {
     # The negative control for the two cases above: same shape, distinct
     # markers, no rebase. Without it, a check that simply failed every branch
     # carrying a marker would satisfy them both.
-    scratch B C
+    scratch B C no
+
+    run scripts/design-notes-gate.sh main
+    [ "$status" -eq 0 ]
+}
+
+# ── The marker's own precondition: it is the FIRST appended line (2011) ──────
+#
+# The marker defeats `merge=union` by making the first appended line DIFFER
+# between the two branches. A blank ahead of it hands the machinery back the
+# most collidable line there is: a blank collides with every entry appended in
+# the legacy shape — `\n---\n\n## ` — which is most of this file's history, and
+# with every other blank-led entry.
+#
+# The four-line window above the heading cannot see that. The marker still sits
+# at p4 and the shape those four lines spell is still exactly canonical, so the
+# stray blank is at p5, outside. A COVERAGE gap, not a broken check — which is
+# why the cure is a fifth line of history and not a new regex.
+
+@test "a blank ahead of the marker is rejected BEFORE the rebase (2011)" {
+    scratch B C blank
+
+    run scripts/design-notes-gate.sh main
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"blank line"* ]]
+    [[ "$output" == *"entry B"* ]]
+
+    # Neither of the other two findings: the separator is there and so is the
+    # marker. Reporting either would send the author editing a correct line.
+    refute grep -q "NOT preceded by" <<<"$output"
+    refute grep -q "no <!-- entry ... --> marker line" <<<"$output"
+}
+
+@test "left ungated, the driver eats that blank and the pin goes quiet (2011)" {
+    # What the check above stands in front of, measured rather than argued.
+    # `main` carries no marker here — the legacy shape, and the configuration
+    # the incremental-adoption case above proves is SAFE for a canonical entry.
+    # Blank-led, that same pair loses a line: the blank is not a nit, it is
+    # what disarms the protection the marker exists to give.
+    scratch B no blank
+
+    local add_before add_after del_after
+    add_before="$(contribution 1)"
+
+    run git rebase main
+    [ "$status" -eq 0 ]
+
+    add_after="$(contribution 1)"
+    del_after="$(contribution 2)"
+
+    [ "$del_after" -eq 0 ]
+    [ "$add_after" -eq $((add_before - 1)) ]
+
+    # And the pre-rebase window is the ONLY one. The line the driver ate IS the
+    # offending blank, so what it leaves behind is a canonical entry with
+    # nothing left to find. A check moved after the rebase reports green on
+    # every occurrence of this, which is the shape of a guard that arrives late.
+    run scripts/design-notes-gate.sh main
+    [ "$status" -eq 0 ]
+}
+
+@test "the first entry in a file has nothing above it, and that is no finding (2011)" {
+    # The negative control for the case above, and the one place where "the
+    # line above the marker" does not exist. awk's history variables start
+    # unset, which reads as blank — so without a guard on the fifth line this
+    # well formed entry is reported for a blank nobody wrote. Measured: with
+    # the guard deleted the two cases above stay green and only this one goes
+    # red, which is the whole reason it is here.
+    scratch B C no
+
+    # feat's entry becomes the entire file, putting its marker on line 1.
+    printf '<!-- entry #E -->\n\n---\n\n## 2026-01-04 — entry E\n\nbody E\n' \
+        > docs/DESIGN_NOTES.md
+    git commit -qam 'feat E, and the file now begins with it'
 
     run scripts/design-notes-gate.sh main
     [ "$status" -eq 0 ]
@@ -263,7 +347,7 @@ contribution() {
     # The reachable version of this is a shallow CI checkout, where origin/main
     # simply is not there. Passing would report a green gate that looked at
     # nothing — the exact shape of every guard that fails open.
-    scratch B C
+    scratch B C no
 
     run scripts/design-notes-gate.sh no/such/ref
     [ "$status" -eq 1 ]
@@ -272,7 +356,7 @@ contribution() {
 }
 
 @test "a branch that adds no entry says so, rather than claiming a check" {
-    scratch B C
+    scratch B C no
     git checkout -q main
 
     run scripts/design-notes-gate.sh main
@@ -284,7 +368,7 @@ contribution() {
     # Entries quote shell and markdown constantly. Reading a fenced `## ` as a
     # heading would fail a perfectly well-formed entry and teach the next
     # author to stop quoting.
-    scratch B C
+    scratch B C no
     printf '\n```\n## 2026-01-02 — entry B\n```\n' >> docs/DESIGN_NOTES.md
     git commit -qam 'feat B gains a fenced sample of its own heading'
     git rebase -q main

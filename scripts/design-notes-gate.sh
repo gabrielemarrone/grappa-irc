@@ -51,6 +51,18 @@
 #      deletions, and takes FOUR lines — one MORE than carrying no marker at
 #      all, because the duplicated marker collapses together with the separator
 #      block it was added to protect.
+#   4. the marker is the FIRST appended line, with nothing above it — not even
+#      a blank. Check 2 cannot see this and never could: it reads the four
+#      lines above the heading, the marker is the fourth of them, so a stray
+#      blank sits at the fifth and those four still spell the canonical shape.
+#      Green, measured (issue 2011). A blank is the most collidable first line
+#      there is — every entry in the legacy shape opens with one — so a
+#      blank-led marker hands the driver back exactly the identical prefix the
+#      marker exists to destroy. Against a legacy entry the branch then loses
+#      one line, rc=0, zero deletions; and the line lost IS that blank, so the
+#      entry reads canonical afterwards with nothing left to find. That is why
+#      this is a coverage gap cured by a fifth line of history, and why the
+#      only window for it is BEFORE the rebase.
 #
 # THE REFERENCE FOR CHECK 3 IS THE BASE REF'S TIP, NOT THE MERGE BASE. This is
 # the whole finding and it is easy to undo by tidying: the colliding entry
@@ -111,14 +123,16 @@ fi
 # text, not an entry.
 findings="$(awk '
 NR == FNR { want[$0] = 1; next }
-/^(```|~~~)/ { fence = !fence; p4 = p3; p3 = p2; p2 = p1; p1 = $0; next }
+/^(```|~~~)/ { fence = !fence; p5 = p4; p4 = p3; p3 = p2; p2 = p1; p1 = $0; next }
 !fence && /^## / && ($0 in want) {
     if (!(p1 == "" && p2 == "---"))
         printf "%d\tSEPARATOR\t%s\n", FNR, $0
     else if (p3 != "" || p4 !~ /^<!-- entry .+ -->$/)
         printf "%d\tMARKER\t%s\n", FNR, $0
+    else if (FNR > 5 && p5 == "")
+        printf "%d\tBLANK\t%s\n", FNR, $0
 }
-{ p4 = p3; p3 = p2; p2 = p1; p1 = $0 }
+{ p5 = p4; p4 = p3; p3 = p2; p2 = p1; p1 = $0 }
 ' <(printf '%s\n' "$added") "$FILE")"
 
 status=0
@@ -147,6 +161,23 @@ if [ -n "$marker_findings" ]; then
 		printf 'line, in this exact shape:\n\n'
 		printf '    <!-- entry #1271 -->\n    <blank>\n    ---\n    <blank>\n    ## 2026-08-13 — #1271: ...\n\n'
 		printf 'It is what leaves the merge machinery no identical prefix to collapse.\n'
+	} >&2
+fi
+
+blank_findings="$(printf '%s\n' "$findings" | grep -F "	BLANK	" || true)"
+if [ -n "$blank_findings" ]; then
+	status=1
+	{
+		printf 'design-notes-gate: entry marker(s) with a blank line ahead of them:\n'
+		printf '%s\n' "$blank_findings"
+		printf '\nThe marker is the FIRST appended line, with nothing before it.\n'
+		printf 'A blank ahead of it is the identical prefix all over again — a\n'
+		printf 'blank collides with every entry in the legacy separator-first\n'
+		printf 'shape, which is most of this file, and with every other blank-led\n'
+		printf 'entry. Measured: the driver emits it once and the branch loses a\n'
+		printf 'line, rc=0 and zero deletions. The line it eats IS that blank, so\n'
+		printf 'the entry then reads canonical and nothing is left to find — which\n'
+		printf 'is why this is checked here and cannot be checked after a rebase.\n'
 	} >&2
 fi
 

@@ -471,9 +471,7 @@ defmodule Grappa.Application do
           # on :start_bootstrap so test boots empty.
         ] ++ bootstrap_child()
 
-    opts = [strategy: :one_for_one, name: Grappa.Supervisor]
-
-    case Supervisor.start_link(children, opts) do
+    case Supervisor.start_link(children, root_supervisor_opts()) do
       {:ok, _} = result ->
         # H26 (review 2026-05-22): flip the substrate-readiness flag
         # so `/healthz` returns 200 (vs the default 503-on-not-ready).
@@ -519,6 +517,71 @@ defmodule Grappa.Application do
       other ->
         other
     end
+  end
+
+  # max_restarts: 60, max_seconds: 60 — the ROOT supervisor ran on OTP's
+  # DEFAULT 3-in-5s until 2026-09-08, which is a default and never was a
+  # decision: `SessionSupervisor` twenty lines up carries an argued
+  # 10_000/60, so the silence here read as "considered" when it was
+  # "never considered".
+  #
+  # 🔴 Measured on the m42 jail, two node deaths inside half an hour:
+  #
+  #   20:36:31.150–.472    4 children in   322 ms  (Visitors/Uploads/Avatars
+  #                                                 Reaper + AdminEvents)
+  #   21:06:38.979–40.053  5 children in 1_070 ms  (of which Bootstrap x3)
+  #
+  # Neither burst is N independent faults. It is ONE correlated degradation
+  # — the SQLite pool saturating — arriving at every Repo-reading singleton
+  # at once, and three of those inside 5s is the whole budget. The tree has
+  # ~31 top-level children and most of them touch the Repo, so the default
+  # made "the DB is briefly busy" and "kill the node" the same event.
+  #
+  # Where the two numbers come from:
+  #
+  #   max_seconds: 60 — twice `busy_timeout` (30_000, every env), i.e. the
+  #     window has to be able to CONTAIN one saturation episode. A window
+  #     shorter than the stall splits one degradation across two budgets and
+  #     measures nothing.
+  #   max_restarts: 60 — ~2 full sweeps of the ~31-child tree: every
+  #     top-level singleton may die TWICE inside one degradation and the node
+  #     lives. The measured peak is 5, so this clears it 12x over.
+  #
+  # Deliberately NOT the sibling's 10_000/60. Under `SessionSupervisor` the
+  # children are homogeneous, ephemeral, and restarting IS the recovery
+  # mechanism (upstream reconnect), so a huge budget buys tolerance for the
+  # normal case. Here the children are heterogeneous infrastructure
+  # singletons and a restart is an ANOMALY. 10_000/60 is ~167 restarts/s
+  # sustained: it would make the root effectively immortal and delete the
+  # signal this supervisor exists to produce.
+  #
+  # What must STILL kill the node, on purpose: a non-transient fault — an
+  # Endpoint that cannot bind, a Vault with the wrong key, a Repo that
+  # cannot open the file, or any child in a tight crash-loop. 60-in-60 is
+  # 1 restart/s sustained, so a tight loop trips it in well under a minute
+  # and the node exits where rc.d can see it. A node that restart-loops
+  # forever while looking alive is strictly WORSE for an operator than one
+  # that dies.
+  #
+  # ⚠️ What this does NOT cure, stated so nobody reads it as fixed: death 2
+  # above. `Grappa.Bootstrap` is `use Task, restart: :transient` and re-runs
+  # its credential READ on every restart, so it re-enters the saturated pool
+  # immediately — measured at ~2.8 restarts/s, which exhausts 60-in-60 in
+  # ~21s, well inside a 31s stall. That is a child that does not degrade,
+  # not a budget that is too small, and raising the budget to cover it would
+  # be buying the immortality rejected two paragraphs up. The cure is the
+  # `{:error, :db_unavailable}` verb already used in 45 files under `lib/`
+  # (`Accounts.Reaper` is the in-house model: "sweep dropped, retrying next
+  # tick"), and it is a SEPARATE slice.
+  @doc """
+  Options for the ROOT supervisor (`Grappa.Supervisor`).
+
+  Public so the restart budget is testable against the running shape rather
+  than restated in a test — see `test/grappa/application_root_supervisor_limits_test.exs`.
+  """
+  @spec root_supervisor_opts() :: [Supervisor.option()]
+  def root_supervisor_opts do
+    [strategy: :one_for_one, name: Grappa.Supervisor, max_restarts: 60, max_seconds: 60]
   end
 
   # Bootstrap is opt-in via the `:start_bootstrap` flag (true in dev/prod,

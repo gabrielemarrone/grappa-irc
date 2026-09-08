@@ -361,6 +361,48 @@ defmodule Grappa.Session.ISupport do
   def default_prefix_order, do: @default_prefix_order
 
   @doc """
+  The membership SIGILS this network advertised, HIGHEST RANK FIRST —
+  `["~", "&", "@", "%", "+"]` on `PREFIX=(qaohv)~&@%+`, `["@", "%", "+"]`
+  pre-005. The rank-ordered projection of the same token `prefix/1` holds
+  as a lookup map and `prefix_order/1` as mode letters.
+
+  This is the source every consumer that needs the SET or the PRECEDENCE
+  of membership sigils must read (issue 1999). Three sites used to carry
+  their own `@ % +` copy of it and each was wrong in its own way on a
+  PREFIX-rich network: `EventRouter.split_mode_prefix/2` left a `~` glued
+  to the nick it prefixed (so the members map keyed a nick that does not
+  exist — the reported defect), `Identifier.member_prefix/2` snapshot no
+  grade at all for a founder, and `Session.Server.member_sort_tier/2`
+  sorted founder and admin into the PLAIN tier at the bottom of the pane.
+
+  Composed from the two accessors rather than stored as a third field:
+  a stored copy is a parallel structure needing housekeeping, and
+  `prefix_order/1` already carries the only fact the map cannot
+  (`Map.values/1` comes back alphabetical BY LETTER, which on `(qaohv)`
+  puts `o` in the MIDDLE — the mis-rank #1302 fixed in cic's
+  `editorSigils`). Both reads are `Map.get`-defaulted, so a live
+  `Session.Server` state seeded before either field existed degrades to
+  the bahamut run instead of raising — and, crucially, never to `[]`,
+  which would disable sigil stripping altogether. A letter the map cannot
+  resolve is SKIPPED rather than emitted as `nil`; the two projections
+  come from one parse and cannot disagree today, but a total accessor
+  does not depend on that.
+  """
+  @spec sigils(t()) :: [String.t()]
+  def sigils(isupport) when is_map(isupport) do
+    prefix = Map.get(isupport, :prefix, @default_prefix)
+
+    isupport
+    |> prefix_order()
+    |> Enum.flat_map(fn letter ->
+      case Map.fetch(prefix, letter) do
+        {:ok, sigil} -> [sigil]
+        :error -> []
+      end
+    end)
+  end
+
+  @doc """
   The advertised STATUSMSG membership sigils for this network — the set a
   message target may be prefixed with to reach only members at-or-above
   that status (`@#chan` ops, `+#chan` voice). Read via `Map.get` (not

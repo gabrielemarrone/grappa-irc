@@ -1134,7 +1134,8 @@ defmodule Grappa.Session.EventRouter do
     {members, newly_seen_nicks} =
       case Map.fetch(state.members, channel) do
         {:ok, existing} ->
-          new_entries = Map.new(tokens, &split_mode_prefix/1)
+          sigils = member_sigils(state)
+          new_entries = Map.new(tokens, &split_mode_prefix(&1, sigils))
           # M2 — nicks this 353 line introduces that we did NOT already
           # know about in this channel's roster. Only meaningful in this
           # branch (an ephemeral /names on an unjoined channel below
@@ -3871,12 +3872,44 @@ defmodule Grappa.Session.EventRouter do
 
   defp toggle_mode(modes, prefix, :remove), do: List.delete(modes, prefix)
 
-  @spec split_mode_prefix(String.t()) :: {String.t(), [String.t()]}
-  defp split_mode_prefix(<<prefix, rest::binary>>) when prefix in [?@, ?%, ?+] do
-    {rest, [<<prefix>>]}
+  # Peel the membership sigils off a 353 RPL_NAMREPLY `[prefix]nick` token,
+  # returning `{bare_nick, sigils_in_arrival_order}`.
+  #
+  # issue 1999 — `sigils` is the network's OWN advertised run
+  # (`ISupport.sigils/1`), NOT the `?@ ?% ?+` guard this used to carry. On a
+  # network advertising founder/admin (`PREFIX=(qaohv)~&@%+`) a `~nick` token
+  # matched no clause and fell through unchanged, so the sigil stayed GLUED
+  # to the nick and became the `state.members` KEY: every consumer downstream
+  # — members pane, click-to-query, right-click > query — then addressed
+  # `~nick`, which does not exist, and the operator could not write in the
+  # window that opened. Same #216 posture the two MODE walkers already hold;
+  # the 353 path was the one left behind.
+  #
+  # Deriving the SET (rather than widening the literal to `~&@%+`) is what
+  # makes the inverse safe too: on a `(ov)@+` network a leading `~` is not a
+  # membership sigil, and peeling it would silently address a DIFFERENT nick.
+  #
+  # GREEDY on purpose. `multi-prefix` is not in grappa's CAP REQ today, so
+  # upstream sends only the highest sigil and the run is length 1 in
+  # production — but a nick can never BEGIN with a sigil (RFC 2812 §2.3.1
+  # `special` is `[ ] \ ` _ ^ { | }`, which excludes every PREFIX char), so
+  # peeling the whole advertised run is unambiguous and costs nothing. That
+  # keeps this function's correctness independent of a CAP decision made in
+  # `IRC.AuthFsm`, instead of silently keying on `&nick` the day it changes.
+  @spec split_mode_prefix(String.t(), [String.t()]) :: {String.t(), [String.t()]}
+  defp split_mode_prefix(token, sigils), do: split_mode_prefix(token, sigils, [])
+
+  defp split_mode_prefix(<<sigil::utf8, rest::binary>> = token, sigils, acc) do
+    grapheme = <<sigil::utf8>>
+
+    if grapheme in sigils do
+      split_mode_prefix(rest, sigils, [grapheme | acc])
+    else
+      {token, Enum.reverse(acc)}
+    end
   end
 
-  defp split_mode_prefix(nick), do: {nick, []}
+  defp split_mode_prefix(token, _, acc), do: {token, Enum.reverse(acc)}
 
   @spec build_persist(
           state(),
@@ -4069,18 +4102,24 @@ defmodule Grappa.Session.EventRouter do
     {state, {:persist, kind, attrs}}
   end
 
-  # #25: snapshot the sender's channel grade (@/%/+) onto a content row
-  # so a later MODE change can't retroactively re-prefix it. Only for
-  # content kinds on a real (sigil-prefixed) channel where the sender is
-  # a tracked member with a non-plain grade. Plain members, DM (nick)
-  # windows, and the synthetic "$server" window get no key — cic renders
-  # no glyph for an absent `meta.sender_prefix` (also the back-compat
-  # path for rows persisted before this landed).
+  # #25: snapshot the sender's channel grade onto a content row so a later
+  # MODE change can't retroactively re-prefix it. Only for content kinds on
+  # a real (sigil-prefixed) channel where the sender is a tracked member
+  # with a non-plain grade. Plain members, DM (nick) windows, and the
+  # synthetic "$server" window get no key — cic renders no glyph for an
+  # absent `meta.sender_prefix` (also the back-compat path for rows
+  # persisted before this landed).
+  #
+  # issue 1999 — the grade resolves against THIS network's advertised rank,
+  # not a hardcoded `@ % +` precedence: a founder's rows used to snapshot no
+  # grade at all, and the snapshot is one-shot by design, so the omission
+  # was permanent for every row already written.
   @spec put_sender_prefix(map(), map(), atom(), String.t(), String.t()) :: map()
   defp put_sender_prefix(meta, state, kind, channel, sender) when kind in @content_kinds do
     with true <- channel_shaped?(channel),
          sigils when is_list(sigils) <- get_in(state.members, [channel, sender]),
-         prefix when is_binary(prefix) <- Identifier.member_prefix(sigils) do
+         prefix when is_binary(prefix) <-
+           Identifier.member_prefix(sigils, member_sigils(state)) do
       Map.put(meta, :sender_prefix, prefix)
     else
       _ -> meta
@@ -4130,6 +4169,14 @@ defmodule Grappa.Session.EventRouter do
   @spec casemapping(state()) :: Identifier.casemapping()
   defp casemapping(state),
     do: ISupport.casemapping(Map.get(state, :isupport, ISupport.default()))
+
+  # The network's membership sigils, highest rank first (issue 1999). Same
+  # `Map.get` hot-reload shape as `casemapping/1` above, and the same reason:
+  # a live state seeded before `:isupport` existed must degrade to bahamut
+  # rather than raise mid-353.
+  @spec member_sigils(state()) :: [String.t()]
+  defp member_sigils(state),
+    do: ISupport.sigils(Map.get(state, :isupport, ISupport.default()))
 
   # Empty baseline entry returned when a channel_modes entry doesn't exist yet
   # (e.g. when a MODE arrives before 324 RPL_CHANNELMODEIS).
@@ -5102,7 +5149,7 @@ defmodule Grappa.Session.EventRouter do
   #     bare JOIN seeds members but never opens a names modal).
   #   - entry exists: `[{:names_reply, channel, roster, reply_to}]`. `roster` is
   #     the arrival-order `[{nick, modes}]` list — each accumulated
-  #     `[prefix]nick` token split via `split_mode_prefix/1`. The
+  #     `[prefix]nick` token split via `split_mode_prefix/2`. The
   #     mIRC-tier sort + wire projection happen in
   #     `Session.Server.apply_effects/2` (where `member_sort_tier/1`
   #     lives), exactly as the `members_seeded` arm does. `channel` is
@@ -5120,7 +5167,8 @@ defmodule Grappa.Session.EventRouter do
       {:ok, accum} ->
         next_state = %{state | names_pending: Map.delete(pending, chan_key)}
         target_display = Map.get(accum, :target_display, channel)
-        roster = accum |> Map.get(:names, []) |> Enum.map(&split_mode_prefix/1)
+        sigils = member_sigils(state)
+        roster = accum |> Map.get(:names, []) |> Enum.map(&split_mode_prefix(&1, sigils))
         {next_state, [{:names_reply, target_display, roster, Map.get(accum, :reply_to)}]}
     end
   end

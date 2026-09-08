@@ -218,6 +218,53 @@ defmodule Grappa.Session.ISupportTest do
     end
   end
 
+  describe "sigils/1" do
+    test "pre-005 default is the bahamut/Azzurra sigil run, highest rank first" do
+      assert ISupport.sigils(ISupport.default()) == ["@", "%", "+"]
+    end
+
+    test "a PREFIX-rich network yields its whole sigil run in ADVERTISED order" do
+      # issue 1999 — the set every membership-sigil consumer must derive from,
+      # instead of the `@ % +` triple three call sites hardcoded. The order is
+      # `prefix_order`'s, i.e. the 005's, so index 0 is genuinely the top rank.
+      isupport =
+        ISupport.merge_isupport(["grappa-test", "PREFIX=(qaohv)~&@%+"], ISupport.default())
+
+      assert ISupport.sigils(isupport) == ["~", "&", "@", "%", "+"]
+    end
+
+    test "the run is NOT the map's value order" do
+      # The sibling guard to `prefix_order/1`'s own: `Map.values/1` on a small
+      # map comes back alphabetical BY LETTER, which on `(qaohv)` puts `o`
+      # (`@`) in the middle — the exact mis-rank #1302 fixed in `editorSigils`.
+      # Deriving the run from the map instead of the order would reintroduce it.
+      isupport =
+        ISupport.merge_isupport(["grappa-test", "PREFIX=(qaohv)~&@%+"], ISupport.default())
+
+      refute ISupport.sigils(isupport) == Map.values(isupport.prefix)
+    end
+
+    test "a table predating either field reads the defaults instead of raising" do
+      # Same hot-reload contract as `prefix_order/1` and `statusmsg/1`: a live
+      # Session.Server state seeded before these fields existed, read after the
+      # new module loads, must DEGRADE to bahamut rather than KeyError — and
+      # must not degrade to `[]`, which would disable sigil stripping entirely.
+      legacy = Map.drop(ISupport.default(), [:prefix_order, :prefix])
+
+      assert ISupport.sigils(legacy) == ["@", "%", "+"]
+    end
+
+    test "a letter with no sigil in the map is skipped, not rendered as nil" do
+      # The two projections come from one parse and cannot disagree today, but
+      # the accessor is total by construction rather than by that invariant:
+      # a half-written table drops the orphan letter instead of emitting a nil
+      # that would then be compared against a binary downstream.
+      orphan = %{ISupport.default() | prefix_order: ["o", "q", "v"]}
+
+      assert ISupport.sigils(orphan) == ["@", "+"]
+    end
+  end
+
   describe "takes_param?/3 type-C sign sensitivity" do
     test "type C consumes a param on + but not on -" do
       # l is the canonical type-C mode (+l 42 sets a limit; -l clears it

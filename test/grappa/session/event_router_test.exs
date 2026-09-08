@@ -4048,7 +4048,7 @@ defmodule Grappa.Session.EventRouterTest do
 
       # `:server 353 vjt = #italia :@op_user +voiced_user %halfop_user plain_user`
       # — UX-4 bucket J: halfop `%` prefix is now stripped via the same
-      # `split_mode_prefix/1` path as `@` and `+`.
+      # `split_mode_prefix/2` path as `@` and `+`.
       m =
         msg(
           {:numeric, 353},
@@ -4065,6 +4065,97 @@ defmodule Grappa.Session.EventRouterTest do
                "halfop_user" => ["%"],
                "plain_user" => []
              }
+    end
+
+    test "353 strips the sigils state.isupport PREFIX advertises, not a hardcoded @%+ triple" do
+      # issue 1999 (reported on #grappa by Kerd) — the bug this closes. The
+      # split knew `@ % +` only, so on a network advertising founder/admin a
+      # `~nick` token missed every clause and fell through UNCHANGED: the
+      # sigil stayed GLUED to the nick and became the members-map KEY. Every
+      # consumer downstream then addressed `~nick` — a nick that does not
+      # exist — so click-to-query opened a window nobody could write in.
+      #
+      # This is the same #216 posture the two MODE walkers already hold (see
+      # "membership modes come from state.isupport PREFIX" above): one 005,
+      # one table, no second hardcoded copy of it.
+      isupport =
+        ISupport.merge_isupport(
+          ["s", "PREFIX=(qaohv)~&@%+", "CHANMODES=beI,k,l,imnpst"],
+          ISupport.default()
+        )
+
+      state = base_state(%{members: %{"#italia" => %{"vjt" => []}}, isupport: isupport})
+
+      m =
+        msg(
+          {:numeric, 353},
+          ["vjt", "=", "#italia", "~founder &admin @op %halfop +voiced plain"],
+          {:server, "irc.example.net"}
+        )
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+
+      assert new_state.members["#italia"] == %{
+               "vjt" => [],
+               "founder" => ["~"],
+               "admin" => ["&"],
+               "op" => ["@"],
+               "halfop" => ["%"],
+               "voiced" => ["+"],
+               "plain" => []
+             }
+    end
+
+    test "353 leaves a sigil the network did NOT advertise glued, rather than guessing" do
+      # The inverse guard, and the reason this derives a SET instead of
+      # widening the hardcoded one to `~&@%+`: on a network whose PREFIX is
+      # `(ov)@+`, a leading `~` is not a membership sigil at all. Stripping it
+      # would invent a grade the ircd never granted and, worse, silently
+      # address a DIFFERENT nick. Unknown stays unknown — the same posture
+      # `membershipLevelName` takes client-side for an unadvertised sigil.
+      isupport =
+        ISupport.merge_isupport(["s", "PREFIX=(ov)@+"], ISupport.default())
+
+      state = base_state(%{members: %{"#italia" => %{"vjt" => []}}, isupport: isupport})
+
+      m =
+        msg(
+          {:numeric, 353},
+          ["vjt", "=", "#italia", "~weird @op"],
+          {:server, "irc.example.net"}
+        )
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+
+      assert new_state.members["#italia"] == %{
+               "vjt" => [],
+               "~weird" => [],
+               "op" => ["@"]
+             }
+    end
+
+    test "353 peels EVERY leading advertised sigil, not just the first" do
+      # `multi-prefix` is not in grappa's CAP REQ today, so upstream sends the
+      # single highest sigil and this run is length 1 in production. The split
+      # is greedy anyway so that its correctness does not depend on a CAP
+      # decision made in another module: a nick can never BEGIN with a sigil
+      # (RFC 2812 §2.3.1 `special` excludes `~ & @ % +`), so peeling the whole
+      # advertised run is unambiguous. If `multi-prefix` is ever requested,
+      # this path is already right instead of silently keying on `&nick`.
+      isupport =
+        ISupport.merge_isupport(["s", "PREFIX=(qaohv)~&@%+"], ISupport.default())
+
+      state = base_state(%{members: %{"#italia" => %{"vjt" => []}}, isupport: isupport})
+
+      m =
+        msg(
+          {:numeric, 353},
+          ["vjt", "=", "#italia", "~&@boss"],
+          {:server, "irc.example.net"}
+        )
+
+      assert {:cont, new_state, _} = EventRouter.route(m, state)
+      assert new_state.members["#italia"]["boss"] == ["~", "&", "@"]
     end
 
     test "353 against an UNTRACKED channel does NOT create a phantom members entry (CP22 B-names gate)" do
@@ -6725,6 +6816,42 @@ defmodule Grappa.Session.EventRouterTest do
       # Arrival-order, prefix-split {nick, modes} tuples. The mIRC-tier
       # sort happens in server.ex apply_effects, NOT here.
       assert roster == [{"alice", ["@"]}, {"bob", ["+"]}, {"carol", []}]
+    end
+
+    test "366 splits the drained roster on the ADVERTISED sigils too (issue 1999)" do
+      # The second `split_mode_prefix` call site, and it is a distinct door:
+      # the /names drain runs for a channel the operator need not be joined
+      # to, so it never passes through the state.members merge above. A fix
+      # applied to one door only would leave NamesModal addressing `~nick`
+      # while MembersPane addressed `nick` — two spellings of one person,
+      # from one 353.
+      isupport =
+        ISupport.merge_isupport(["s", "PREFIX=(qaohv)~&@%+"], ISupport.default())
+
+      state =
+        base_state(%{
+          members: %{},
+          isupport: isupport,
+          names_pending: %{
+            "#bofh" => %{
+              target_display: "#bofh",
+              names: ["~founder", "&admin", "@alice", "carol"]
+            }
+          }
+        })
+
+      m = msg({:numeric, 366}, ["vjt", "#bofh", "End of /NAMES list"], {:server, "irc.test.org"})
+
+      {:cont, _, effects} = EventRouter.route(m, state)
+
+      assert [{:members_seeded, "#bofh", _}, {:names_reply, "#bofh", roster, nil}] = effects
+
+      assert roster == [
+               {"founder", ["~"]},
+               {"admin", ["&"]},
+               {"alice", ["@"]},
+               {"carol", []}
+             ]
     end
 
     test "366 produces the SAME names_reply whether or not the target is joined (uniform, #140)" do

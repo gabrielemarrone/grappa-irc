@@ -49443,3 +49443,102 @@ silently.
 
 _Code + docs. No wire change, no protocol bump. Deploy: hot — one context
 module, no supervision-tree or schema change._
+<!-- entry #2011 -->
+
+---
+
+## 2026-09-09 — #2011: the marker is the FIRST appended line, and the four-line window could not see the blank that says otherwise
+
+`scripts/design-notes-gate.sh` keeps four lines of history above every added
+entry heading and asserts the canonical shape — blank / `---` / blank / marker.
+A blank line ahead of the marker pushes it to the fifth line, outside the
+window, so the four lines the gate inspects still spell exactly the canonical
+shape and it answers green. Found while validating the gate BY MUTATION: of
+three mutants, a removed separator and a removed marker both came back `rc=1`,
+and the stray blank did not.
+
+A COVERAGE gap, then, not a broken check — which is why the cure is a fifth
+line of history plus one more arm, and not a new regex on the four that were
+already being read.
+
+### Why a stray blank is not a style nit
+
+The marker defeats `merge=union` by making the FIRST appended line DIFFER
+between two branches, leaving the driver no identical prefix to align as a
+common addition. A blank ahead of it hands that prefix straight back, and a
+blank is the most collidable line there is: it is what every entry in the
+legacy separator-first shape opens with — most of this file's history — and
+what every other blank-led entry opens with too.
+
+Measured on the scratch repo the bats suite builds, one row per configuration
+of the other side. Every row reports `rc=0` with zero deletions:
+
+| this branch | the other side | lines lost |
+|---|---|---|
+| canonical | canonical | 0 |
+| blank-led | canonical | 0 |
+| canonical | legacy, no marker | 0 |
+| **blank-led** | **legacy, no marker** | **1** |
+| **blank-led** | **blank-led** | **1** |
+
+Rows 3 and 4 are the whole finding. The same pair that #1271's
+incremental-adoption case proves is SAFE for a canonical entry loses a line the
+moment that entry is blank-led — so the blank is precisely what disarms the
+protection the marker exists to give. One line, not three; `CLAUDE.md` already
+said as much in prose, and nothing asserted it.
+
+And the line the driver eats IS that blank, so what it leaves behind reads
+canonical with nothing left to find. The window is therefore BEFORE the rebase
+and cannot be moved after it — the same posture #1428 arrived at, by a
+different road. The new oracle case asserts that post-rebase green on purpose,
+so that nobody later tidies the check into a position where it is blind.
+
+### The cure, and a guard nobody would have tested
+
+`p5`, a fifth line of history, and a third arm reported as its own finding with
+its own message. The other two are untouched: a stray blank means the separator
+IS present and the marker IS present, and reporting either of those would send
+an author editing a correct line.
+
+The arm is guarded on `FNR > 5`. awk history variables start unset and read as
+blank, so an entry whose marker is line 1 of a file would otherwise be reported
+for a blank nobody wrote. Measured: with that guard deleted the suite stayed
+16/16 — live code no test defended, the same class of hole being cured here —
+so it now carries its own case, and deleting the guard turns that one case red
+and nothing else. The cure itself is validated the same way in the other
+direction: removed, only the blank case goes red.
+
+### The debt this leaves standing, named rather than ticketed
+
+Three entries already on main carry a blank ahead of their marker: `#1261`
+(line 16494), `#201` (16717) and `#1883c` (45652). `git blame` puts the blank
+and the marker in the SAME commit for all three, so the blank was added by the
+entry's own branch — not one of them is a previous entry's trailing line. Out
+of 326 markers in the corpus that is 0.92 %. The four archive files
+(`docs/design_notes/2026-0[4-7].md`) carry 0 markers at all: they predate the
+convention.
+
+They stay, on three grounds. The damage happened at their own rebase and
+removing the blank now does not undo it. A dated entry in this file is HISTORY,
+and rewriting one destroys the evidence that the shape ever existed. And the
+gate is diff-scoped: it judges only what a branch ADDS, and those three have
+been in the base for weeks. No separate issue either — a ticket for three blank
+lines nobody sees is a mechanism heavier than the problem.
+
+Measured, so that "nobody goes red today" is a fact and not an argument:
+against `origin/main~20` the gate judges 10 real entries at `rc=0`, against
+`~50` it judges 19 at `rc=0`, and the first blank finding appears only at
+`~100` — three of them by `~800`. ⚠️ The red at those depths is NOT this cure's.
+The UNFIXED script answers `rc=1` at the same depths, on SEPARATOR, and that
+was established by running both scripts side by side against the same bases,
+not inferred from an exit code that happened to match.
+
+### Stated limit
+
+The check reads the resulting FILE, not the diff. A blank belonging to the
+PREVIOUS entry's tail would therefore be charged to the new author, even though
+a blank already sitting in the base collides with nothing and costs no line.
+Across all 326 markers there are three findings and all three are same-commit:
+zero false positives observed, and no reachable case constructed. Should one
+ever turn up, the honest cure is to read the lines the branch ADDS rather than
+the file — a larger change than this gap justified today.

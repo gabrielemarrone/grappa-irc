@@ -87,25 +87,42 @@ defmodule Grappa.Repo do
   operator must SEE it; the node must still run — and the line names both
   numbers because whoever reads it in `journalctl` has neither the config
   nor a running shell.
+
+  A config that states no `:pool_size` is silent for the same reason. That
+  number is not ours to invent here: what matters is the size the pool
+  actually opens, and its default belongs to DBConnection. Every env this
+  repo ships states it outright (`config/runtime.exs`, `dev.exs` and
+  `test.exs` all set `pool_size:` with a literal default), so an absent key
+  means a caller building a config by hand — a WAL unit test, a one-off
+  tool — for which there is nothing to compare. Raising there would make
+  this check DECIDE whether the Repo may start, which is precisely what it
+  must not do.
   """
   @spec check_dirty_io_reserve(keyword(), pos_integer()) :: :ok
   def check_dirty_io_reserve(config, dirty_io_schedulers) do
-    pool_size = Keyword.fetch!(config, :pool_size)
+    case Keyword.fetch(config, :pool_size) do
+      {:ok, pool_size} when pool_size >= dirty_io_schedulers ->
+        warn_no_reserve(pool_size, dirty_io_schedulers)
 
-    if pool_size >= dirty_io_schedulers do
-      Logger.warning(
-        "Grappa.Repo: pool_size=#{pool_size} leaves no dirty-IO reserve — this BEAM has " <>
-          "#{dirty_io_schedulers} dirty-IO scheduler(s). Every SQLite call runs inside a " <>
-          "dirty-IO NIF, and a writer waiting on the file lock occupies its scheduler for " <>
-          "the whole wait, so a saturated pool can occupy all of them and stall work that " <>
-          "has nothing to do with the database (see #1715). Lower POOL_SIZE below " <>
-          "#{dirty_io_schedulers}, or raise the dirty-IO count (+SDio). NOTE: DBConnection's " <>
-          "own pool-exhaustion error advises RAISING pool_size — that advice does not hold " <>
-          "here, because the ceiling is the scheduler count and not the pool."
-      )
+      # Two different silences, deliberately one arm: a reserve that is
+      # intact, and a config that states no pool size at all.
+      _ ->
+        :ok
     end
+  end
 
-    :ok
+  @spec warn_no_reserve(pos_integer(), pos_integer()) :: :ok
+  defp warn_no_reserve(pool_size, dirty_io_schedulers) do
+    Logger.warning(
+      "Grappa.Repo: pool_size=#{pool_size} leaves no dirty-IO reserve — this BEAM has " <>
+        "#{dirty_io_schedulers} dirty-IO scheduler(s). Every SQLite call runs inside a " <>
+        "dirty-IO NIF, and a writer waiting on the file lock occupies its scheduler for " <>
+        "the whole wait, so a saturated pool can occupy all of them and stall work that " <>
+        "has nothing to do with the database (see #1715). Lower POOL_SIZE below " <>
+        "#{dirty_io_schedulers}, or raise the dirty-IO count (+SDio). NOTE: DBConnection's " <>
+        "own pool-exhaustion error advises RAISING pool_size — that advice does not hold " <>
+        "here, because the ceiling is the scheduler count and not the pool."
+    )
   end
 
   # Everything that must happen on ONE serial connection, before the pool (or

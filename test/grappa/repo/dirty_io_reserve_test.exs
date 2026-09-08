@@ -77,6 +77,17 @@ defmodule Grappa.Repo.DirtyIoReserveTest do
       refute log =~ "dirty-IO"
     end
 
+    test "says nothing when the config does not state a pool size at all" do
+      # `init/2` is called with whatever config it is handed, and a caller that
+      # builds one by hand — the WAL unit tests, a one-off tool — has no reason
+      # to carry a pool size. Raising there would make this check DECIDE
+      # whether the Repo may start, which is exactly what it must not do.
+      log = capture_log(fn -> Grappa.Repo.check_dirty_io_reserve([database: ":memory:"], 10) end)
+
+      refute log =~ "dirty-IO"
+      assert Grappa.Repo.check_dirty_io_reserve([database: ":memory:"], 10) == :ok
+    end
+
     test "the suite's own configuration is in the silent arm" do
       # config/test.exs runs pool_size: 1. If this ever fires, every other
       # test in the suite starts carrying an unrelated warning in its

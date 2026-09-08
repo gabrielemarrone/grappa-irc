@@ -49194,3 +49194,153 @@ reuse whenever `CLAUDE.md` needs to convey a magnitude that lives in config.
 
 _Docs-only. No code, no wire change, no protocol bump. Deploy: **nothing** —
 `CLAUDE.md` is instruction, not runtime._
+<!-- entry #2001-w2-defaults -->
+
+---
+
+## 2026-09-08 — #2001 (w2 slice): the contention ladder, chosen as a ladder
+
+**Provenance.** vjt asked for "default sani per gli altri utenti" and then
+"cambia i timeout, e se possiamo aumentare o render tunabili gli io thread
+aumentiamoli su prod" — the first relayed by the ircbot, the second reaching
+the orchestrator directly in session. The motive is his and it is explicit:
+someone installing the `.deb` must not inherit numbers born in CI.
+
+### The fact that opened it
+
+`config/runtime.exs` said, in its own comment, that production's
+`busy_timeout` of `30_000` *"mirrors `config/test.exs`"*. Production was
+running the test suite's number, and the file admitted it.
+
+Pulling that thread produced the real finding: the four numbers governing a
+contended write are not four defaults, they are a **ladder**, and each rung is
+supposed to hand the fault to the rung above it. Measured, three of the four
+had never been chosen at all:
+
+| rung | was | chosen? | now |
+|---|---|---|---|
+| `busy_timeout` | 30 000 | yes — for `:test` | **300** |
+| `busy_retry.budget_ms` | 1 500 | yes (#336's ~1s window) | 1 500, unchanged |
+| `queue_target` / `queue_interval` | 50 / 2 000 | **no** — DBConnection defaults | **1 500 / 5 000** |
+| `:timeout` | 15 000 | **no** — Ecto's default | 15 000, now **pinned** |
+| `pool_size` | 10 | yes | **5** |
+
+Read top to bottom it was inverted at every rung, and two of the consequences
+were already written down in our own source as defects:
+
+* **The retry engine could not take a second attempt.**
+  `Grappa.Repo.BusyRetry`'s moduledoc said so (#1421): at `30_000` against a
+  `1_500` budget *"the loop makes EXACTLY ONE attempt and the linear backoff
+  below never runs."* We had built a retry ladder and set a timeout that
+  guaranteed it never climbed.
+* **`queue_target: 50` decided message loss.** `ConnectionPool.drop/2` is what
+  raises the `ConnectionError` that `Session.Persistor` reports as a dropped
+  scrollback row — and delivery is downstream of the insert, so a dropped row
+  is a message never delivered either. The threshold that governs that was a
+  library default nobody had looked at.
+
+The cure for the first is deliberately taken from the other side of #1421's
+pricing: **not by growing the budget, but by shrinking the wait the budget has
+to cover.** The caller-visible bound therefore does not move (~1.5s), and the
+engine becomes reachable for the first time. `BusyRetryBudgetReachTest` already
+measured both regimes against a real held write lock; production now runs in
+the arm that test proves works, rather than in a predicted one.
+
+### The invariant that is not a number: `pool_size` < dirty-IO floor
+
+The question vjt's brief forced was whether the pool should be tied to CPU
+cores or to the dirty-IO scheduler count. **Neither.**
+
+Cores have no claim: measured, ERTS does not derive `+SDio` from them — a
+6-CPU prod node reports 10, and the same node booted `+S 16:16` still reports
+10, so the default is FIXED at 10 and not `max(S, 10)`. (`dirty_cpu` does track
+the schedulers, which is the control that makes the reading mean something.)
+
+Tying it to dirty-IO is worse than it sounds, because **that is what we already
+had, by accident**: `pool_size 10 == dirty_io 10`. Every exqlite entry point is
+`ERL_NIF_DIRTY_JOB_IO_BOUND` — reads included — so a writer parked on the file
+lock occupies one of the ten for the whole hold, and at parity the Repo alone
+can occupy all of them. #1715 already documents what queues behind that
+occupancy. An equality is the degenerate case of a coupling, not a design.
+
+So the shape is a **relation with a reserve**, and the elegant part is that the
+thing to stay under is itself hardware-independent: 10 is the floor on every
+substrate we ship (ERTS gives 10; the Docker entrypoint gives `max(nproc, 10)`).
+A constant below it is correct on a 1-core VPS and a 64-core box alike, with no
+`nproc` call. `5` is half.
+
+Because it is a relation and not a number, it is **checked at boot** rather
+than commented: `Grappa.Repo.check_dirty_io_reserve/2` compares the two and
+warns naming both. That is not decoration — `GRAPPA_DIRTY_SCHEDULERS` applies
+its floor of 10 only when UNSET, so an operator who sets it explicitly (which
+`bin/start.sh`'s own comment encourages, calling 10 "wasteful on a 4-core
+host") can invert the relation silently. It warns rather than raises: the
+reserve being gone is the posture production shipped, so raising would refuse
+to boot the deployments this exists to inform.
+
+### The dirty-IO threads: tunable yes, raised by default NO
+
+vjt asked to raise them on prod. **We are declining the raise and keeping the
+tunability**, and the argument is a measurement rather than a preference.
+
+Sampled read-only on the live prod node, `run_queue_lengths_all` over 400
+samples at 50ms: the dirty-IO run queue was non-empty in **1 sample out of
+400**, maximum depth **1**. At steady state the ten threads are nowhere near
+the constraint. What makes them scarce is a holder parked inside the NIF —
+three consecutive holders were observed nailing 3/10 during one episode — so
+`+SDio` is **insurance against head-of-line during a stall, not throughput**.
+And `pool_size 10 → 5` lowers that same pressure on its own, from the cheap
+side: a smaller pool costs nothing, while each extra dirty-IO scheduler is an
+OS thread with its own allocator carriers on machines that may have two cores.
+
+⚠️ Limit of that measurement, stated rather than glossed: it was taken **at
+steady state on a healthy node**. Occupancy DURING a stall remains unmeasured.
+
+Tunability turned out to already exist and to be undocumented: `ERL_ZFLAGS` is
+honoured by erlexec on every release substrate, the jail's rc.d exports every
+`^[A-Z_]` name in its env file, and systemd loads the same file via
+`EnvironmentFile`. So the deliverable was documentation, not machinery — and
+that also resolved the separate lie in the same files, which advertised
+`GRAPPA_MAX_USERS` / `GRAPPA_DIRTY_SCHEDULERS` as knobs on two substrates where
+nothing reads them (they are read only by the two CONTAINER entrypoints). The
+knobs' absence there is deliberate and documented in `docs/OPERATIONS.md`; the
+advertisement was not.
+
+### 🔴 What this is NOT
+
+**It is not a cure for the 31s stalls, and no part of it should be read as
+one.** `busy_timeout` governs who WAITS; the stalls are a single holder's
+POSSESSION (`LockWatch`'s `held_ms` is taken from inside the transaction fun,
+so it measures possession, not queueing). Shortening the wait bounds the blast
+radius and surfaces the failure sooner; it does not shorten one hold by a
+millisecond. #1420's mechanism remains unestablished, five candidates are dead
+there, and this entry adds no sixth.
+
+### What is NOT measured, and should set these numbers one day
+
+The **healthy write-lock hold-time distribution**. It is what should fix
+`busy_timeout`, and neither instrument we own can produce it: `LockWatch`
+reports only holds above its 2 000ms stall threshold, so it sees the tail and
+never the body, and Ecto's per-query telemetry is completion-driven and
+therefore measures the victim rather than the holder. `300` is consequently
+argued from ABOVE (a fraction of the retry budget, so the loop gets four to
+five attempts) and open from BELOW. A slow bulk write — an archive purge, a
+`NickMigration` sweep — is the case to watch. Likewise unmeasured: the healthy
+checkout-delay distribution behind `queue_target`, and read fan-out at any pool
+size (`config/dev.exs`'s #1759c comment already said so, and the former claim
+in `runtime.exs` that "lower than 10 starves cic's fan-out" carried no
+measurement either — it has been retired rather than reworded).
+
+### #340 is honoured, not sidestepped
+
+A timeout change moves when an insert lands, so it owes the #340 answer. It
+**narrows** the exposure: the dominant term today is one attempt bounded by
+`busy_timeout` = 30 000ms, and it becomes a ~1 500ms budget — a 20× smaller
+window against a `Visitors.Reaper` that sweeps every 60s. Structurally, every
+retry is synchronous in the caller's own process, so nothing is deferred,
+spooled or handed off, and the caller's stack holds the FK parent's liveness
+across the whole window. #340 rejected deferral; there is none here.
+
+_Deploy: **COLD** — `config/runtime.exs` is read at boot, and the release lib
+directory is unchanged only for hot-reloadable modules. `BEGIN IMMEDIATE`
+(#524) is untouched and out of scope._

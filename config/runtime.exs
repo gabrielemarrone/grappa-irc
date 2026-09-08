@@ -299,26 +299,141 @@ if config_env() == :prod do
 
   config :grappa, Grappa.Repo,
     database: database_path,
-    # SQLite is single-writer at the file level. `pool_size: 10` is a
-    # READ-concurrency cap — every connection in the pool can serve a
-    # SELECT in parallel under WAL (`journal_mode: :wal` below). Writes
-    # always serialize at the file lock regardless of pool size; the
-    # `busy_timeout` below is what gives them a wait-for-the-writer-
-    # ahead budget. Lower than 10 starves cic's per-(user, network)
-    # query fan-out under multi-tab load; higher would mostly idle.
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # CP24 cluster `post-cr-review` bucket B, persistence/S2: SQLite's
-    # default `busy_timeout` is ~2s. With `pool_size: 10` + WAL +
-    # single-writer file lock, transient contention from concurrent
-    # writes (Bootstrap spawning N sessions, channel-mode batches,
-    # last_joined_channels writes) cascades into `database is locked`
-    # exceptions before the writer ahead releases. The CP23 S4 e2e
-    # flake (`cp15-b6-kicked` + `m9-cicchetto-part-x-click` retries on
-    # `Database busy`) was a direct symptom. 30_000ms mirrors
-    # `config/test.exs` which has carried this value since the Sandbox
-    # cascading-busy investigation. Read concurrency stays uncapped;
-    # this only delays the write-side raise, not block reads.
-    busy_timeout: 30_000,
+    # ── The contention ladder ────────────────────────────────────────
+    #
+    # Four numbers govern one contended write, and they are NOT four
+    # independent defaults: each layer is supposed to hand the fault to
+    # the layer above it, so they only make sense read together.
+    #
+    #     busy_timeout          300ms   in-NIF wait for the file lock
+    #     busy_retry budget   1_500ms   BEAM-side ride-out (config/config.exs)
+    #     queue_target        1_500ms   pool queue tolerance (CoDel drops at 2x)
+    #     timeout            15_000ms   the caller's own deadline
+    #
+    # Before this was chosen as a ladder it ran 30_000 / 1_500 / 50 /
+    # 15_000 — inverted at every rung, and only two of the four had ever
+    # been chosen at all. What that cost is recorded in DESIGN_NOTES;
+    # the short version is that the app-level retry engine could never
+    # take a second attempt, and the pool shed requests (each one a lost
+    # message) a hundred times sooner than the ride-out above it needed.
+    #
+    # SQLite is single-writer at the file level, so `pool_size` buys READ
+    # concurrency under WAL (`journal_mode: :wal` below) and nothing on
+    # the write side — writes serialize at the file lock whatever the
+    # pool size is.
+    #
+    # 5 is a TUNING CHOICE argued between two bounds, not a measurement.
+    # UPPER: every exqlite call runs inside a dirty-IO NIF, so the pool
+    # is also the number of dirty-IO schedulers the Repo alone can hold —
+    # and at the old `10` that equalled the ERTS default dirty-IO count
+    # exactly, i.e. a saturated pool could occupy every one of them and
+    # stall work with no database in it at all (#1715). That ceiling is
+    # NOT hardware-derived: ERTS defaults `+SDio` to 10 whatever the core
+    # count (measured: `+S 16:16` still answers 10), and the substrates
+    # that exec the release directly set no `+SDio`, so 10 is the floor
+    # everywhere and a constant below it needs no `nproc`. 5 leaves half.
+    # LOWER: the read fan-out has to fit. NOT MEASURED at any pool size —
+    # `config/dev.exs`'s #1759c comment says so outright, and the former
+    # claim here that "lower than 10 starves cic's fan-out" carried no
+    # measurement either. What IS exercised is 5: the whole e2e stack
+    # runs `MIX_ENV: dev`, whose pool has been 5 all along.
+    # `Grappa.Repo.check_dirty_io_reserve/2` reports at boot if either
+    # side of that relation moves — including via GRAPPA_DIRTY_SCHEDULERS.
+    #
+    # ⚠️ The reserve is a STALL-TIME argument, not a throughput one, and
+    # the difference is measured. At steady state the dirty-IO run queue
+    # on prod is non-empty in 1 sample out of 400 at 50ms, maximum depth
+    # 1 — the ten threads are nowhere near the bottleneck when the node
+    # is healthy. What makes them scarce is a holder PARKED inside the
+    # NIF: every exqlite entry point is `ERL_NIF_DIRTY_JOB_IO_BOUND`,
+    # reads included, so a stalled writer occupies one of the ten for the
+    # whole hold, and three consecutive holders were observed nailing
+    # 3/10 during one prod episode. Occupancy DURING a stall is still
+    # unmeasured. So this rung buys headroom for the bad minute, and
+    # claims nothing about the good hour.
+    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5"),
+    # The in-NIF wait, and it is deliberately SHORT.
+    #
+    # exqlite's busy handler sleeps INSIDE a `ERL_NIF_DIRTY_JOB_IO_BOUND`
+    # NIF, so every millisecond of `busy_timeout` is a dirty-IO scheduler
+    # held by a process doing nothing (#1715 measures what queues behind
+    # that: every `persistent_term` write and every module load in the
+    # VM, for the length of the wait). The cure is not a longer wait, it
+    # is to wait in the BEAM instead — `Grappa.Repo.BusyRetry`, which
+    # already exists and was unreachable at the old value.
+    #
+    # 300ms is a TUNING CHOICE argued between two bounds.
+    # UPPER: it must be a fraction of the 1_500ms retry budget or the
+    # loop degenerates to a single attempt — `BusyRetry`'s own moduledoc
+    # names that as a documented defect (#1421: at 30_000 the first
+    # attempt has already overshot the deadline when it returns, so the
+    # linear backoff never runs). With `backoff_ms: 25` (x attempt,
+    # capped 200) a per-attempt cost of ~300ms yields four to five
+    # attempts inside the unchanged budget, so the caller-visible wait
+    # stays ~1.5s and no other rung has to move.
+    # LOWER: it must exceed a HEALTHY hold or ordinary writes retry for
+    # nothing. That distribution is NOT MEASURED, and neither instrument
+    # we have can supply it — `LockWatch` reports only holds above its
+    # 2_000ms stall threshold (it sees the tail, never the body) and
+    # Ecto's per-query telemetry is completion-driven, so it measures the
+    # victim rather than the holder. This bound is therefore argued from
+    # above and open from below; a slow bulk write (an archive purge, a
+    # `NickMigration` sweep) is the case to watch.
+    #
+    # This also SHRINKS the window in which an insert can outlive its FK
+    # parent — the #340 rejection — from one 30_000ms attempt to a
+    # ~1_500ms budget, because every retry is synchronous in the caller's
+    # own process. Nothing here defers, spools or hands off a write.
+    #
+    # 🔴 WHAT THIS IS NOT: a cure for the 31s stalls. `busy_timeout`
+    # governs who WAITS; the stalls are a single holder's POSSESSION
+    # (`LockWatch`'s `held_ms` is measured from inside the transaction
+    # fun, so it is possession and not queueing). Shortening the wait
+    # bounds the BLAST RADIUS and makes the failure visible sooner; it
+    # does not shorten one hold by a millisecond, and #1420's mechanism
+    # remains unestablished. Do not read this rung as a fix for it.
+    busy_timeout: 300,
+    # The caller's own deadline, PINNED at the value that was already in
+    # force. Ecto's default is 15_000 (`Ecto.Repo.Supervisor`'s
+    # `@defaults`, merged in before `Grappa.Repo.init/2` ever sees the
+    # config), so this line changes nothing today — same argument as
+    # `synchronous` / `foreign_keys` below (REV-B/C3): a default that is
+    # right by accident is one dep major-version flip from moving under
+    # prod with no diff. It matters more here because this number is half
+    # of a PAIR: the DB-side wait was chosen and the caller-side deadline
+    # it should have been chosen against never was, which is how they
+    # came to sit at 30_000 against 15_000, the caller giving up first.
+    # When it fires DBConnection DESTROYS the connection rather than
+    # failing the call (`ConnectionPool.handle_info({:timeout, …})` →
+    # `Holder.handle_disconnect/2`), so it is the outer bound of the
+    # ladder and nothing below it should ever reach it.
+    timeout: 15_000,
+    # The pool queue's CoDel tolerance. Unset, DBConnection defaults to
+    # 50ms / 2_000ms — never chosen here, and `queue_target` is not a
+    # latency knob: it is the threshold that turns burst latency into
+    # DROPPED REQUESTS (`ConnectionPool.drop/2` raises the
+    # `DBConnection.ConnectionError` that `Session.Persistor` reports as
+    # `scrollback row dropped: persistence unavailable` — a message that
+    # is neither stored nor delivered). At 50ms the queue began shedding
+    # after ~100ms of sustained delay, an order of magnitude before the
+    # 1_500ms ride-out above it had finished trying.
+    #
+    # The constraint that sets it: the queue must not drop a request
+    # before the retry ladder above it has had its turn. So it is the
+    # retry budget, and CoDel's doubling puts the first drop at ~3s of
+    # SUSTAINED saturation — long enough that the ladder completes,
+    # short enough that CoDel still does its job of refusing work before
+    # it reaches the DB. `queue_interval` is the observation window over
+    # which sustained slowness doubles the target; at 5_000 it spans
+    # several full ladders before adapting, where the 2_000 default was
+    # barely longer than one. `config/test.exs` already had to choose
+    # both for CI (5_000 / 30_000) — the defaults were found inadequate
+    # once already, in the only env where anyone had looked.
+    #
+    # NOT MEASURED: the healthy checkout-delay distribution. Both bounds
+    # here are argued from the ladder, not from a reading.
+    queue_target: 1_500,
+    queue_interval: 5_000,
     journal_mode: :wal,
     cache_size: -64_000,
     temp_store: :memory,

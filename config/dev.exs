@@ -26,17 +26,26 @@ config :grappa, Grappa.Repo,
   # could only have been answered at HALF the production pool and then
   # extrapolated, which is the one move the investigation is not allowed.
   #
-  # The default is `5`, so an unset environment is byte-for-byte the
-  # behaviour that shipped before this line. What it buys is the ability to
-  # take the SAME reading at two pool sizes: if the saturation point tracks
-  # the pool, the mechanism is the pool; if it does not, the hypothesis is
-  # dead and that is a result. A lever that only ever reads one value cannot
-  # tell those two apart.
+  # The default is `5`, and the lever is still the point: it buys the
+  # ability to take the SAME reading at two pool sizes, which is what
+  # tells "the mechanism is the pool" apart from "the hypothesis is dead".
+  #
+  # 🔴 What has CHANGED since #1759c wrote the paragraph above: prod no
+  # longer runs `10`, it runs this same `5` (see `config/runtime.exs` for
+  # the dirty-IO reserve argument). So the "HALF the production pool"
+  # objection no longer applies — the e2e stack now exercises the
+  # production pool size, not half of it. Read that paragraph as history.
   pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5"),
-  # CP24 cluster `post-cr-review` bucket B, persistence/S2: mirror prod's
-  # 30s busy_timeout so iex sessions + integration scripts hit the same
-  # "database is locked" cushion as prod. Default ~2s otherwise.
-  busy_timeout: 30_000,
+  # Mirror prod's contention ladder — the WHOLE ladder, not one rung of
+  # it — so iex sessions, integration scripts and the e2e stack (which
+  # runs `MIX_ENV: dev`) hit the timings prod hits. See the long comment
+  # in `config/runtime.exs`: the four numbers only make sense together,
+  # and mirroring `busy_timeout` alone is how dev came to sit at 30_000
+  # against an inherited 50ms queue target.
+  busy_timeout: 300,
+  timeout: 15_000,
+  queue_target: 1_500,
+  queue_interval: 5_000,
   # REV-B / C3 (2026-05-22 codebase review): pin PRAGMAs in lockstep
   # with config/runtime.exs and config/test.exs. See runtime.exs for
   # the full rationale — dep major-version default flip would silently

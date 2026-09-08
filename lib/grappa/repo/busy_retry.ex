@@ -63,23 +63,31 @@ defmodule Grappa.Repo.BusyRetry do
       `config/config.exs` sizes it against "the ~1s pool-saturation window the
       #336 incident measured".
     * a write-lock `busy_locked` fault raises only once SQLite's
-      `busy_timeout` has expired — 30_000ms in every env, 20x the budget. The
-      first attempt has therefore already overshot the deadline by the time it
-      returns, so the loop makes EXACTLY ONE attempt and the linear backoff
-      below never runs.
-    * an `:interrupted` fault (#1657) shares that second regime, and saying
-      so is the point. It is raised when DBConnection's own `:timeout`
-      (15_000ms by default, 10x the budget) cancels the statement, so the
-      first attempt has ALREADY overshot by the time it returns and the loop
-      makes exactly one attempt here too. 🔴 So do not read #1657's
-      reclassification as "the row now gets retried" — in the live topology
-      it does not. What changed is that a pool-induced cancellation stops
-      being reported as CORRUPTION: it degrades to `{:error, :db_unavailable}`
-      (a 503 on a stateless web write, an honest drop in `Scrollback`)
-      instead of re-raising as a 500, and it is countable as its own state.
-      Making the budget actually REACH this regime is the same
-      re-dimensioning question #1421 prices, and it is not this module's to
-      take unilaterally.
+      `busy_timeout` has expired. **This regime CHANGED when the contention
+      ladder was chosen as a ladder**: `busy_timeout` was `30_000` in every
+      env — 20x the budget, so the first attempt had already overshot the
+      deadline by the time it returned and the loop made EXACTLY ONE attempt
+      with the linear backoff below never running. It is now `300` in prod
+      and dev (`config/runtime.exs`, `config/dev.exs`), a fifth of the
+      budget, which puts this topology INSIDE the budget for the first time:
+      four to five attempts, backoff included. That is not a prediction —
+      `Grappa.Repo.BusyRetryBudgetReachTest` measures both regimes against a
+      real held write lock, and the below-budget arm is the one prod now
+      runs in.
+    * an `:interrupted` fault (#1657) does NOT follow it, and saying so is
+      the point. It is raised when DBConnection's own `:timeout` (15_000ms,
+      10x the budget) cancels the statement, so the first attempt has
+      ALREADY overshot by the time it returns and the loop makes exactly one
+      attempt here. 🔴 So do not read #1657's reclassification as "the row
+      now gets retried" — in this topology it does not. What changed is that
+      a pool-induced cancellation stops being reported as CORRUPTION: it
+      degrades to `{:error, :db_unavailable}` (a 503 on a stateless web
+      write, an honest drop in `Scrollback`) instead of re-raising as a 500,
+      and it is countable as its own state. That is BY DESIGN in the ladder
+      rather than an oversight: `:timeout` is the ladder's OUTER bound, the
+      rung nothing below it should ever reach, so a fault that only appears
+      when it fires is by construction past the point where riding it out
+      makes sense.
 
   A third topology WOULD fall inside the budget — a deferred read->write
   upgrade raises an immediate `SQLITE_BUSY` that `busy_timeout` does not cover
@@ -87,11 +95,13 @@ defmodule Grappa.Repo.BusyRetry do
   `Grappa.Repo.immediate_transaction/1`, statically enforced by
   `Grappa.Repo.TransactionModeGateTest` (#1374).
 
-  The second regime is a DOCUMENTED LIMITATION rather than a wiring slip: one
-  number was dimensioned for one topology and later reused for another.
-  Re-dimensioning it changes retry behaviour under contention — #1420's
-  contested axis, and not this module's decision to take. What IS this
-  module's to take is to stop describing a bound it does not have, which is
+  The `busy_locked` regime WAS a documented limitation of exactly that shape —
+  one number dimensioned for one topology and later reused for another — and
+  the re-dimensioning #1421 priced has now been taken, from the other side:
+  not by growing the budget, but by shrinking the wait the budget has to
+  cover, so the caller-visible bound is unchanged while the engine becomes
+  reachable. The `:interrupted` regime is unchanged and deliberate (above).
+  Either way this module still describes only the bound it HAS, which is
   why the terminal line below reports the wait it OBSERVED and never the
   budget it was handed. Measured in
   `Grappa.Repo.BusyRetryBudgetReachTest`; the options are priced in #1421.

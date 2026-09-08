@@ -53,6 +53,35 @@ const pdf = {
 };
 const mp4 = { name: "clip.mp4", mimeType: "video/mp4", buffer: fixture("tiny.mp4") };
 
+// A 0.1 s silent 16-bit PCM mono WAV, built here rather than committed as a
+// binary: the header is 44 bytes of documented layout and the payload is
+// zeroes, so a reader can check it against the spec instead of trusting an
+// opaque blob. Silence is enough — the audio preview is a PLAYER, not a
+// waveform, so what is asserted is that the element exists and the engine
+// accepts the source.
+function silentWav(): Buffer {
+  const rate = 8000;
+  const samples = rate / 10;
+  const dataBytes = samples * 2;
+  const buf = Buffer.alloc(44 + dataBytes);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(36 + dataBytes, 4);
+  buf.write("WAVE", 8);
+  buf.write("fmt ", 12);
+  buf.writeUInt32LE(16, 16); // PCM header size
+  buf.writeUInt16LE(1, 20); // format: PCM
+  buf.writeUInt16LE(1, 22); // channels: mono
+  buf.writeUInt32LE(rate, 24);
+  buf.writeUInt32LE(rate * 2, 28); // byte rate
+  buf.writeUInt16LE(2, 32); // block align
+  buf.writeUInt16LE(16, 34); // bits per sample
+  buf.write("data", 36);
+  buf.writeUInt32LE(dataBytes, 40);
+  return buf;
+}
+
+const wav = { name: "tone.wav", mimeType: "audio/wav", buffer: silentWav() };
+
 // The operator this issue is about: opted INTO the confirm (it is off by
 // default since #1883) and past the one-shot privacy notice, so the confirm is
 // the only thing on screen.
@@ -68,11 +97,11 @@ async function asConfirmingOperator(page: Page): Promise<void> {
 test("#1964 — each staged file previews as what it actually is", async ({ page }) => {
   await asConfirmingOperator(page);
 
-  await page.locator("input[data-file-picker]").setInputFiles([png, mp4, txt, pdf]);
+  await page.locator("input[data-file-picker]").setInputFiles([png, mp4, wav, txt, pdf]);
 
   const confirm = page.getByTestId("confirm-modal");
   await expect(confirm).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByTestId("confirm-modal-attachment")).toHaveCount(4);
+  await expect(page.getByTestId("confirm-modal-attachment")).toHaveCount(5);
 
   // ── image: unchanged from #1883, and it must DECODE ─────────────────────
   const thumb = page.getByTestId("confirm-modal-attachment-thumb");
@@ -107,7 +136,7 @@ test("#1964 — each staged file previews as what it actually is", async ({ page
   await expect(source).not.toContainText("epsilon five");
 
   // ── pdf: still nothing, and deliberately — cic has no PDF renderer ──────
-  // One preview element per renderable row and no more: 4 rows, 4 previews,
+  // One preview element per renderable row and no more: 5 rows, 4 previews,
   // and the PDF is the one holding the placeholder.
   await expect(page.getByTestId("confirm-modal-attachment-video")).toHaveCount(1);
   await expect(page.getByTestId("confirm-modal-attachment-audio")).toHaveCount(1);

@@ -174,6 +174,7 @@ export function confirmLeaveChannel(networkSlug: string, channelName: string): v
     onConfirm: () => closeChannelWindow(networkSlug, channelName),
     alternative: null,
     attachments: null,
+    defaultButton: "cancel",
   });
 }
 
@@ -188,5 +189,6 @@ export function confirmDisconnectNetwork(networkSlug: string): void {
     onConfirm: () => disconnectNetwork(networkSlug),
     alternative: null,
     attachments: null,
+    defaultButton: "cancel",
   });
 }

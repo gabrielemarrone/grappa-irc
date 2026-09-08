@@ -235,6 +235,7 @@ function routeGuardedText(
           onSelect: () => uploadPastedText(text, networkSlug, channelName),
         },
         attachments: null,
+        defaultButton: "cancel",
       });
       return;
     case "over-limit":
@@ -250,6 +251,7 @@ function routeGuardedText(
         // uploading IS the affirmative and there is nothing else to offer.
         alternative: null,
         attachments: null,
+        defaultButton: "cancel",
       });
       return;
     case "insert":

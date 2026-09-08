@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import type { MediaKind } from "./mediaLink";
 
 // #195 — generic confirm-dialog primitive. Replaces the #172 hold-to-close
 // gesture (removed) for destructive window actions: leaving a channel and
@@ -28,11 +29,13 @@ import { createSignal } from "solid-js";
 // 1883 added an OPTIONAL attachment list, for the same reason and on the same
 // terms: a question about FILES cannot be asked in a sentence. "Send this?" is
 // answerable only if the operator can see WHICH file, and a mis-tapped gallery
-// thumbnail is indistinguishable from the right one by name alone. The store
-// stays domain-agnostic the same way `alternative` does — it carries a
-// pre-formatted row (label, detail, an optional blob to render) and a removal
-// closure, and knows nothing about uploads, MIME categories or byte
-// formatting. The MODAL owns the object-URL lifecycle for the blob, because
+// thumbnail is indistinguishable from the right one by name alone. #1964
+// widened that row from an image-only thumbnail to a preview of whatever the
+// file actually is, and gave the request a `defaultButton` — see both fields
+// below for why each was necessary. The store stays domain-agnostic the same
+// way `alternative` does — it carries a pre-formatted row (label, detail, an
+// optional blob and the kind to render it as) and a removal closure, and knows
+// nothing about uploads, MIME categories or byte formatting. The MODAL owns the object-URL lifecycle for the blob, because
 // the row's own mount/unmount is the only thing that knows when the URL stops
 // being needed.
 
@@ -44,9 +47,26 @@ export type ConfirmAlternative = {
   onSelect: () => void;
 };
 
+// #1964 — what to render for a row, and as what.
+//
+// The KIND is the media viewer's own `MediaKind` and not a union private to
+// this store: a staged local file poses the same question a clicked scrollback
+// link does — what element can show this — so the confirm row answers it with
+// the same four words and reuses the same element shapes (an `<img>`, a muted
+// `<video>`, an `<audio controls>`, a `<pre>` of lines). The caller decides the
+// kind (`attachmentPreview.previewKindOf`); the modal owns the object URL.
+export type ConfirmPreview = {
+  kind: MediaKind;
+  // A Blob rather than a URL string so the modal can own
+  // `createObjectURL`/`revokeObjectURL` around the row's lifetime; a
+  // caller-minted URL would have to be revoked from a dismiss path this store
+  // deliberately does not expose.
+  blob: Blob;
+};
+
 // One row of the attachment list. Everything domain-shaped (the filename, the
-// byte spelling, whether this thing can be shown as a picture) is decided by
-// the CALLER and arrives here already resolved.
+// byte spelling, what this thing can be shown as) is decided by the CALLER and
+// arrives here already resolved.
 export type ConfirmAttachment = {
   // Stable identity for the row and its remove button. Filenames are NOT
   // unique — a gallery multi-select routinely yields two `IMG_0001.png`.
@@ -57,11 +77,11 @@ export type ConfirmAttachment = {
   // raw number here would put a spelling decision in a store that has no
   // business making one.
   detail: string;
-  // Non-null → render it as a thumbnail. A Blob rather than a URL string so
-  // the modal can own `createObjectURL`/`revokeObjectURL` around the row's
-  // lifetime; a caller-minted URL would have to be revoked from a dismiss path
-  // this store deliberately does not expose.
-  thumbnail: Blob | null;
+  // Non-null → render it, per its kind. `null` means nothing renderable (a
+  // PDF, a spreadsheet) and the row keeps its neutral placeholder — #1964
+  // widened this from an image-only thumbnail, it did not invent a renderer
+  // for every type.
+  preview: ConfirmPreview | null;
 };
 
 export type ConfirmAttachments = {
@@ -97,6 +117,20 @@ export type ConfirmRequest = {
   // Same explicit-`null` contract as `alternative`, and for the same reason:
   // a text-only dialog says so in its own call site.
   attachments: ConfirmAttachments | null;
+  // #1964 — which button takes focus on open, i.e. what a bare Enter answers.
+  // Explicit on every call site, like the two fields above: which key sends
+  // and which key discards must be readable at the call site, not by opening
+  // the modal.
+  //
+  // #195 made Cancel the universal default ("a stray Enter dismisses, never
+  // leaves"), and that still holds for every dialog here whose affirmative
+  // leaves a channel, drops a network, floods a room or deletes a theme. The
+  // upload confirm is the one that reads the other way (Gabriele's ruling,
+  // 2026-09-08): the operator has already picked, dropped or pasted the file,
+  // the dialog is OPT-IN and was switched on to LOOK at what is going out, and
+  // Enter — the key you press after reading — threw the staged files away.
+  // Cancel is not the safe answer there; it is the one that loses the work.
+  defaultButton: "cancel" | "confirm";
 };
 
 const [confirmRequest, setConfirmRequest] = createSignal<ConfirmRequest | null>(null);

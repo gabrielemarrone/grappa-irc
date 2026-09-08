@@ -135,5 +135,6 @@ export function confirmJoinChannel(networkSlug: string, rawChannel: string): voi
     onConfirm: () => void performJoin(networkSlug, rawChannel),
     alternative: null,
     attachments: null,
+    defaultButton: "cancel",
   });
 }

@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { previewKindOf } from "./attachmentPreview";
 import type { ChannelKey } from "./channelKey";
 import { type ConfirmAttachment, dismissConfirm, requestConfirm } from "./confirmDialog";
 import { formatBytes } from "./formatBytes";
@@ -697,17 +698,27 @@ let nextAttachmentId = 0;
 
 type StagedFile = { id: string; file: File };
 
-// A picture is the only preview worth showing: for every other category the
-// bytes say nothing a human can check at a glance, and the name is what
-// distinguishes `contract-final.pdf` from `contract-draft.pdf`. The blob is
-// handed over raw — ConfirmModal mints and revokes the object URL, because the
-// row's unmount is the only event that knows when it stops being needed.
+// #1964 — the preview is of the file's ACTUAL type.
+//
+// This used to answer a thumbnail for images and nothing for anything else, on
+// the argument that "a picture is the only preview worth showing: for every
+// other category the bytes say nothing a human can check at a glance, and the
+// name is what distinguishes `contract-final.pdf` from `contract-draft.pdf`".
+// That reasoning assumes a name the OPERATOR chose. The paste path (#816)
+// names every file `paste.txt`, in every window, so on the one door where the
+// operator cannot possibly know what is inside, the dialog showed a byte count
+// and an empty box. `previewKindOf` decides what each staged file can be shown
+// as; a file with no renderer (PDF, office documents) still answers null and
+// keeps the placeholder. The blob is handed over raw — ConfirmModal mints and
+// revokes the object URL, because the row's unmount is the only event that
+// knows when it stops being needed.
 function toAttachment(staged: StagedFile): ConfirmAttachment {
+  const kind = previewKindOf(staged.file.type);
   return {
     id: staged.id,
     label: staged.file.name,
     detail: formatBytes(staged.file.size),
-    thumbnail: categoryOf(staged.file.type) === "image" ? staged.file : null,
+    preview: kind === null ? null : { kind, blob: staged.file },
   };
 }
 
@@ -798,6 +809,11 @@ export function triggerUploads(
       // No third door: there is no other route to "post this file here". Cancel
       // and Send are the whole question.
       alternative: null,
+      // #1964 — the one dialog in cic where Enter means yes. The files are
+      // already staged by a gesture the operator made, and this confirm is
+      // opt-in: it exists to be READ, and the key you press after reading was
+      // discarding the batch. See `ConfirmRequest.defaultButton`.
+      defaultButton: "confirm",
       attachments: {
         items: (): ConfirmAttachment[] => staged().map(toAttachment),
         onRemove: (id: string): void => {

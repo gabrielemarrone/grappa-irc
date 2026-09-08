@@ -229,6 +229,7 @@ const ThemeGallery: Component<Props> = (props) => {
       onConfirm: () => void remove(theme),
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
 
   // #333 — split the merged list into "your themes" (owned copies/creates)

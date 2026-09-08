@@ -61,13 +61,19 @@ defmodule Grappa.Config.SubstrateBeamKnobHonestyTest do
 
   defp read!(path), do: File.read!(Path.expand(path, File.cwd!()))
 
+  # Every line, stripped of indentation and of a leading comment marker, so
+  # a commented knob reads the same as a live one — the whole point being
+  # that a commented assignment exists to be uncommented.
+  defp normalized_lines(source) do
+    source
+    |> String.split("\n")
+    |> Enum.map(fn line -> line |> String.trim() |> String.trim_leading("#") |> String.trim() end)
+  end
+
   # `FOO=`, with or without a leading comment marker and whitespace.
   defp assignment_lines(source, var) do
     source
-    |> String.split("\n")
-    |> Enum.map(&String.trim/1)
-    |> Enum.map(&String.trim_leading(&1, "#"))
-    |> Enum.map(&String.trim/1)
+    |> normalized_lines()
     |> Enum.filter(&String.starts_with?(&1, var <> "="))
   end
 
@@ -163,12 +169,13 @@ defmodule Grappa.Config.SubstrateBeamKnobHonestyTest do
       ]
 
       for path <- surfaces do
+        # NOT `assignment_lines/2`: compose.yaml spells it `POOL_SIZE: ${…}`,
+        # a YAML key rather than a shell assignment, and it is one of the
+        # surfaces that must agree.
         stated =
-          read!(path)
-          |> String.split("\n")
-          |> Enum.map(&String.trim/1)
-          |> Enum.map(&String.trim_leading(&1, "#"))
-          |> Enum.map(&String.trim/1)
+          path
+          |> read!()
+          |> normalized_lines()
           |> Enum.filter(&String.starts_with?(&1, "POOL_SIZE"))
 
         assert stated != [], "#{path}: POOL_SIZE vanished — matcher broken or surface gone"

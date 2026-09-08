@@ -15,9 +15,9 @@ defmodule Grappa.Repo do
     otp_app: :grappa,
     adapter: Ecto.Adapters.SQLite3
 
-  require Logger
-
   alias Grappa.Repo.LockWatch
+
+  require Logger
 
   # #506 — pre-switch the database to WAL on a SINGLE connection before the pool
   # (or `mix ecto.migrate`'s ≥2 Ecto.Migrator connections) open.

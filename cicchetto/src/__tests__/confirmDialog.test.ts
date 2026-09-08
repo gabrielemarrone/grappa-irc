@@ -24,6 +24,7 @@ describe("confirmDialog store (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     expect(confirmRequest()).toMatchObject({ title: "t", body: "b", confirmLabel: "Yes" });
     expect(onConfirm).not.toHaveBeenCalled();
@@ -38,6 +39,7 @@ describe("confirmDialog store (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     acceptConfirm();
     expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -53,6 +55,7 @@ describe("confirmDialog store (#195)", () => {
       onConfirm,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     dismissConfirm();
     expect(onConfirm).not.toHaveBeenCalled();
@@ -74,6 +77,7 @@ describe("confirmDialog store (#195)", () => {
       onConfirm: first,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     requestConfirm({
       title: "2",
@@ -82,6 +86,7 @@ describe("confirmDialog store (#195)", () => {
       onConfirm: second,
       alternative: null,
       attachments: null,
+      defaultButton: "cancel",
     });
     expect(confirmRequest()?.title).toBe("2");
     acceptConfirm();
@@ -108,6 +113,7 @@ describe("confirmDialog store (#195)", () => {
         onConfirm,
         alternative: alt(onSelect),
         attachments: null,
+        defaultButton: "cancel",
       });
       chooseAlternative();
       expect(onSelect).toHaveBeenCalledTimes(1);
@@ -126,6 +132,7 @@ describe("confirmDialog store (#195)", () => {
         onConfirm,
         alternative: alt(onSelect),
         attachments: null,
+        defaultButton: "cancel",
       });
       acceptConfirm();
       expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -142,6 +149,7 @@ describe("confirmDialog store (#195)", () => {
         onConfirm,
         alternative: alt(onSelect),
         attachments: null,
+        defaultButton: "cancel",
       });
       dismissConfirm();
       expect(onConfirm).not.toHaveBeenCalled();
@@ -158,6 +166,7 @@ describe("confirmDialog store (#195)", () => {
         onConfirm,
         alternative: null,
         attachments: null,
+        defaultButton: "cancel",
       });
       expect(() => chooseAlternative()).not.toThrow();
       expect(onConfirm).not.toHaveBeenCalled();

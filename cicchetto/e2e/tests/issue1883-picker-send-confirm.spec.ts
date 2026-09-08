@@ -120,11 +120,13 @@ test("1883 — a removed file is not sent; the rest of the batch is", async ({ p
   await asReturningOperator(page);
 
   // Two files, one image and one document, so the row rendering is exercised
-  // on BOTH shapes: a thumbnail for the picture, name + size for the text.
+  // on BOTH shapes: a thumbnail for the picture, and (since #1964) the first
+  // lines for the text. What this spec pins is the REMOVAL, so it asserts only
+  // the thumbnail count; the per-kind previews are #1964's own spec.
   await page.locator("input[data-file-picker]").setInputFiles([png("keep.png"), txt("drop.txt")]);
 
   await expect(page.getByTestId("confirm-modal-attachment")).toHaveCount(2);
-  // The non-image row carries no picture — it is named and sized instead.
+  // The non-image row carries no PICTURE — one thumbnail, for the png.
   await expect(page.getByTestId("confirm-modal-attachment-thumb")).toHaveCount(1);
   await expect(page.getByTestId("confirm-modal-attachments")).toContainText("drop.txt");
 

@@ -236,7 +236,8 @@ defmodule Grappa.UserSettings do
           time_format: String.t(),
           colored_nicklist: boolean(),
           presence_filter: %{String.t() => String.t()},
-          show_bottom_bar: boolean()
+          show_bottom_bar: boolean(),
+          strip_formatting: boolean()
         }
 
   @notification_prefs_key "notification_prefs"
@@ -1571,13 +1572,21 @@ defmodule Grappa.UserSettings do
   @doc """
   Default display preferences applied when a subject has no row OR the
   `"display_prefs"` key is absent: `"hms"` timestamps, monochrome nicklist,
-  an empty presence-filter map (every channel follows the size default), and
-  the mobile window bar SHOWN (#1766 is an opt-out, never a default change).
+  an empty presence-filter map (every channel follows the size default),
+  the mobile window bar SHOWN (#1766 is an opt-out, never a default change),
+  and mIRC formatting RENDERED (#2029 is an opt-in: colours keep working as
+  they do today until a reader asks for them to stop).
   """
   @dialyzer {:nowarn_function, default_display_prefs: 0}
   @spec default_display_prefs() :: display_prefs()
   def default_display_prefs do
-    %{time_format: "hms", colored_nicklist: false, presence_filter: %{}, show_bottom_bar: true}
+    %{
+      time_format: "hms",
+      colored_nicklist: false,
+      presence_filter: %{},
+      show_bottom_bar: true,
+      strip_formatting: false
+    }
   end
 
   @doc """
@@ -1634,9 +1643,10 @@ defmodule Grappa.UserSettings do
 
     * `time_format` ∈ #{inspect(@display_time_formats)}.
     * `colored_nicklist` is a boolean.
-    * `show_bottom_bar` is a boolean IF PRESENT; an absent key takes the
-      default (#1766). Every other key 422s when missing, and that asymmetry
-      is deliberate — see `fetch_optional_display_bool/3`.
+    * `show_bottom_bar` (#1766) and `strip_formatting` (#2029) are booleans
+      IF PRESENT; an absent key takes the default. The two keys added since
+      the shape first shipped are exactly the two that tolerate absence, and
+      that asymmetry is deliberate — see `fetch_optional_display_bool/3`.
     * `presence_filter` is a `%{channel_key => "show" | "hide"}` map. Any
       other value (a boolean, a third state) is REJECTED — the tri-state's
       unset is the ABSENCE of a key, never a stored value, so the server
@@ -2268,7 +2278,8 @@ defmodule Grappa.UserSettings do
       time_format: read_display_time_format(stored),
       colored_nicklist: read_display_bool(stored, :colored_nicklist, false),
       presence_filter: read_presence_filter(stored),
-      show_bottom_bar: read_display_bool(stored, :show_bottom_bar, true)
+      show_bottom_bar: read_display_bool(stored, :show_bottom_bar, true),
+      strip_formatting: read_display_bool(stored, :strip_formatting, false)
     }
   end
 
@@ -2304,13 +2315,15 @@ defmodule Grappa.UserSettings do
     with {:ok, tf} <- fetch_display_time_format(prefs),
          {:ok, cn} <- fetch_display_bool(prefs, :colored_nicklist),
          {:ok, pf} <- fetch_presence_filter(prefs),
-         {:ok, sbb} <- fetch_optional_display_bool(prefs, :show_bottom_bar, true) do
+         {:ok, sbb} <- fetch_optional_display_bool(prefs, :show_bottom_bar, true),
+         {:ok, sf} <- fetch_optional_display_bool(prefs, :strip_formatting, false) do
       {:ok,
        %{
          "time_format" => tf,
          "colored_nicklist" => cn,
          "presence_filter" => pf,
-         "show_bottom_bar" => sbb
+         "show_bottom_bar" => sbb,
+         "strip_formatting" => sf
        }}
     else
       {:error, message} -> {:error, display_prefs_changeset_error(message, subject)}
@@ -2348,6 +2361,11 @@ defmodule Grappa.UserSettings do
   # documented full-replace path into a per-key read-modify-write that the
   # NEXT added key would have to remember too. The window is one bundle
   # reload wide and it self-heals; the drift would not.
+  #
+  # #2029 IS that next key, and its arrival is what turns the paragraph above
+  # from a prediction into a rule: every key added after the shape shipped
+  # enters through here, and a new one that reaches for `fetch_display_bool/2`
+  # instead would 422 every PUT from every bundle that predates it.
   defp fetch_optional_display_bool(prefs, key, default) when is_atom(key) do
     if display_has_key?(prefs, key) do
       fetch_display_bool(prefs, key)

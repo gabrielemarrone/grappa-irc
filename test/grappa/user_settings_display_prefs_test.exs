@@ -5,9 +5,9 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
   account converges its UI across devices (report: desktop toggle didn't
   reach the iOS PWA because the prefs were localStorage-only).
 
-  The four prefs: `time_format` (`"hms" | "hm"`, #217), `colored_nicklist`
-  (boolean, #443), `presence_filter` (a per-channel tri-state map, #222), and
-  `show_bottom_bar` (boolean, #1766).
+  The five prefs: `time_format` (`"hms" | "hm"`, #217), `colored_nicklist`
+  (boolean, #443), `presence_filter` (a per-channel tri-state map, #222),
+  `show_bottom_bar` (boolean, #1766), and `strip_formatting` (boolean, 2029).
 
   ## The tri-state invariant (NON-NEGOTIABLE)
 
@@ -41,7 +41,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
         "time_format" => "hms",
         "colored_nicklist" => false,
         "presence_filter" => %{},
-        "show_bottom_bar" => true
+        "show_bottom_bar" => true,
+        "strip_formatting" => false
       },
       overrides
     )
@@ -59,7 +60,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                time_format: "hms",
                colored_nicklist: false,
                presence_filter: %{},
-               show_bottom_bar: true
+               show_bottom_bar: true,
+               strip_formatting: false
              }
     end
 
@@ -72,7 +74,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                time_format: "hms",
                colored_nicklist: false,
                presence_filter: %{},
-               show_bottom_bar: true
+               show_bottom_bar: true,
+               strip_formatting: false
              }
     end
 
@@ -91,7 +94,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                time_format: "hm",
                colored_nicklist: false,
                presence_filter: %{},
-               show_bottom_bar: true
+               show_bottom_bar: true,
+               strip_formatting: false
              }
     end
 
@@ -107,7 +111,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                time_format: "hms",
                colored_nicklist: false,
                presence_filter: %{},
-               show_bottom_bar: true
+               show_bottom_bar: true,
+               strip_formatting: false
              }
     end
   end
@@ -166,7 +171,7 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
   # ---------------------------------------------------------------------------
 
   describe "put_display_prefs/2 — round-trip" do
-    test "persists all four prefs and reads them back" do
+    test "persists all five prefs and reads them back" do
       user = user_fixture()
 
       body =
@@ -182,7 +187,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                time_format: "hm",
                colored_nicklist: true,
                presence_filter: %{"libera #bofh" => "hide", "libera #cat" => "show"},
-               show_bottom_bar: true
+               show_bottom_bar: true,
+               strip_formatting: false
              }
     end
 
@@ -424,6 +430,120 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
       |> Repo.update!()
 
       assert UserSettings.get_display_prefs({:user, user.id}).show_bottom_bar == true
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # strip_formatting (#2029) — the FIFTH key, and the proof the fourth's
+  # tolerance was a pattern rather than a one-off
+  # ---------------------------------------------------------------------------
+  #
+  # Requested by `morph` (Azzurra staff) after a channel filled with heavily
+  # coloured bot output: render incoming messages with the mIRC control codes
+  # STRIPPED. Not `+c`, which is a channel-wide operator policy that REJECTS
+  # the message and so costs the reader the text along with the colours.
+  #
+  # The pref is server-backed rather than a localStorage flag, on #1766's own
+  # criterion: a per-DEVICE toggle is right when the complaint is about a
+  # VIEWPORT (#914's `hide_next_active`), and wrong when it is about the
+  # ACCOUNT. A channel full of coloured bot output is identical on the phone
+  # and on the desktop, so this is the account axis — and its nearest
+  # neighbour by shape, `colored_nicklist`, is synced for the same reason.
+  #
+  # `fetch_optional_display_bool/3` is what makes the fifth key free: #1766
+  # wrote it for the fourth and said in as many words that the NEXT added key
+  # would have to remember it too. This block is that key remembering.
+
+  describe "strip_formatting (#2029)" do
+    test "defaults to false — colours keep rendering as they do today" do
+      assert UserSettings.default_display_prefs().strip_formatting == false
+
+      assert UserSettings.get_display_prefs({:user, Ecto.UUID.generate()}).strip_formatting ==
+               false
+    end
+
+    test "round-trips true" do
+      user = user_fixture()
+
+      assert {:ok, _} =
+               UserSettings.put_display_prefs(
+                 {:user, user.id},
+                 valid_wire(%{"strip_formatting" => true})
+               )
+
+      assert UserSettings.get_display_prefs({:user, user.id}).strip_formatting == true
+    end
+
+    test "a PUT from a client predating the key is ACCEPTED, and reads as the default" do
+      user = user_fixture()
+      older_body = Map.delete(valid_wire(), "strip_formatting")
+
+      assert {:ok, _} = UserSettings.put_display_prefs({:user, user.id}, older_body)
+      assert UserSettings.get_display_prefs({:user, user.id}).strip_formatting == false
+    end
+
+    # The other half of the skew, and the one that would silently break the
+    # PREVIOUS four keys: a bundle that predates this one sends four keys, and
+    # a mandatory fifth would 422 its every display write — the operator's
+    # time-format and nicklist toggles would quietly stop persisting.
+    test "a four-key PUT still persists the keys it DID send" do
+      user = user_fixture()
+
+      older_body =
+        valid_wire(%{"time_format" => "hm", "colored_nicklist" => true})
+        |> Map.delete("strip_formatting")
+
+      assert {:ok, _} = UserSettings.put_display_prefs({:user, user.id}, older_body)
+
+      prefs = UserSettings.get_display_prefs({:user, user.id})
+      assert prefs.time_format == "hm"
+      assert prefs.colored_nicklist == true
+    end
+
+    test "rejects a non-boolean strip_formatting — absent is tolerated, garbage is not" do
+      user = user_fixture()
+
+      assert {:error, %Ecto.Changeset{} = cs} =
+               UserSettings.put_display_prefs(
+                 {:user, user.id},
+                 valid_wire(%{"strip_formatting" => "yes"})
+               )
+
+      assert cs.errors[:display_prefs]
+    end
+
+    test "accepts an atom key too (parity with the sibling booleans)" do
+      user = user_fixture()
+
+      assert {:ok, _} =
+               UserSettings.put_display_prefs({:user, user.id}, %{
+                 time_format: "hms",
+                 colored_nicklist: false,
+                 presence_filter: %{},
+                 show_bottom_bar: true,
+                 strip_formatting: true
+               })
+
+      assert UserSettings.get_display_prefs({:user, user.id}).strip_formatting == true
+    end
+
+    test "a stored blob predating the key reads false, not nil" do
+      user = user_fixture()
+      {:ok, settings} = UserSettings.get_or_init({:user, user.id})
+
+      settings
+      |> Settings.changeset(%{
+        data:
+          Map.put(settings.data, "display_prefs", %{
+            "time_format" => "hm",
+            "colored_nicklist" => true,
+            "presence_filter" => %{},
+            "show_bottom_bar" => true
+          })
+      })
+      |> Repo.update!()
+
+      assert UserSettings.get_display_prefs({:user, user.id}).strip_formatting == false
     end
   end
 

@@ -665,9 +665,9 @@ defmodule GrappaWeb.UserSettingsControllerTest do
   # ===========================================================================
   # display_prefs (#449) — server-backed display preferences, so one account
   # converges its UI across devices. Wrapped-envelope endpoint mirroring
-  # aliases; full-map PUT, no PATCH/diff. Four prefs: time_format,
-  # colored_nicklist, presence_filter (per-channel tri-state map), and
-  # show_bottom_bar (#1766).
+  # aliases; full-map PUT, no PATCH/diff. Five prefs: time_format,
+  # colored_nicklist, presence_filter (per-channel tri-state map),
+  # show_bottom_bar (#1766), and strip_formatting (#2029).
   #
   # A/B-INDEPENDENT core: font-size (Fork A, escalated to vjt) and the
   # client-side seed-up-once migration (Fork B) are NOT exercised here.
@@ -679,7 +679,8 @@ defmodule GrappaWeb.UserSettingsControllerTest do
       "time_format" => "hms",
       "colored_nicklist" => false,
       "presence_filter" => %{},
-      "show_bottom_bar" => true
+      "show_bottom_bar" => true,
+      "strip_formatting" => false
     }
   end
 
@@ -734,7 +735,8 @@ defmodule GrappaWeb.UserSettingsControllerTest do
                "time_format" => "hm",
                "colored_nicklist" => true,
                "presence_filter" => %{"libera #bofh" => "hide"},
-               "show_bottom_bar" => true
+               "show_bottom_bar" => true,
+               "strip_formatting" => false
              }
     end
 
@@ -807,6 +809,31 @@ defmodule GrappaWeb.UserSettingsControllerTest do
 
       assert %{"display_prefs" => returned} = json_response(conn, 200)
       assert returned["show_bottom_bar"] == true
+    end
+
+    # #2029 — the fifth key through the HTTP door. `true` is the non-default
+    # side here (the strip ships OFF), so a payload that carried the key and
+    # normalised it away would pass every other test in this block.
+    test "200 + round-trips strip_formatting: true", %{conn: conn, user: user} do
+      body = %{"display_prefs" => Map.put(default_display_prefs_wire(), "strip_formatting", true)}
+
+      conn = put(conn, "/me/settings/display-prefs", body)
+
+      assert %{"display_prefs" => returned} = json_response(conn, 200)
+      assert returned["strip_formatting"] == true
+      assert UserSettings.get_display_prefs({:user, user.id}).strip_formatting == true
+    end
+
+    # The same tolerance the fourth key bought, exercised for the fifth: a
+    # bundle that predates this one keeps PUTting four keys and must not start
+    # 422ing — that would silently break its OTHER display toggles.
+    test "200 for a four-key body (no strip_formatting)", %{conn: conn} do
+      body = %{"display_prefs" => Map.delete(default_display_prefs_wire(), "strip_formatting")}
+
+      conn = put(conn, "/me/settings/display-prefs", body)
+
+      assert %{"display_prefs" => returned} = json_response(conn, 200)
+      assert returned["strip_formatting"] == false
     end
 
     test "PUT response carries persisted:true", %{conn: conn} do

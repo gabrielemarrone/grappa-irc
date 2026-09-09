@@ -174,10 +174,17 @@ runner_facts() {
     printf 'runner arch      : %s\n' "${RUNNER_ARCH:-unset}"
     # The alternate-signal-stack minimum the C library reports. The ERTS call
     # that died on v1.5.4 is `sigaltstack(2)`, whose EINVAL arm is about a size
-    # below the kernel's minimum — so these two numbers are the ones a reader
-    # would want, and nobody has ever recorded them for this job.
-    for k in _SC_SIGSTKSZ _SC_MINSIGSTKSZ _SC_PAGESIZE; do
-        printf '%-17s: %s\n' "$k" "$(getconf "$k" 2>/dev/null || echo unavailable)"
+    # below the kernel's minimum — so these are the numbers a reader would want,
+    # and nobody has ever recorded them for this job.
+    #
+    # BARE NAMES, not the `_SC_` spelling, and this is measured rather than
+    # stylistic: `getconf _SC_PAGESIZE` answers "no such configuration
+    # parameter" while `getconf PAGESIZE` answers 16384. Written the other way
+    # every line here would have printed `unavailable` on Linux too — a blind
+    # diagnostic wearing the same face as an honest one, on precisely the
+    # number this block exists to record.
+    for k in SIGSTKSZ MINSIGSTKSZ PAGESIZE; do
+        printf '%-17s: %s\n' "$k" "$(getconf "$k" 2>/dev/null || echo 'not exposed by getconf')"
     done
     if [ -r /proc/cpuinfo ]; then
         # The size of the signal frame the kernel must fit scales with the
@@ -185,9 +192,15 @@ runner_facts() {
         # decorative. One line, deduplicated — not 96 identical core stanzas.
         printf 'cpu model        : %s\n' \
             "$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
-        printf 'cpu xsave flags  : %s\n' \
-            "$(awk -F': ' '/^flags/ {print $2; exit}' /proc/cpuinfo \
-               | tr ' ' '\n' | grep -E '^(avx512|amx|xsave|osxsave)' | sort -u | tr '\n' ' ')"
+        # `|| true` then a `:-none` default, because an empty reading here is
+        # AMBIGUOUS in the way this whole block exists to avoid: `grep` exits 1
+        # when the CPU simply has none of these flags, which is a fact worth
+        # printing, and a bare blank would read identically to a reader that
+        # broke. arm64 has no `flags` line at all and lands in the same arm.
+        xsave_flags="$(awk -F': ' '/^flags/ {print $2; exit}' /proc/cpuinfo \
+               | tr ' ' '\n' | grep -E '^(avx512|amx|xsave|osxsave)' \
+               | sort -u | tr '\n' ' ' || true)"
+        printf 'cpu xsave flags  : %s\n' "${xsave_flags:-none reported}"
     else
         printf 'cpu              : unavailable (no /proc/cpuinfo)\n'
     fi

@@ -49906,3 +49906,102 @@ something can run it.
 _CI + driver + docs. No wire change, no protocol bump, no supervision-tree or
 schema change. Deploy: nothing to deploy — the change is in `release.yml` and
 the smoke driver, both of which run only in CI._
+<!-- entry #2022 -->
+
+---
+
+## 2026-09-09 — #2022: the jail name is one constant, and a gate holds the other fifty-five spellings to it
+
+`scripts/deploy-m42.sh` defaulted `JAIL` to `grappa`, and
+`infra/freebsd/deploy.sh` built its restart hint on the same name. The jail's
+bastille NAME is `grappa-new`; `grappa` is its `host.hostname`. Measured on
+m42 from two sources (`jls -h jid name host.hostname path` and
+`bastille list`), and confirmed in practice: the v1.5.4 cold deploy went
+through as `JAIL=grappa-new scripts/deploy-m42.sh --force-cold`.
+
+The sharp edge is not the default. It is
+`DEPLOY_RESTART_HINT="sudo bastille cmd grappa service grappa start"`, printed
+by `deploy_common.sh` on the "daemon is GONE" path — the line an operator
+pastes while production is down. A default that is merely wrong is cheap; one
+that is wrong in the recovery path fails exactly when it is needed.
+
+### Derivation was rejected, and not for effort
+
+The issue suggested deriving the name from `bastille list` / `jls`, on the
+grounds that this is the second name the jail has had. Three reasons against,
+all about WHERE the name is needed:
+
+1. **It is not derivable where it matters most.** `infra/freebsd/deploy.sh`
+   runs INSIDE the jail. Every `bastille` spelling under `infra/freebsd/` is a
+   comment quoting the HOST-side invocation — not one of those rails invokes
+   bastille, because bastille is the host's tool for addressing jails from
+   outside. From inside, `hostname` answers `grappa`: the host.hostname, i.e.
+   precisely the wrong token, and precisely the confusion that produced the bug.
+2. **Host-side it only moves the hardcode.** Picking this jail out of
+   `bastille list` needs a predicate, and the candidates are the NAME
+   (circular) or the host.hostname `grappa` — reading the Hostname column is
+   the misreading that opened the issue.
+3. **Its failure mode is the one being cured.** A derivation that answers
+   nothing must die or fall back, and a fallback IS a default that can be
+   silently wrong. Worse, the hint printed when production is down would then
+   depend on a query likeliest to fail exactly then.
+
+So: `infra/lib/bastille_jail.sh` declares `BASTILLE_JAIL`, overridable by env,
+and the two files that COMPUTE with the name source it — the host wrapper for
+`JAIL`, the in-jail deploy for both hints and the `--defer-restart` log line.
+That is the issue's "same source" requirement, satisfied where a variable can
+reach.
+
+### The measurement the issue declared not done
+
+A systematic sweep for jail-name ARGUMENT positions (`bastille <verb> X`,
+`bastille-restart X`, `jexec X`, `pkg -j X`, `/usr/local/bastille/jails/X`)
+found **59 stale spellings across 20 files** on `origin/main`, not the two the
+issue named: every usage comment of the twelve `infra/freebsd` rails, three
+printed hints in `jail_import_db.sh` (including a
+`/usr/local/bastille/jails/grappa/root` copy target, which is a real path that
+does not exist), four Elixir moduledocs, `scripts/zfs_baseline.exs`, three
+assertions in `deploy_m42_test.bats` that pinned the wrong default, and 22
+lines of `docs/OPERATIONS.md` runbook — among them the DB-restore sequence
+and, with some irony, the paragraph that says "Reference the jail by NAME, not
+a numeric JID". Afterwards the same scan sees 55 literal spellings and zero
+disagreements; the difference is accounted for site by site (six became
+variables, three previously-invisible ones became visible once the wrapped
+prose and a false-positive comment were rewritten).
+
+Those are comments. They cannot source a variable, so what holds them is
+`test/infra/bastille_jail_name_test.bats`: it reads `BASTILLE_JAIL` and proves
+every literal spelling in the live tree equals it, naming file, line and token
+for each that does not. The next rename is one line plus whatever the gate
+then lists.
+
+### What the gate does not see, stated rather than implied
+
+It is line-based, so a name that prose wrapped onto the following line is
+invisible to it (two such existed, in `docs/OPERATIONS.md` and
+`LoopbackOnly`'s moduledoc — both rewrapped by hand here). It only reads
+ARGUMENT position, so a name stated in prose is invisible too
+(`(name \`grappa\`, …)` in the runbook — fixed by hand). A token spelled as a
+variable or placeholder never matches, which is what lets the sourcing sites
+pass. Bare numbers are skipped: a JID is a different addressing mode, and the
+runbook quotes `jexec 6` on purpose as the form that DRIFTS — demanding a name
+there would delete the warning.
+
+Chronological records are out of scope by construction: `DESIGN_NOTES.md`,
+`docs/design_notes/`, `docs/project-story.md`, `docs/reviews/` and the dated
+baselines quote what was true when written. A log rewritten to stay current is
+not a log.
+
+### Not verified, and it cannot be from here
+
+Nobody on this side of the fence can run `bastille cmd`. What is proven is
+that the scripts now emit `grappa-new` where they emitted `grappa`, that the
+two consumers read one constant, and that no spelling in the tree disagrees
+with it. That the resulting command works against the live jail rests on the
+issue's m42 measurement and on the v1.5.4 deploy that already ran with this
+exact value — not on anything exercised in CI.
+
+_Deploy scripts, infra comments and docs. No wire change, no protocol bump, no
+supervision-tree or schema change. Deploy: the changed files are the deploy
+machinery itself — the value they now carry is the one tonight's deploy was
+already run with by hand._

@@ -958,8 +958,9 @@ fails loud and names the fix in the error text.
 
 ### `scripts/deploy-m42.sh` — the prod (bastille jail) wrapper
 
-**It only wraps the incantation.** `ssh m42` plus `sudo bastille cmd
-grappa <jail script>`, so the operator does not have to memorise it.
+**It only wraps the incantation.** `ssh m42` plus
+`sudo bastille cmd grappa-new <jail script>`, so the operator does not
+have to memorise it.
 The jail-side scripts live in `infra/freebsd/` and are documented
 "invoke from the m42 host"; this is that host-side caller, runnable
 from anywhere with ssh access to m42 — workstation, repo checkout, CI.
@@ -1665,7 +1666,7 @@ typo cannot quietly serve a different bundle than the one configured.
 ### m42 (FreeBSD bastille jail) — host-side wrapper
 
 The `infra/freebsd/jail_*.sh` scripts run INSIDE the jail as root
-(`sudo bastille cmd grappa <script>`) and are documented "invoke from
+(`sudo bastille cmd grappa-new <script>`) and are documented "invoke from
 m42 host". `scripts/deploy-m42.sh` is the host-side caller that wraps
 the `ssh m42` + `bastille cmd` incantation — run it from any checkout
 with ssh access to m42:
@@ -1705,7 +1706,7 @@ AND a host `bastille restart` to bind it — two bounces, two drop windows.
 `--full-restart` collapses them: the jail runs `deploy.sh --force-cold
 --defer-restart` (stages the new release + rc.d wrappers, STOPS the BEAM,
 exits without restarting it — marker deliberately NOT written), then the
-host does a single `bastille restart grappa` that boots the staged
+host does a single `bastille restart grappa-new` that boots the staged
 release through the new wrapper and binds the vhost. The host wrapper
 then healthchecks (`FULL_RESTART_HC_URL`/`_RETRIES`/`_SLEEP`, defaults
 `http://127.0.0.1:4000/healthz` 30×2s) and, only on success, writes
@@ -2230,14 +2231,24 @@ this is the runbook.
 
 ### Running operator actions against the live jail (prod)
 
-Prod is a **bastille jail** (name `grappa`, `/usr/local/bastille/jails/grappa/root`,
-release at `/home/grappa/grappa`, DB `runtime/grappa_prod.db`, env
+Prod is a **bastille jail** (name `grappa-new`,
+`/usr/local/bastille/jails/grappa-new/root`, release at
+`/home/grappa/grappa`, DB `runtime/grappa_prod.db`, env
 `/usr/local/etc/grappa/grappa.env`). Reach it with
-`ssh root@m42` → `jexec grappa …`. **Reference the jail by NAME, not a
+`ssh root@m42` → `jexec grappa-new …`. **Reference the jail by NAME, not a
 numeric JID** — JIDs are assigned at start and DRIFT across restarts
 (2026-06-21: a doc'd `jexec 6` failed `jail 6 not found`; `ssh root@m42 jls`
-lists the current map). `bastille cmd grappa` / `pkg -j grappa` take the
+lists the current map). `bastille cmd grappa-new` / `pkg -j grappa-new` take the
 name too.
+
+🔴 **The NAME is `grappa-new`; `grappa` is only its `host.hostname` (#2022).**
+`jls -h jid name host.hostname path` prints both, in that order, and reading
+the wrong column is how every deploy default came to address a jail that does
+not exist. The name is written once, in `infra/lib/bastille_jail.sh`
+(`BASTILLE_JAIL`), which `scripts/deploy-m42.sh` and `infra/freebsd/deploy.sh`
+both source; every other spelling in this repo is a usage comment held to that
+value by `test/infra/bastille_jail_name_test.bats`. A rename is that one line
+plus whatever the gate then names.
 
 - **`bin/grappa` (the dispatcher) is docker-only — it FAILS in the
   jail** (`docker: not found`). It's a dev/RPi tool.
@@ -2254,7 +2265,7 @@ name too.
   every deploy. So the recipe is:
 
   ```sh
-  jexec grappa su -l grappa -c 'cd /home/grappa/grappa;
+  jexec grappa-new su -l grappa -c 'cd /home/grappa/grappa;
     set -a; . /usr/local/etc/grappa/grappa.env; set +a;
     MIX_ENV=prod mix grappa.<task>'
   ```
@@ -2278,7 +2289,7 @@ name too.
   env first (or `rpc` returns `:noconnection` — needs `RELEASE_COOKIE`):
 
   ```sh
-  jexec grappa su -l grappa -c 'set -a; . /usr/local/etc/grappa/grappa.env; set +a;
+  jexec grappa-new su -l grappa -c 'set -a; . /usr/local/etc/grappa/grappa.env; set +a;
     /home/grappa/grappa/_build/prod/rel/grappa/bin/grappa rpc "<elixir>"'
   ```
 
@@ -2316,7 +2327,7 @@ ffmpeg` — dev/CI/e2e get them for free); the jail needs the FreeBSD
 packages installed ONCE, **before** deploying the strip release:
 
 ```sh
-ssh root@m42 'pkg -j grappa install -y p5-Image-ExifTool ffmpeg'
+ssh root@m42 'pkg -j grappa-new install -y p5-Image-ExifTool ffmpeg'
 ```
 
 The strip is fail-CLOSED: with the binaries missing, every image and
@@ -2336,8 +2347,8 @@ step. To apply an rc.d change without waiting for a deploy (or after
 a `--force-hot` that skipped it):
 
 ```sh
-ssh root@m42 'jexec grappa cp /home/grappa/grappa/infra/freebsd/rc.d/grappa \
-  /usr/local/etc/rc.d/grappa && jexec grappa service grappa restart'
+ssh root@m42 'jexec grappa-new cp /home/grappa/grappa/infra/freebsd/rc.d/grappa \
+  /usr/local/etc/rc.d/grappa && jexec grappa-new service grappa restart'
 ```
 
 **Jail outbound source IPs.** The jail runs **VNET** on `bridge0`
@@ -2657,7 +2668,7 @@ window.
 1. **Fresh backup.** Take a consistent sqlite `.backup` of the live prod
    DB (a `cp` of a WAL-mode DB under a live writer is NOT consistent):
    ```sh
-   ssh root@m42 "jexec grappa su -l grappa -c \
+   ssh root@m42 "jexec grappa-new su -l grappa -c \
      'sqlite3 /home/grappa/grappa/runtime/grappa_prod.db \
         \".backup /home/grappa/grappa/runtime/grappa_prod.db.predeploy-$(date -u +%Y%m%d-%H%M%S)\"'"
    ```
@@ -2691,19 +2702,19 @@ integrity-checks). It is fast (~30s: stop BEAM, swap the file, start).
 ```sh
 # 1. STOP the live node (blocks until the BEAM exits + epmd releases the
 #    name — grappa_stop is synchronous since defect #9, 2026-06-11).
-ssh root@m42 "sudo bastille cmd grappa service grappa stop"
+ssh root@m42 "sudo bastille cmd grappa-new service grappa stop"
 
 # 2. Stage the pre-deploy backup at the rail's expected jail-side path.
 #    (Both files are already inside the jail root — this is an in-jail cp.)
 ssh root@m42 "sudo cp \
-  /usr/local/bastille/jails/grappa/root/home/grappa/grappa/runtime/grappa_prod.db.predeploy-<STAMP> \
-  /usr/local/bastille/jails/grappa/root/tmp/grappa_prod.db"
+  /usr/local/bastille/jails/grappa-new/root/home/grappa/grappa/runtime/grappa_prod.db.predeploy-<STAMP> \
+  /usr/local/bastille/jails/grappa-new/root/tmp/grappa_prod.db"
 
 # 3. Import — the rail backs up the (migrated) current DB, rm's WAL/shm,
 #    installs the backup, and prints integrity_check + schema_migrations
 #    head (MUST read the PRE-deploy version, e.g. 20260709120100 for the
 #    phase-7 rollback — proof the DROP-COLUMN migrations are gone).
-ssh root@m42 "sudo bastille cmd grappa /home/grappa/grappa/infra/freebsd/jail_import_db.sh"
+ssh root@m42 "sudo bastille cmd grappa-new /home/grappa/grappa/infra/freebsd/jail_import_db.sh"
 
 # 4. Roll the CODE back too — a restored pre-migration DB under
 #    post-migration code reads dropped columns and crashes. Deploy the
@@ -2717,10 +2728,10 @@ ssh root@m42 "sudo bastille cmd grappa /home/grappa/grappa/infra/freebsd/jail_im
 scripts/deploy-m42.sh --force-cold
 
 # 5. START + verify.
-ssh root@m42 "sudo bastille cmd grappa service grappa start"
-ssh m42 "sudo bastille cmd grappa curl -fsS http://127.0.0.1:4000/healthz"
+ssh root@m42 "sudo bastille cmd grappa-new service grappa start"
+ssh m42 "sudo bastille cmd grappa-new curl -fsS http://127.0.0.1:4000/healthz"
 # Confirm the restored baseline (phase-7 example):
-ssh root@m42 "jexec grappa su -l grappa -c \
+ssh root@m42 "jexec grappa-new su -l grappa -c \
   'sqlite3 /home/grappa/grappa/runtime/grappa_prod.db \
      \"SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM visitors), (SELECT COUNT(*) FROM users);\"'"
 # expect: the row counts of WHICHEVER backup you restored — match them
@@ -3782,9 +3793,9 @@ pre-creates the directory and echoes it in the `./`-prefixed shape.
 
 **A "rail" is a named, checked-in script the m42 host is allowed to run
 inside the production jail — and the set is closed on purpose.** The
-host never reaches into the jail with a generic `jexec grappa sh -c
+host never reaches into the jail with a generic `jexec grappa-new sh -c
 '…'`; every operation it can perform is one of the
-`infra/freebsd/jail_*.sh` files, invoked as `sudo bastille cmd grappa
+`infra/freebsd/jail_*.sh` files, invoked as `sudo bastille cmd grappa-new
 /home/grappa/grappa/infra/freebsd/<rail>.sh …`. That is what makes the
 host→jail surface auditable: to know what prod can be told to do, read
 the directory. Adding an operation means adding a rail and reviewing
@@ -5342,7 +5353,7 @@ it.
 ## Monitoring
 
 - **Health**: `scripts/healthcheck.sh` (curl `/healthz`) — dev. Prod
-  (m42 jail): `ssh m42 "sudo bastille cmd grappa curl -fsS http://127.0.0.1:4000/healthz"`.
+  (m42 jail): `ssh m42 "sudo bastille cmd grappa-new curl -fsS http://127.0.0.1:4000/healthz"`.
   Prod (Linux/systemd host): `curl -fsS http://127.0.0.1:4000/healthz`
   directly (no ssh-and-exec indirection needed), or
   `systemctl status grappa` + `journalctl -u grappa -f`.

@@ -572,13 +572,24 @@ describe("SettingsDrawer display options — one fieldset for the checkboxes (#1
     expect(screen.getByTestId("hide-next-active-toggle")).toBeInTheDocument();
   });
 
-  // The merge hides something the three legends used to keep apart: these rows
-  // do NOT persist alike. Colored nicklist and the window bar are server-synced
-  // across devices; hide-next-active is per-device localStorage (#914, and
-  // deliberately so — its complaint was a viewport). Under one legend three
-  // identical-looking rows behave differently on a second device, so the
-  // fieldset says which is which instead of inheriting the ambiguity.
-  it("says out loud that one of the three rows is per-device", () => {
+  // #2029 — the strip row lands in the same fieldset, and it is SYNCED: the
+  // complaint behind it (a channel full of coloured bot output) is a property
+  // of the account, identical on every device, which is #1766's own criterion
+  // for choosing synced over per-device.
+  it("renders the strip-formatting toggle in the display fieldset", () => {
+    wrap(true);
+    openSub("display-settings-entry");
+    expect(screen.getByTestId("strip-formatting-toggle")).toBeInTheDocument();
+  });
+
+  // The merge hides something the legends used to keep apart: these rows do
+  // NOT persist alike. Colored nicklist, the window bar and the strip toggle
+  // are server-synced across devices; hide-next-active is per-device
+  // localStorage (#914, and deliberately so — its complaint was a viewport).
+  // Under one legend, identical-looking rows behave differently on a second
+  // device, so the fieldset says which is which instead of inheriting the
+  // ambiguity.
+  it("says out loud that one of the rows is per-device", () => {
     wrap(true);
     openSub("display-settings-entry");
     const blurb = screen.getByTestId("display-checkboxes-hint");

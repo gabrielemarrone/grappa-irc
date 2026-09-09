@@ -29,6 +29,7 @@ import { CREDITS_LABEL, openCreditsModal } from "./lib/creditsModal";
 import {
   syncedSetColoredNicklist,
   syncedSetShowBottomBar,
+  syncedSetStripFormatting,
   syncedSetTimeFormat,
 } from "./lib/displayPrefs";
 import { formatDuration } from "./lib/duration";
@@ -70,6 +71,7 @@ import { selectedChannel } from "./lib/selection";
 import { consumePendingSettingsPage, type SettingsSubPage } from "./lib/settingsNav";
 import { isShareableSubject, openShareModal, SHARE_SESSION_LABEL } from "./lib/shareModal";
 import { getShowBottomBar } from "./lib/showBottomBar";
+import { getStripFormatting } from "./lib/stripFormatting";
 import { getTimeFormat, type TimeFormatKey } from "./lib/timeFormat";
 import { activeHost } from "./lib/uploadHost";
 import {
@@ -270,6 +272,13 @@ const SettingsDrawer: Component<Props> = (props) => {
   // own setter stays local-only on purpose.
   const onShowBottomBarChange = (e: Event) => {
     syncedSetShowBottomBar((e.currentTarget as HTMLInputElement).checked);
+  };
+
+  // #2029 — same shape as the row above: `getStripFormatting()` IS the module
+  // signal, so no drawer-local mirror, and the write goes through the
+  // coordinator (the single PUT authority for the #449 synced prefs).
+  const onStripFormattingChange = (e: Event) => {
+    syncedSetStripFormatting((e.currentTarget as HTMLInputElement).checked);
   };
 
   // #986 — the `onDetach` / `onQuit` handlers moved to RailActions with
@@ -2243,6 +2252,26 @@ const SettingsDrawer: Component<Props> = (props) => {
                   show colored nicklist
                 </label>
 
+                {/* #2029 — strip mIRC formatting on render. OFF by default:
+                  colours keep working as they do today and this is the opt-in.
+                  Requested by `morph` (Azzurra staff) after a channel filled
+                  with heavily coloured bot output. Deliberately NOT channel
+                  mode `+c`, which is an operator's channel-wide policy and
+                  REJECTS the message — costing the reader the words as well as
+                  the colours. This strips on RENDER only: the raw line is
+                  untouched on the wire and in scrollback, so turning it back
+                  off restores the colours with no reconnect. Sits next to the
+                  nicklist row because both are colour-rendering prefs. */}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={getStripFormatting()}
+                    onChange={onStripFormattingChange}
+                    data-testid="strip-formatting-toggle"
+                  />
+                  strip colours and formatting from messages
+                </label>
+
                 {/* #1766 — the mobile window bar (BottomBar), ON by default:
                   an opt-OUT, never a default change. #174's ruling stands
                   ("the bottom bar must NOT be deleted, it stays opt-in from
@@ -2277,16 +2306,20 @@ const SettingsDrawer: Component<Props> = (props) => {
                 </label>
 
                 {/* The one thing the merge HIDES, said out loud rather than
-                  inherited: these rows do not persist alike. Two are #449
-                  server-backed and converge across every device on the
+                  inherited: these rows do not persist alike. All but one are
+                  #449 server-backed and converge across every device on the
                   account; the jump button is per-DEVICE localStorage, and
                   deliberately so — #914's complaint was about a viewport, not
-                  an account. Under one legend three identical-looking rows
-                  would otherwise behave differently on a second device with
-                  nothing on screen to say why. */}
+                  an account. Under one legend, identical-looking rows would
+                  otherwise behave differently on a second device with nothing
+                  on screen to say why. Phrased by BEHAVIOUR rather than by
+                  position ("the first two" until #2029 added a third synced
+                  row): a blurb that counts its neighbours is wrong the next
+                  time one arrives, silently, because nothing type-checks a
+                  sentence. */}
                 <p class="settings-section-blurb" data-testid="display-checkboxes-hint">
-                  The first two follow your account onto every device you use. The jump button is
-                  remembered on this device only.
+                  Only the jump button is remembered on this device alone — the rest follow your
+                  account onto every device you use.
                 </p>
               </fieldset>
             </section>

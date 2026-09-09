@@ -50,8 +50,13 @@
 # the first one that fails dumps the container log and exits non-zero.
 #
 # What this does NOT cover, deliberately:
-#   * one arch only — whatever the host runs. The arm64 leg of a multi-arch
-#     manifest is proven by the build, not by this.
+#   * ONE arch per invocation — whatever the host runs. That is unchanged; what
+#     changed with #2018 is who invokes it: release.yml runs this driver on BOTH
+#     published architectures (a matrix over an amd64 and an arm64 runner), so
+#     the manifest's arm64 half is now BOOTED rather than merely built. Nothing
+#     here is arch-aware and nothing needs to be — `docker pull` resolves the
+#     multi-arch manifest for the host it lands on, for the candidate and for
+#     the upgrade fixture alike.
 #   * no IRC: no upstream connect, no SASL, no scrollback. Those are
 #     scripts/integration.sh's job, against the SOURCE image.
 #   * no TLS front door, no reverse proxy, no real PHX_HOST — the box is
@@ -131,17 +136,137 @@ docker image inspect "$GRAPPA_PREVIOUS_IMAGE" >/dev/null 2>&1 \
 
 SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/grappa-smoke.XXXXXX")"
 
+# Everything this run captured that could carry a harness failure, appended to
+# as the run proceeds. `teardown` reads it to NAME the failure (see below).
+CAPTURED="$SMOKE_HOME/captured.log"
+: > "$CAPTURED"
+
+# The signature of an ERTS that never got off the ground — #2018. It is
+# deliberately about the VM's own startup and nothing else: `sys_sigaltstack`
+# is the one measured on the v1.5.4 release run, and the two companions are the
+# same class (an "Internal error" from sys/unix, and the exit status a SIGSEGV
+# leaves behind) rather than a widening to "the boot failed".
+#
+# 🔴 THIS MATCHES A SYMPTOM, NOT A CAUSE. Why it is worded that way: the
+# mechanism behind the v1.5.4 red is UNKNOWN — nobody has measured why that
+# runner instance could not set an alternate signal stack, and the rerun on the
+# same bytes came back green, so the phenomenon is not deterministic across
+# runner instances. An assertion about seccomp, or about a CPU feature, would
+# encode a guess; a match on the message the VM actually printed does not.
+#
+# The third alternative is ordered the way ERTS actually prints, which is not
+# the way it reads: the format is `<file>:<line>:<func>(): Internal error: <msg>`,
+# so the path comes BEFORE the words "Internal error" and a pattern written the
+# other way round would never have matched the very line it was drawn from.
+HARNESS_SIGNATURE='sys_sigaltstack|Failed to set alternate signal stack|sys/unix/.*Internal error'
+
+# runner_facts — what this run's SUBSTRATE was, printed UNCONDITIONALLY.
+#
+# Not a failure branch, and that is the whole point (#2018). What is missing
+# after the v1.5.4 incident is not only the red sample: it is the GREEN one. A
+# fact about the runner cannot be read as anomalous by anyone who has never
+# seen what the runner looks like on a run where the image boots — so the
+# comparison class has to be collected on the ordinary path, on purpose, or the
+# next failure produces a sample of one class and nothing to hold it against.
+#
+# Every reader is best-effort and says so when a source is absent: this block
+# must never be able to fail the run it is describing. A missing `/proc` on a
+# non-Linux host prints `unavailable`, it does not exit.
+runner_facts() {
+    printf '\n===== runner facts (captured on EVERY run, green included — #2018) =====\n'
+    printf 'uname            : %s\n' "$(uname -a 2>/dev/null || echo unavailable)"
+    printf 'runner image     : %s / %s\n' "${ImageOS:-unset}" "${ImageVersion:-unset}"
+    printf 'runner arch      : %s\n' "${RUNNER_ARCH:-unset}"
+    # The alternate-signal-stack minimum the C library reports. The ERTS call
+    # that died on v1.5.4 is `sigaltstack(2)`, whose EINVAL arm is about a size
+    # below the kernel's minimum — so these are the numbers a reader would want,
+    # and nobody has ever recorded them for this job.
+    #
+    # BARE NAMES, not the `_SC_` spelling, and this is measured rather than
+    # stylistic: `getconf _SC_PAGESIZE` answers "no such configuration
+    # parameter" while `getconf PAGESIZE` answers 16384. Written the other way
+    # every line here would have printed `unavailable` on Linux too — a blind
+    # diagnostic wearing the same face as an honest one, on precisely the
+    # number this block exists to record.
+    for k in SIGSTKSZ MINSIGSTKSZ PAGESIZE; do
+        printf '%-17s: %s\n' "$k" "$(getconf "$k" 2>/dev/null || echo 'not exposed by getconf')"
+    done
+    if [ -r /proc/cpuinfo ]; then
+        # The size of the signal frame the kernel must fit scales with the
+        # XSAVE state, so the CPU's feature flags are pertinent rather than
+        # decorative. One line, deduplicated — not 96 identical core stanzas.
+        printf 'cpu model        : %s\n' \
+            "$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
+        # `|| true` then a `:-none` default, because an empty reading here is
+        # AMBIGUOUS in the way this whole block exists to avoid: `grep` exits 1
+        # when the CPU simply has none of these flags, which is a fact worth
+        # printing, and a bare blank would read identically to a reader that
+        # broke. arm64 has no `flags` line at all and lands in the same arm.
+        local xsave_flags
+        xsave_flags="$(awk -F': ' '/^flags/ {print $2; exit}' /proc/cpuinfo \
+               | tr ' ' '\n' | grep -E '^(avx512|amx|xsave|osxsave)' \
+               | sort -u | tr '\n' ' ' || true)"
+        printf 'cpu xsave flags  : %s\n' "${xsave_flags:-none reported}"
+    else
+        printf 'cpu              : unavailable (no /proc/cpuinfo)\n'
+    fi
+    printf 'docker           : %s\n' "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unavailable)"
+    printf 'seccomp          : %s\n' \
+        "$(docker info --format '{{range .SecurityOptions}}{{.}} {{end}}' 2>/dev/null || echo unavailable)"
+    printf '=========================================================================\n\n'
+}
+
+# classify_failure — on a non-zero exit, say WHAT KIND of red this is.
+#
+# It does NOT forgive anything and it does not change the exit status: the run
+# stays red, loudly. What it adds is the one thing the v1.5.4 triage did not
+# have — a name. Today a VM that never started and an image that is genuinely
+# broken arrive identically, as "the job is red", and telling them apart cost a
+# night.
+classify_failure() {
+    grep -Eq "$HARNESS_SIGNATURE" "$CAPTURED" 2>/dev/null || return 0
+    cat >&2 <<'BANNER'
+
+xx  HARNESS FAILURE, NOT THE IMAGE (#2018)
+xx
+xx  The captured output carries the signature of a BEAM that never started —
+xx  the VM died inside its own startup, before any application code ran. That
+xx  is a property of the machine this job landed on, not of the artefact under
+xx  test: the same signature was seen on the v1.5.4 release run and a rerun of
+xx  the SAME commit and the SAME image, on a different runner instance, came
+xx  back green.
+xx
+xx  This run STAYS RED on purpose. It is not downgraded, not retried and not
+xx  excused: the image is published, and a smoke test that cannot stop anything
+xx  is the silently-passing smoke test this file exists to refuse.
+xx
+xx  What to do: read the `runner facts` block at the top of this log, compare it
+xx  against the same block on a GREEN run, and put the difference on #2018 —
+xx  the mechanism is still UNMEASURED, and that comparison is the measurement
+xx  nobody has been able to make so far.
+
+BANNER
+}
+
 teardown() {
     status=$?
     if [ "$status" -ne 0 ]; then
         # The server half of the failure: a probe that failed on the HTTP side
         # says nothing about why. 200 lines, not 30.
+        #
+        # `tee -a` into $CAPTURED as well as stderr: a BEAM that dies in its own
+        # startup does so INSIDE a container, so the container's log is one of
+        # the places the #2018 signature can land, and classify_failure below
+        # has to be able to see it.
         for c in "$BOX" "$BARE" "$UP_OLD" "$UP_NEW" "$HOSTILE"; do
             if docker inspect "$c" >/dev/null 2>&1; then
                 printf '\n----- docker logs %s (tail 200) -----\n' "$c" >&2
-                docker logs --tail 200 "$c" >&2 || true
+                docker logs --tail 200 "$c" 2>&1 | tee -a "$CAPTURED" >&2 || true
             fi
         done
+        # LAST, so it reads everything this run captured and lands at the very
+        # bottom of the log — where a human scrolling a red job looks first.
+        classify_failure
     fi
     docker rm -f "$BOX" "$BARE" "$UP_OLD" "$UP_NEW" "$HOSTILE" >/dev/null 2>&1 || true
     docker volume rm "$BOX_VOLUME" "$BARE_VOLUME" "$UP_VOLUME" "$HOSTILE_VOLUME" "$HOSTILE_APP_VOLUME" >/dev/null 2>&1 || true
@@ -149,6 +274,15 @@ teardown() {
     exit "$status"
 }
 trap teardown EXIT
+
+# Before anything is attempted, and on every run whatever its outcome — see the
+# function's own comment for why the GREEN sample is the one that was missing.
+# `|| true` is the contract stated in the function, made real rather than
+# merely promised: under `set -euo pipefail` a non-zero anywhere in there would
+# abort the run, and a block whose whole job is to DESCRIBE the run must not be
+# able to end it. Its readers already degrade individually; this covers the
+# pipeline too.
+runner_facts | tee -a "$CAPTURED" || true
 
 # A crashed earlier run leaves the box behind, and `install` refuses to run
 # onto an existing container. Clear the dedicated names before, not just after.
@@ -196,7 +330,7 @@ GRAPPA_DATA_VOLUME="$BOX_VOLUME" \
 GRAPPA_PUBLISH="$PUBLISH" \
 GRAPPA_IMAGE="$GRAPPA_IMAGE" \
 PHX_HOST=localhost \
-    sh "$REPO_ROOT/infra/docker/get.sh" install
+    sh "$REPO_ROOT/infra/docker/get.sh" install 2>&1 | tee -a "$CAPTURED"
 
 # ---- probe 1: the SPA the box serves can actually boot ---------------------
 #

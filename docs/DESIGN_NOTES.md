@@ -49747,3 +49747,162 @@ true)` on `document`, then long-press a message row. No line logged ⇒ the
 inference is dead and the doors never race. A line logged ⇒ it is real, and
 worth its own issue. The pointer-keyed gate above makes it harmless either way:
 both doors read the same pointer and cannot disagree.
+<!-- entry #2018 -->
+
+---
+
+## 2026-09-09 — #2018: the release-image gate boots both published arches, and names the red it cannot explain
+
+On the `v1.5.4` release commit (`b68373237`) the job `deploy + probe the release
+image (amd64)` died at the first BEAM invocation — `sys_sigaltstack(): Internal
+error: Failed to set alternate signal stack`, exit 139 — before any migration
+line. A rerun of the SAME commit and the SAME image on a different runner
+instance came back green in 71 s (run `34293606005`, attempt 2); the failing
+attempt had died ~2 s into the step. **Same bytes, opposite verdict.** The
+mechanism is still unmeasured and this entry does not claim otherwise.
+
+### What was refused, and why it is the larger half of the decision
+
+The issue asked to "make the probe run somewhere it can actually boot the image
+(or make the sandbox difference explicit and asserted)". Both branches were
+declined.
+
+There is no second substrate: production is the FreeBSD jail and it has no
+docker at all (`grep -rln 'docker|ghcr' infra/freebsd/` → nothing), a
+self-hosted runner would be a third production substrate, and self-hosters are
+field evidence rather than a gate — nobody fires them and nobody reads their
+verdict. The `uname -m` of the two who answered CTCP VERSION was asked for and
+never arrived, so even "the image boots on real hosts" is true of an unknown
+architecture.
+
+Asserting the sandbox difference is worse than useless: nobody has measured what
+that difference IS, so the assertion would encode a guess and would stay green
+in exactly the case where the guess is wrong. "`sigaltstack` smells of seccomp"
+is a smell, not a measurement, and the issue's own "Not measured" section says
+so.
+
+And the premise moved underneath the request. The rerun shows the failure is
+**not deterministic across runner instances**, and a different PLACE does not
+cure non-determinism — it relocates it.
+
+### What shipped instead
+
+**Both published architectures are now BOOTED.** The docker job publishes
+`linux/amd64,linux/arm64`; the smoke job ran on `ubuntu-latest` alone and said
+so out loud ("amd64 only: the arm64 leg is proven by the build"). Measured, and
+it is why that posture fell: **every job in every workflow in this repository
+was `ubuntu-latest`** (12 of 12, across `ci.yml`, `integration.yml`,
+`release.yml`), so no arm64 binary had ever been EXECUTED here by anything.
+`assert-abi-lockstep.sh` does gate arm64 at build time, per-platform — but it
+proves the runtime stage can LINK the release, not that the VM STARTS. For an
+arm64 puller the first process ever to run the image was a user's, on every
+release that has ever shipped. That is structural, not intermittent.
+`ubuntu-24.04-arm` is free on a public repository, so the cure is a matrix and
+nothing else; the driver is untouched, because `docker pull` resolves the
+multi-arch manifest for whatever host it lands on, candidate and upgrade fixture
+alike.
+
+`fail-fast: false` is load-bearing rather than a softening: without it an amd64
+failure CANCELS the arm64 leg, and that cancelled leg is precisely the reading
+worth having. Two independent runner substrates probing one artefact is the only
+cross-check this gate has ever had against a failure belonging to the machine —
+"amd64 red while arm64 is green on the same run" is a sentence nobody could
+write before.
+
+**The runner's facts are captured on EVERY run, green included.** This is the
+part that is easy to get backwards. What the v1.5.4 incident lacks is not only
+the red sample — it is the GREEN one. An `ImageOS`, a `_SC_MINSIGSTKSZ`, a set
+of XSAVE feature flags cannot be read as anomalous by anyone who has never seen
+what they look like on a run where the image boots. Facts only on failure
+produce a sample of one class and nothing to hold it against, so the capture is
+unconditional and the failure branch adds only the NAME. Every reader is
+best-effort and prints `unavailable` rather than exiting: the block that
+describes the run must never be able to fail it.
+
+**A failure carrying the ERTS-startup signature is NAMED, not forgiven.** The
+run stays red — no retry, no `continue-on-error`, no downgrade. What is added is
+the distinction that cost a night: a VM that never started and an image that is
+genuinely broken used to arrive identically, as "the job is red". The pattern
+matches the MESSAGE the VM printed, deliberately, rather than a cause: a match
+on seccomp or on a CPU feature would be the encoded guess refused above.
+
+**Release-only is now stated as deliberate.** The subject of this gate is the
+PUBLISHED image, and before the tag there is none — release-only is arithmetic,
+not a cadence anyone chose. What main can rot is the RECIPE, and the recipe is
+already held by gates that need no container: `base_image_digest_pin_test.bats`
+(#103), `toolchain_pin_test.bats` (#1408 D-S10), the build-time ABI floor, and
+the ~50 suites in `test/infra/`.
+
+A `schedule:` for the `docker_validation` dry-run was considered and refused
+(vjt's ruling): a cron red has no owner, nobody is on duty at the hour it fires,
+and a signal nobody reads is indistinguishable from a signal that is not there.
+There is no `schedule:` anywhere in this repository and that is a decision. For
+the same reason the dry-run keeps ONE leg: an arm64 leg there would mean a
+second gha cache for a path nothing fires automatically.
+
+### A claim withdrawn before it was published, recorded so nobody re-derives it
+
+The first draft of the issue comment carried a second finding: that
+`Dockerfile.release` leaves `elixir:1.19-otp-28-alpine` and `alpine:3.24` on
+floating tags, so the published image is not a pure function of the source tree.
+The observation is literally true and the framing was wrong, which is worse.
+Both are excluded **by name** from the #103 digest-pin gate with the argument
+written there: the Elixir tag "carries the pin" and is held to `.tool-versions`
+on the minor line and the OTP major by `toolchain_pin_test.bats`, while the
+alpine floor is left floating on purpose so security patches keep flowing, with
+`assert-abi-lockstep.sh` proving compatibility instead of freezing bytes. It is
+a decision with two gates over it, not a gap. The lesson is the ordinary one:
+the gate that would contradict a finding is usually already in `test/`, and
+reading it costs less than publishing the finding.
+
+The version that SURVIVES the contradiction is narrower, and it took measuring
+the two gates rather than accepting that they cover the ground. They cover a
+different axis each, and neither is drift-over-time.
+`assert-abi-lockstep.sh` takes its eight arguments from ONE build — the `b_*`
+values out of `/tmp/abi-manifest`, written by that build's build stage
+(`Dockerfile.release:108-119`), the `r_*` values live from the same build's
+runtime stage (`:172-180`) — touches no network, and names no earlier build. It
+is a same-build coherence gate, so two stages moving TOGETHER to a newer alpine
+patch keep it green by construction, which is the intended behaviour rather than
+a hole. `toolchain_pin_test.bats` touches no network either; it reads files, and
+holds `.tool-versions` (`elixir 1.19.5-otp-28`, `erlang 28.5`) against the
+Dockerfile tag to minor-line and OTP-major precision, with its own moduledoc
+calling the Elixir PATCH floating underneath "real and deliberate".
+
+So neither gate reads the bytes that were pulled and neither compares two builds
+made at different times — nor should they. The consequence is what belongs to
+#2018: **if a drifted base ever produces an image that does not start, the only
+thing in this repository that finds out is the release-image smoke job.** It is
+not one check among several on the published container; it is the sole
+consequence-detector for a recipe the project has deliberately chosen to let
+move. That is why a blind spot in it costs more than its size suggests, and it
+is an argument FOR this gate rather than for pinning anything — a digest on
+`alpine:3.24` is argued in `base_image_digest_pin_test.bats` as the wrong move,
+because it would freeze security patches.
+
+### 🔴 What this does NOT cure — say it before someone reads a cure into it
+
+**The non-determinism is untouched and its mechanism remains unknown.** This
+gate produced red and then green on byte-identical input, which means it can lie
+in BOTH directions, and the direction that hurts is the false GREEN: the absence
+of the failure is not by itself evidence that the image boots. What shipped here
+cures the CECITY (an arm64 half nobody had ever executed) and the LEGIBILITY (a
+red nobody could classify). Neither of those is the flip.
+
+The honest expectation is narrower and worth writing down: the next occurrence
+arrives with the runner's facts attached and a comparison class to hold them
+against, which is the measurement nobody has been able to make so far. That is
+an instrument, not a diagnosis.
+
+A BEAM preflight — the cheapest possible VM start, run first, to attribute
+before six minutes of deploy — was designed and then dropped from this slice.
+It could not be exercised anywhere available (the honest proof is a
+`docker_validation` dispatch, and the local substrate is macOS/arm64 while the
+phenomenon is linux/amd64), and an untested new invocation in the release path
+is a new way for every release to go red in exchange for attribution the
+classifier already delivers a few minutes later. It is worth doing once
+something can run it.
+
+_CI + driver + docs. No wire change, no protocol bump, no supervision-tree or
+schema change. Deploy: nothing to deploy — the change is in `release.yml` and
+the smoke driver, both of which run only in CI._

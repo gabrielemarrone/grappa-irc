@@ -10,12 +10,15 @@ import { computeMenuPosition, placeAxis, spaceAbove } from "../lib/menuPosition"
 // flip/clamp arithmetic.
 //
 // placeAxis is the 1D primitive applied independently to X and Y, over a
-// half-open interval [start, end) rather than [0, viewport):
+// half-open interval [start, end) rather than [0, viewport), with a PREFERRED
+// side (#2014). With `prefer: "after"` — the #487 behaviour, unchanged:
 //   * fits after the click         → keep the click coord (open down/right)
 //   * overflows the far edge        → FLIP before the click (open up/left,
 //                                     pointer stays on the menu edge)
 //   * flip would underflow `start`  → CLAMP to the last fully-visible coord
 //   * menu bigger than the interval → pin to `start` (CSS max-height + scroll)
+// `prefer: "before"` is the mirror of the first three, and NOT of the fourth —
+// see the oversize test below, and the comment on `placeAxis` itself.
 //
 // #949 — the interval used to be hardcoded to [0, viewport). Zero is the
 // LAYOUT viewport origin, which under `viewport-fit=cover` (index.html) is the
@@ -26,28 +29,28 @@ import { computeMenuPosition, placeAxis, spaceAbove } from "../lib/menuPosition"
 
 describe("placeAxis (1D flip/clamp primitive)", () => {
   it("keeps the click coord when the menu fits after it", () => {
-    expect(placeAxis(100, 120, 0, 1000)).toBe(100);
+    expect(placeAxis(100, 120, 0, 1000, "after")).toBe(100);
   });
 
   it("flips before the click point when the menu overflows the far edge", () => {
     // click 950, menu 120, end 1000 → 1070 > 1000 → flip: 950 - 120
-    expect(placeAxis(950, 120, 0, 1000)).toBe(830);
+    expect(placeAxis(950, 120, 0, 1000, "after")).toBe(830);
   });
 
   it("keeps a click that lands exactly at the far edge", () => {
     // click 880, menu 120, end 1000 → 880 + 120 == 1000 → fits, no flip
-    expect(placeAxis(880, 120, 0, 1000)).toBe(880);
+    expect(placeAxis(880, 120, 0, 1000, "after")).toBe(880);
   });
 
   it("clamps to fully-visible when a flip would underflow the interval start", () => {
     // click 100, menu 180, [0,200) → overflow (280>200) AND menu fits
     // (180<200); flip 100-180=-80 < 0 → clamp to end-size = 20
-    expect(placeAxis(100, 180, 0, 200)).toBe(20);
+    expect(placeAxis(100, 180, 0, 200, "after")).toBe(20);
   });
 
   it("pins to the interval start when the menu is bigger than the interval", () => {
-    expect(placeAxis(150, 300, 0, 200)).toBe(0);
-    expect(placeAxis(150, 200, 0, 200)).toBe(0); // equal counts as oversized
+    expect(placeAxis(150, 300, 0, 200, "after")).toBe(0);
+    expect(placeAxis(150, 200, 0, 200, "after")).toBe(0); // equal counts as oversized
   });
 
   // #949 — the four cases above with a non-zero `start` / a pulled-in `end`.
@@ -59,28 +62,90 @@ describe("placeAxis (1D flip/clamp primitive)", () => {
     // notched iPhone the first row rendered behind the status bar and the
     // menu's own overflow scroll could not bring it back — the box itself
     // starts inside the occluded strip.
-    expect(placeAxis(150, 900, 59, 818)).toBe(59);
+    expect(placeAxis(150, 900, 59, 818, "after")).toBe(59);
   });
 
   it("clamps a flip against the safe start, not against zero", () => {
     // The [0,200) clamp case above, shifted into a safe [59, 259): click 100,
     // menu 180 → 280 > 259 → flip to -80, which is below the safe START, so we
     // clamp. The last FULLY VISIBLE origin is end-size = 79, not 20.
-    expect(placeAxis(100, 180, 59, 259)).toBe(79);
+    expect(placeAxis(100, 180, 59, 259, "after")).toBe(79);
   });
 
   it("flips against the safe end, not against the physical bottom", () => {
     // click 800, menu 120, safe [59, 818): 800+120=920 > 818 → flip to 680.
     // Against the physical bottom (852) it would have "fitted" at 800 and the
     // tail would have run under the home indicator.
-    expect(placeAxis(800, 120, 59, 818)).toBe(680);
+    expect(placeAxis(800, 120, 59, 818, "after")).toBe(680);
   });
 
   it("never returns a coordinate before the safe start, even for a click inside the inset", () => {
     // A press can land inside the LEFT inset in landscape (iOS does not
     // swallow touches there the way it does under the status bar), and the
     // menu would then open from a column the display corner is eating.
-    expect(placeAxis(10, 120, 59, 818)).toBe(59);
+    expect(placeAxis(10, 120, 59, 818, "after")).toBe(59);
+  });
+});
+
+// #2014 — the mirrored preference. On a touch device the menu must open
+// up-and-left of the finger, so the box's FAR edge is what lands on the press
+// point. Same three collision branches, taken from the other side.
+describe('placeAxis (prefer: "before")', () => {
+  it("puts the far edge on the click when the menu fits before it", () => {
+    // click 500, menu 120 → box [380, 500): its END is the press point.
+    expect(placeAxis(500, 120, 0, 1000, "before")).toBe(380);
+  });
+
+  it("keeps a click that lands exactly one menu from the interval start", () => {
+    expect(placeAxis(120, 120, 0, 1000, "before")).toBe(0);
+  });
+
+  it("flips AFTER the click when the menu would underflow the interval start", () => {
+    // click 100, menu 120 → 100-120 = -20 < 0 → flip: the box opens from the
+    // press point instead, which is the #487 placement arrived at backwards.
+    expect(placeAxis(100, 120, 0, 1000, "before")).toBe(100);
+  });
+
+  it("clamps to the interval start when the menu fits on neither side", () => {
+    // click 100, menu 180, [0,200): before → -80 (underflows), after → 280
+    // (overflows). The clamp goes toward the PREFERRED side, which is `start` —
+    // the mirror of the "after" clamp landing on `end - size`.
+    expect(placeAxis(100, 180, 0, 200, "before")).toBe(0);
+  });
+
+  it("never lands before the safe start when the flip is taken", () => {
+    // click 40 sits INSIDE a 59px top inset. before → -80, so we flip; the
+    // flipped coord is the raw click, and 40 is still occluded. This is the one
+    // guard the "after" branch does not need (its own fit arm carries the
+    // `Math.max`), so it is the one a mirror written by symmetry drops.
+    expect(placeAxis(40, 120, 59, 818, "before")).toBe(59);
+  });
+
+  it("never lands past the safe end for a click inside the trailing inset", () => {
+    // click 830 is below the 818 safe bottom (the home-indicator strip). The
+    // far edge goes on the safe END, not on the occluded press point.
+    expect(placeAxis(830, 120, 59, 818, "before")).toBe(698);
+  });
+
+  it("pins an oversized menu to the interval START, exactly like the other side", () => {
+    // 🔴 THE ASYMMETRY. Every other branch mirrors; this one must NOT. The
+    // fallback for a menu taller than its interval is the CSS `max-height` +
+    // `overflow-y: auto` pair, and that box grows DOWN from `top` / RIGHT from
+    // `left` — so the origin has to be the near edge whichever corner was
+    // preferred. Mirrored to `end - size` it would put the menu's HEAD above
+    // `start`, i.e. behind the status bar on a notched iPhone, with the
+    // overflow scroll unable to bring it back (the #913 defect at this door).
+    expect(placeAxis(150, 300, 0, 200, "before")).toBe(0);
+    expect(placeAxis(150, 200, 0, 200, "before")).toBe(0);
+    expect(placeAxis(150, 900, 59, 818, "before")).toBe(59);
+  });
+
+  it("answers differently from the same call preferring the other side", () => {
+    // The mutation guard: one input, both sides, two answers. Without this a
+    // `prefer` that is read and thrown away passes every test above that
+    // happens to agree.
+    expect(placeAxis(500, 120, 0, 1000, "before")).not.toBe(placeAxis(500, 120, 0, 1000, "after"));
+    expect(placeAxis(500, 120, 0, 1000, "after")).toBe(500);
   });
 });
 
@@ -106,6 +171,7 @@ describe("computeMenuPosition (both axes)", () => {
         viewportWidth: 1280,
         viewportHeight: 720,
         safeArea: noInset(1280, 720),
+        anchor: "top-left",
       }),
     ).toEqual({ left: 100, top: 200 });
   });
@@ -119,6 +185,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 1280,
       viewportHeight: 720,
       safeArea: noInset(1280, 720),
+      anchor: "top-left",
     });
     expect(p.top).toBe(500); // 700 - 200
     expect(p.left).toBe(100); // X fits — unchanged
@@ -133,6 +200,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 1280,
       viewportHeight: 720,
       safeArea: noInset(1280, 720),
+      anchor: "top-left",
     });
     expect(p.left).toBe(1150); // 1270 - 120
     expect(p.top).toBe(100);
@@ -148,6 +216,7 @@ describe("computeMenuPosition (both axes)", () => {
         viewportWidth: 1280,
         viewportHeight: 720,
         safeArea: noInset(1280, 720),
+        anchor: "top-left",
       }),
     ).toEqual({ left: 1156, top: 516 });
   });
@@ -162,6 +231,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 390,
       viewportHeight: 180,
       safeArea: noInset(390, 180),
+      anchor: "top-left",
     });
     expect(p.top).toBe(0);
   });
@@ -180,6 +250,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 393,
       viewportHeight: 852,
       safeArea: iphone15Portrait,
+      anchor: "top-left",
     });
     expect(p.top).toBe(59);
   });
@@ -196,6 +267,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 393,
       viewportHeight: 852,
       safeArea: iphone15Portrait,
+      anchor: "top-left",
     });
     expect(p.top).toBe(680);
   });
@@ -211,6 +283,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 852,
       viewportHeight: 393,
       safeArea: { top: 0, right: 793, bottom: 372, left: 59 },
+      anchor: "top-left",
     });
     // 700 + 200 = 900 > 793 → flip to 500. Against the physical width (852)
     // it would have "fitted" at 700 and run under the rounded corner.
@@ -232,6 +305,7 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 393,
       viewportHeight: 516, // keyboard up: 852 - ~336
       safeArea: iphone15Portrait, // bottom still 818, the keyboard is not an inset
+      anchor: "top-left",
     });
     // 400 + 120 = 520 > 516 → flip to 280. Trusting the 818 safe bottom would
     // have left the menu under the keyboard — the #487 symptom.
@@ -249,8 +323,99 @@ describe("computeMenuPosition (both axes)", () => {
       viewportWidth: 393,
       viewportHeight: 516,
       safeArea: iphone15Portrait,
+      anchor: "top-left",
     });
     expect(p.top).toBe(59);
+  });
+
+  // #2014 — `anchor` names WHICH CORNER of the menu lands on the press point,
+  // and it drives both axes at once: "bottom-right" is the touch placement vjt
+  // measured as missing on iOS, where the menu has to open up-and-left so the
+  // hand that opened it is not sitting on top of it.
+  it("puts the bottom-right corner on the press point when the menu fits", () => {
+    expect(
+      computeMenuPosition({
+        clickX: 300,
+        clickY: 400,
+        menuWidth: 120,
+        menuHeight: 200,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        safeArea: noInset(1280, 720),
+        anchor: "bottom-right",
+      }),
+    ).toEqual({ left: 180, top: 200 });
+  });
+
+  it("opens down-and-right near the top-left corner, where up-and-left will not fit", () => {
+    // Both axes underflow, so both flip — and the result is bit-identical to
+    // what "top-left" would have produced. The collision logic is the SAME
+    // logic (#487's), read from the other side; there is no second mechanism.
+    expect(
+      computeMenuPosition({
+        clickX: 50,
+        clickY: 100,
+        menuWidth: 120,
+        menuHeight: 200,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        safeArea: noInset(1280, 720),
+        anchor: "bottom-right",
+      }),
+    ).toEqual({ left: 50, top: 100 });
+  });
+
+  it("keeps a flipped touch menu out of the status-bar inset", () => {
+    // A press at y=40 is inside the 59px top inset. Y cannot go up-and-left, so
+    // it flips down — and must start at the SAFE top, not at the occluded
+    // press point.
+    const p = computeMenuPosition({
+      clickX: 100,
+      clickY: 40,
+      menuWidth: 200,
+      menuHeight: 120,
+      viewportWidth: 393,
+      viewportHeight: 852,
+      safeArea: iphone15Portrait,
+      anchor: "bottom-right",
+    });
+    expect(p.top).toBe(59);
+  });
+
+  it("still pins an oversized touch menu to the safe TOP, not to the safe bottom", () => {
+    // The asymmetry again, at the 2D door: the CSS overflow fallback grows down
+    // from `top`, so the anchor preference does not reach this branch.
+    const p = computeMenuPosition({
+      clickX: 100,
+      clickY: 400,
+      menuWidth: 200,
+      menuHeight: 900,
+      viewportWidth: 393,
+      viewportHeight: 852,
+      safeArea: iphone15Portrait,
+      anchor: "bottom-right",
+    });
+    expect(p.top).toBe(59);
+  });
+
+  it("answers differently from the same measurement anchored top-left", () => {
+    const measurement = {
+      clickX: 300,
+      clickY: 400,
+      menuWidth: 120,
+      menuHeight: 200,
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      safeArea: noInset(1280, 720),
+    };
+    expect(computeMenuPosition({ ...measurement, anchor: "top-left" })).toEqual({
+      left: 300,
+      top: 400,
+    });
+    expect(computeMenuPosition({ ...measurement, anchor: "bottom-right" })).toEqual({
+      left: 180,
+      top: 200,
+    });
   });
 });
 

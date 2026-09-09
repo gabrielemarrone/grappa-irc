@@ -19,6 +19,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   escapePwaHref,
+  isCoarsePointer,
   isStandalonePwa,
   maybeEscapePwaClick,
   safariEscapeHref,
@@ -51,6 +52,30 @@ describe("isStandalonePwa", () => {
 
   it("survives environments without matchMedia at all (jsdom)", () => {
     expect(isStandalonePwa()).toBe(false);
+  });
+});
+
+// #2014 — the probe the context-menu anchor reads: on a coarse primary pointer
+// the menu opens up-and-left so the finger that opened it is not on top of it.
+// The VISIBLE placement is a Playwright matter (jsdom's zero-sized rects
+// collapse both anchors onto the same coordinate — see menuPosition.ts on why
+// that seam is pure); what is pinnable here is the probe and its degrade.
+describe("isCoarsePointer", () => {
+  it("is true when the primary pointer is coarse (touch device)", () => {
+    stubMatchMedia(true);
+    expect(isCoarsePointer()).toBe(true);
+  });
+
+  it("is false when the primary pointer is fine (mouse)", () => {
+    stubMatchMedia(false);
+    expect(isCoarsePointer()).toBe(false);
+  });
+
+  it("degrades to the mouse behaviour where matchMedia is absent", () => {
+    // The `sidebarWidths.ts` convention — absent means "not in the tier".
+    // Degrading the other way would hand every jsdom component test, and any
+    // engine without the query, the touch anchor.
+    expect(isCoarsePointer()).toBe(false);
   });
 });
 

@@ -25,6 +25,8 @@
 // Returns a disposer the caller wraps in `onCleanup` (Solid does NOT re-invoke
 // a function ref with undefined at unmount the way React does — #308 landmine
 // 3 — so cleanup is explicit).
+import { isDiagEnabled } from "../DiagFloat";
+import { diagPush } from "./diagLog";
 import { LONG_PRESS_MS, SELECTABLE_TEXT_EXCLUDE } from "./keepKeyboard";
 import { disarmMessageSelection } from "./messageMenu";
 import { type Point, swipeDirection } from "./swipe";
@@ -220,6 +222,22 @@ export function bindMessageGestures(el: HTMLElement, params: MessageGestureParam
     // backdrop and close it the instant it appeared.
     if (held) {
       held = false;
+      // issue 1956 — the one fact this shield's failure hinges on, and the one
+      // nothing off-device can supply. `preventDefault` on a NON-cancelable
+      // event is SILENT: no throw, and `defaultPrevented` stays false, so the
+      // shield reads applied while doing nothing. Pushed BEFORE the call so the
+      // line records what was OBSERVED, never what was attempted.
+      //
+      // What it decides: the menu vanishes on iOS only with the keyboard down,
+      // and the only focus-dependent branch anywhere on this path is
+      // keepKeyboard's `handleMouseDown` bail — which cancels a focus shift,
+      // NOT a click (the whole of UX-3 depends on the click surviving it). So
+      // the popular reading is falsified and two candidates remain: a release
+      // WebKit refuses to let us cancel (this line answers it), or a close
+      // arriving through some other door (the menu's own line answers that).
+      if (isDiagEnabled()) {
+        diagPush(`menu: touchend after hold cancelable=${e.cancelable}`);
+      }
       if (e.cancelable) e.preventDefault();
       release();
       return;

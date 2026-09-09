@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { setDiagEnabled } from "../DiagFloat";
+import { diagLog } from "../lib/diagLog";
 import { LONG_PRESS_MS } from "../lib/keepKeyboard";
 import {
   bindMessageGestures,
@@ -10,7 +12,7 @@ import {
   SWIPING_CLASS,
 } from "../lib/messageGestures";
 import { disarmMessageSelection, SELECTING_CLASS } from "../lib/messageMenu";
-import { fireTouch } from "./helpers/touchEvents";
+import { fireTouch, fireTouchUncancelable } from "./helpers/touchEvents";
 
 // #1067 — the scrollback's ONE touch-gesture owner: a left→right swipe on a
 // message row fills the compose box with a quote, a stationary hold opens the
@@ -268,6 +270,64 @@ describe("bindMessageGestures — long press = message menu", () => {
     const end = fireTouch(body, "touchend", { clientX: CENTER_X, clientY: 300 });
     expect(onReply).not.toHaveBeenCalled();
     expect(end.defaultPrevented).toBe(true);
+  });
+
+  // issue 1956 — the shield above is the ONE thing standing between the release
+  // of a hold and a synthesized click onto the menu's own backdrop, and it is
+  // conditional on `e.cancelable`. On a non-cancelable touchend `preventDefault`
+  // is silent — no throw, no `defaultPrevented` — so the shield reads applied
+  // while doing nothing, and nothing off-device can say which of the two vjt's
+  // iPhone hands it. These pin the INSTRUMENT that will answer that: the line
+  // must carry the value OBSERVED, both ways, and must cost nothing with the
+  // flag off.
+  //
+  // `diagLog` is a module-level ring with no reset (deliberately: a reset export
+  // would be test-only API on a production module), so every assertion here
+  // reads the NEWEST entry — diagPush prepends — or compares the whole array
+  // across the action. That is leak-proof under any test order.
+  describe("issue 1956 — the cancelable of the release after a hold", () => {
+    afterEach(() => {
+      setDiagEnabled(false);
+    });
+
+    function holdThenRelease(uncancelable: boolean): Event {
+      fireTouch(body, "touchstart", { clientX: CENTER_X, clientY: 300 });
+      vi.advanceTimersByTime(LONG_PRESS_MS);
+      const fire = uncancelable ? fireTouchUncancelable : fireTouch;
+      return fire(body, "touchend", { clientX: CENTER_X, clientY: 300 });
+    }
+
+    it("records cancelable=true when the release can be cancelled", () => {
+      setDiagEnabled(true);
+      const end = holdThenRelease(false);
+      expect(diagLog()[0]).toContain("cancelable=true");
+      // The shield really did fire — the line is not describing a hypothetical.
+      expect(end.defaultPrevented).toBe(true);
+    });
+
+    it("records cancelable=false — and shows the shield is then a silent no-op", () => {
+      setDiagEnabled(true);
+      const end = holdThenRelease(true);
+      expect(diagLog()[0]).toContain("cancelable=false");
+      // THE point of the whole instrument: preventDefault left no trace, so
+      // this line is the only evidence the release went unshielded.
+      expect(end.defaultPrevented).toBe(false);
+    });
+
+    it("pushes nothing with the diag flag off", () => {
+      setDiagEnabled(false);
+      const before = diagLog();
+      holdThenRelease(false);
+      expect(diagLog()).toBe(before);
+    });
+
+    it("pushes nothing on a release that was never a hold", () => {
+      setDiagEnabled(true);
+      const before = diagLog();
+      fireTouch(body, "touchstart", { clientX: CENTER_X, clientY: 300 });
+      fireTouch(body, "touchend", { clientX: CENTER_X, clientY: 300 });
+      expect(diagLog()).toBe(before);
+    });
   });
 
   it("does not arm on an inline control inside the row", () => {

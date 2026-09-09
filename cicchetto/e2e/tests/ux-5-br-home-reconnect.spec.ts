@@ -115,7 +115,17 @@ test("UX-5 BR — Home pane [Reconnect] chip reconnects a parked network", async
   });
 
   // Cic lands on HomePane post-login (UX-4 bucket B selection default).
-  await loginAs(page, vjt);
+  //
+  // issue 1985 — `noSidebarNetworks` because the PATCH above parked the only
+  // network this user has, and a parked network no longer draws a sidebar
+  // row. `loginAs`'s default gate waits on `.sidebar-network-header`, which
+  // for this account can now never appear: not a flake, a shell-ready proxy
+  // that stopped describing this state. The weaker home-pane gate is the
+  // right one HERE — everything below reads `.home-pane-*` or goes to REST,
+  // and nothing touches the sidebar, which is the race the opt's comment
+  // warns about. `waitForUserTopicReady` still runs inside that branch, so
+  // the WS barrier the chip click depends on is unchanged.
+  await loginAs(page, vjt, { noSidebarNetworks: true });
   const homePane = page.locator(".home-pane-registered");
   await expect(homePane).toBeVisible({ timeout: 10_000 });
 
@@ -240,7 +250,10 @@ test("UX-5 BR — chip surfaces friendly error inline when cap is exceeded", asy
   });
   await adminPatchCaps(admin.token, NETWORK_SLUG, { max_concurrent_user_sessions: 0 });
 
-  await loginAs(page, vjt);
+  // issue 1985 — same reason as the arm above: the only network is parked, so
+  // no sidebar header will appear and the default shell-ready gate cannot
+  // fire. This arm never leaves the home pane either.
+  await loginAs(page, vjt, { noSidebarNetworks: true });
   const homePane = page.locator(".home-pane-registered");
   await expect(homePane).toBeVisible({ timeout: 10_000 });
 

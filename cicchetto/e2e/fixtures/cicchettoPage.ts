@@ -143,7 +143,7 @@ async function seedAuthLocalStorage(page: Page, token: string, subjectJson: stri
 export async function loginAs(
   page: Page,
   vjt: SeededUser,
-  opts: { noNetworks?: boolean } = {},
+  opts: { noSidebarNetworks?: boolean } = {},
 ): Promise<void> {
   await seedAuthLocalStorage(page, vjt.token, vjt.subjectJson);
   await page.goto("/");
@@ -159,19 +159,27 @@ export async function loginAs(
   // OR-style selector would be more brittle than a viewport-
   // conditioned one.
   //
-  // UX-7-C (2026-05-22) — `noNetworks: true` opt-in for users with
-  // NO networks bound (M-7 seeded admin-vjt has no credentials). The
-  // per-network-header selector waits forever in that case; switch
-  // to the registered home pane placeholder ("No networks bound")
-  // which is the post-/me steady-state render for empty-networks
-  // accounts. Opt-in rather than OR-selector because the
-  // `.home-pane-registered` element can RACE in front of the network
-  // section for normal bound users (homeData resolves off /me alone;
-  // network sidebar/bottom-bar wait for /networks + /channels) —
-  // weakening the post-loginAs invariant from "shell fully populated"
-  // to "DOM has homepane scaffolding". Callers that immediately
-  // interact with sidebar/bottom-bar windows would race.
-  if (opts.noNetworks === true) {
+  // UX-7-C (2026-05-22) — opt-in for accounts that will render NO network
+  // row, where the per-network-header selector waits forever; switch to the
+  // registered home pane, which is the post-/me steady state for them. Opt-in
+  // rather than OR-selector because `.home-pane-registered` can RACE in front
+  // of the network section for normal bound users (homeData resolves off /me
+  // alone; network sidebar/bottom-bar wait for /networks + /channels) —
+  // weakening the post-loginAs invariant from "shell fully populated" to "DOM
+  // has homepane scaffolding". Callers that immediately interact with
+  // sidebar/bottom-bar windows would race, so pass this ONLY when the spec
+  // stays on the home pane.
+  //
+  // issue 1985 — named `noSidebarNetworks`, not `noNetworks`, because there
+  // are now TWO ways to get here and the old name is false for the second.
+  // UX-7-C's case is "the account has no credential bound at all" (M-7's
+  // admin-vjt). The new one is "every network the account HAS is `parked`",
+  // which since issue 1985 draws no sidebar row either — the network exists,
+  // it is simply not a window right now, and `$home` is where it lives (with
+  // its [Reconnect] chip). The gate never cared which of the two it was: what
+  // it selects on is whether a network header will ever appear, so the name
+  // says that and one opt covers both.
+  if (opts.noSidebarNetworks === true) {
     await expect(page.locator(".home-pane-registered").first()).toBeVisible({
       timeout: SHELL_READY_TIMEOUT_MS,
     });
@@ -209,7 +217,7 @@ export async function loginAs(
 // Deliberately NOT `loginAs`, though the seeding half is now literally
 // the same call. The seeded admin (`admin-vjt`) has NO networks bound,
 // so `loginAs`'s per-network-header selector never resolves for it;
-// reaching it would mean `noNetworks: true`, whose own comment above
+// reaching it would mean `noSidebarNetworks: true`, whose own comment above
 // calls that a weakening of the post-login invariant. Adopting
 // `loginAs` would also buy `waitForUserTopicReady`, which none of the
 // twenty specs needs today — none of them composes `/join` — and which

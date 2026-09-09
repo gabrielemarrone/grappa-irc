@@ -523,7 +523,7 @@ test("@webkit @touch UX-4-Z cluster — case-fix + home + sidebar collapse + clo
     // logic above relies on vjt being seeded).
     const adminPage = await context.newPage();
     const admin = getSeededAdmin();
-    await loginAs(adminPage, admin, { noNetworks: true });
+    await loginAs(adminPage, admin, { noSidebarNetworks: true });
     // #71 INC-2 — settings reachable for the home selection (bucket L). On
     // mobile the door is the ☰ rail opener; assert it, then reach settings via
     // the rail helper (admin-on-home case).

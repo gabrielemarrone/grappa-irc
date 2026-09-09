@@ -64,12 +64,12 @@ test("sustained inbound flood 429s then severs the web session; a second subject
 
   // Flooder — a live, authenticated cicchetto page on the DEDICATED
   // sacrificial victim (NEVER vjt: the sever revokes this bearer) with an
-  // open WS. `noNetworks: true` — the victim is bind-less (no live
+  // open WS. `noSidebarNetworks: true` — the victim is bind-less (no live
   // Session.Server → invisible to the /admin/sessions leak canary, no
   // user-cap slot), so loginAs gates on the registered empty-home pane +
   // the user-topic subscribe (which delivers the sever event → banner),
   // not a network header that never renders.
-  await loginAs(page, getSeededFloodVictim(), { noNetworks: true });
+  await loginAs(page, getSeededFloodVictim(), { noSidebarNetworks: true });
 
   // Capture the flood bearer BEFORE the sever (cic clears localStorage on
   // logout) so we can prove the OLD credential is refused afterwards.

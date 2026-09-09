@@ -52,9 +52,9 @@ test.describe("#481 user self-serve accretion", () => {
   test("a USER one-taps an available network from home and it connects live", async ({ page }) => {
     const user = getSeededAccreteUser();
     // accr481 holds NO network → home renders the self-serve empty state
-    // (noNetworks: true waits on the registered home pane, not a sidebar
+    // (noSidebarNetworks: true waits on the registered home pane, not a sidebar
     // network header that does not exist yet).
-    await loginAs(page, user, { noNetworks: true });
+    await loginAs(page, user, { noSidebarNetworks: true });
 
     // #481 — the self-serve "available to connect" section renders for a
     // USER now (it was visibly present only for visitors before).

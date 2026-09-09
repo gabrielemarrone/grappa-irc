@@ -490,8 +490,10 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
       user = user_fixture()
 
       older_body =
-        valid_wire(%{"time_format" => "hm", "colored_nicklist" => true})
-        |> Map.delete("strip_formatting")
+        Map.delete(
+          valid_wire(%{"time_format" => "hm", "colored_nicklist" => true}),
+          "strip_formatting"
+        )
 
       assert {:ok, _} = UserSettings.put_display_prefs({:user, user.id}, older_body)
 

@@ -49542,3 +49542,122 @@ Across all 326 markers there are three findings and all three are same-commit:
 zero false positives observed, and no reachable case constructed. Should one
 ever turn up, the honest cure is to read the lines the branch ADDS rather than
 the file — a larger change than this gap justified today.
+<!-- entry #2014 -->
+
+---
+
+## 2026-09-09 — #2014: the flip was never the bug, the preferred side was
+
+On iOS the long-press message menu opened **down-and-right of the touch
+point**, so the hand that opened it covered it. vjt measured it on an iPhone
+with cicchetto installed as a PWA, against staging `1.5.3-def8cb2ac`. The ask:
+the menu's **bottom-right corner sits on the press point**, so it opens
+up-and-left, out from under the thumb.
+
+### One defect, not two, and the code says so
+
+The issue lists two things as **not measured** — whether the placement is also
+wrong with the keyboard UP, and whether it changes near the viewport EDGES —
+and warns that an anchor bug and a viewport-collision flip look identical from
+one screenshot. Both were answerable by reading `lib/menuPosition.ts`, and the
+answers are what made the cure small.
+
+**Keyboard up:** `ContextMenu` feeds `computeMenuPosition` the VISUAL viewport,
+which does shrink with the keyboard. But the fit arm returns `click` whether or
+not the keyboard is up; what the keyboard moves is the FLIP THRESHOLD, not the
+anchor. One defect, at one door.
+
+**Edges:** near the far edge `placeAxis` already FLIPS, and a flip puts the
+box's far edge on the press point — which is the geometry being asked for. In
+the bottom-right corner the menu already rendered exactly as vjt wants it.
+**So the flip is not the defect: it is the discriminant the issue was asking
+for.** What was wrong was only which side we PREFER. That is why this is one
+parameter on the existing primitive — `placeAxis(click, size, start, end,
+prefer)` — and not a second placement mechanism beside the first.
+
+`prefer` is REQUIRED, with no default. A default picks an anchor on behalf of a
+caller that never thought about one, which is the shape of the bug being fixed.
+
+### The one branch that must not mirror
+
+Three of the four branches mirror cleanly. The fourth does not: a menu bigger
+than its interval still pins to `start` under BOTH preferences, because the
+fallback it hands off to is the CSS `max-height` + `overflow-y: auto` pair, and
+that box grows DOWN from `top` / RIGHT from `left`. Mirrored to `end - size` it
+would put the menu's HEAD above `start` — behind the status bar on a notched
+iPhone, with the overflow scroll unable to bring it back, which is the #913
+defect re-entered at this door. Derived from the fallback's growth direction,
+not measured on a device; what a device would add is how bad it looks, not
+whether it happens. Commented where it lives, because "make the mirror
+symmetric" is a tidy-up somebody will attempt.
+
+A second, smaller asymmetry sits in the guards: the `before` arm needs a
+`Math.max(click, start)` on its FLIP where the `after` arm carries the
+equivalent on its FIT. A press can land inside the leading inset, and each
+preference meets that press in a different arm. The asymmetry is in which arm
+needs the guard, not in the policy.
+
+### The gate is the POINTER, not the door
+
+`(pointer: coarse)`, read once in `ContextMenu` — the module that already owns
+placement — via a new `isCoarsePointer()` in `lib/platform.ts`. The precedent
+is #1869's, verbatim: `default.css` moved the whole selection/callout policy
+off `html.is-ios` onto exactly this query because it *"keys on the actual
+pointing device rather than a UA sniff"*. A second, disagreeing notion of "is
+this touch" is the drift that issue is a record of.
+
+The rejected alternative was deciding per EVENT at each door, which sounds
+more precise and is not: the message menu has TWO doors reaching one opener
+(`bindMessageGestures`'s hold and `bindMessageContextMenu`'s `contextmenu`,
+both landing on `openMenuForRow`), so a per-event anchor lets them disagree
+about the same press, last writer winning. Accepted cost, identical in kind to
+the one #1869 already took: `pointer` describes the PRIMARY pointer, so a
+hybrid whose primary is touch gives its occasional mouse the touch anchor.
+
+**Scope is vjt's ruling** (`#grappa`, 2026-09-09 00:24Z, relayed): *"tutta la
+shell"* — every menu on the shared shell, so no host passes an anchor and none
+can drift. The nick menu and the admin verb menu inherit it. On a fine pointer
+NOTHING moves: the desktop right-click keeps the native down-and-right.
+
+### The premise that said this could not be tested
+
+The issue states the e2e suite cannot host the gesture, citing
+`webkit-iphone-15`'s `tap()`. **False, and both halves of the refutation were
+already in the repo:** `issue1067-swipe-reply-message-menu.spec.ts` has
+synthesized a real touchstart → wall-clock hold → touchend since #1067, and its
+own header records that `hasTouch: true` puts Chromium's primary pointer at
+COARSE. The citation is about a different engine and a different verb.
+
+So `issue2014-context-menu-touch-anchor.spec.ts` runs three tests: the reported
+path (coarse, long-press, message row), and a PAIR that isolates the gate —
+same door, same surface, one variable changed, the pointer. The pair is what
+keeps "maybe the DOOR decides" from standing, and it doubles as the scope proof,
+since the nick menu passes no anchor of its own and can only have got its
+answer from the shell.
+
+Every test asserts an anti-hollow precondition first: that at the chosen point
+the menu would have fitted on BOTH sides of both axes. Without it a collision
+flip satisfies the corner assertion by itself and the spec goes green against a
+reverted fix — the very confusion the issue names.
+
+**Declared limit.** Chromium is not iOS, and every engine in the suite reports
+`env(safe-area-inset-*)` as `{0,0,0,0}`, so nothing in that file exercises the
+notch or the home indicator; the inset arithmetic is unit work
+(`menuPosition.test.ts` carries the iPhone 15 numbers) and the FELT result stays
+vjt's on-device dogfood.
+
+### An inference left standing, and how to kill it
+
+Not chased in this slice, and not a second mechanism: since #1869 a scrollback
+row computes `user-select: none` standing on a coarse pointer, and Blink fires
+`contextmenu` on a long-press over non-selectable content. If that holds, an
+Android long-press already opens the menu TWICE today — invisibly, because both
+doors pass the same point. It is an INFERENCE: no browser launches on the
+machine this was written on, and it was never reproduced.
+
+**What would falsify it, in thirty seconds on any Android:** open the console,
+`addEventListener('contextmenu', e => console.log('ctx', e.clientX, e.clientY),
+true)` on `document`, then long-press a message row. No line logged ⇒ the
+inference is dead and the doors never race. A line logged ⇒ it is real, and
+worth its own issue. The pointer-keyed gate above makes it harmless either way:
+both doors read the same pointer and cannot disagree.

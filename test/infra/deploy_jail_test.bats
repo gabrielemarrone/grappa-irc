@@ -35,6 +35,14 @@ setup() {
     # exist in the throwaway clone for the script to run — committed so
     # pulls stay clean. Assertions below are UNCHANGED by the extraction.
     cp "$BATS_TEST_DIRNAME/../../infra/lib/deploy_common.sh" "$UPSTREAM/infra/lib/deploy_common.sh"
+    # …and the jail NAME (#2022), sourced BEFORE the operator hints that quote
+    # it. Absent, `set -eu` kills the script on line 46 with `No such file or
+    # directory` and every case below fails at its first assertion, with the
+    # cause nowhere in the bats output — which is exactly how it reached main.
+    # One cp per lib the script sources is the shape the docker and linux
+    # fixtures already use; it is a hand-kept mirror of the source list, and
+    # this is the second entry it has ever had.
+    cp "$BATS_TEST_DIRNAME/../../infra/lib/bastille_jail.sh" "$UPSTREAM/infra/lib/bastille_jail.sh"
     echo wrapper > "$UPSTREAM/infra/freebsd/bin/grappa-source-alias"
     # jail_*.sh delegates → recorders. Committed so pulls stay clean.
     for stub in jail_cic_build.sh jail_release.sh jail_install_rcd.sh jail_install_source_alias.sh jail_beam_wait.sh; do

@@ -145,7 +145,17 @@ let _socket: Socket | null = null;
 // designed — `protocol_test.exs` went red at the commit that moved
 // `@protocol_version` (the `invalid_mask` token) without this line, so the
 // two moved together instead of this file lagging for another three weeks.
-export const CLIENT_PROTOCOL_VERSION = 14;
+//
+// 14 → 15 (#2029): the second, and the pin earned its keep twice over. The
+// `display_prefs` object grew a fifth key (`strip_formatting`) and `wire_pin
+// --check` could NOT see it — its digest does not span hand-written
+// `*_json.ex` views, so it answered "wire shape and protocol 14 agree" at rc=0
+// on a real shape change. `protocol_test.exs` is what went red for the missing
+// half of the bump, which makes it the ONLY automatic guard on this pair for
+// any payload the codegen does not cover. `MIN_SERVER_PROTOCOL_VERSION` stays
+// at 9, correctly: the new key is absent-tolerant in both directions, so this
+// bundle still serves a v9 server — the two axes behaving as designed.
+export const CLIENT_PROTOCOL_VERSION = 15;
 
 // #193 — force the correct WS scheme from the page origin, absolutely.
 //

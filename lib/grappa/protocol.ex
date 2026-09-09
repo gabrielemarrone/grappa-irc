@@ -319,8 +319,14 @@ defmodule Grappa.Protocol do
   # @min_protocol_version stays at 1, and deliberately: the key is absent-
   # tolerant in BOTH directions (`fetch_optional_display_bool/3` server-side,
   # `?? DEFAULT_DISPLAY_PREFS` client-side), so a bundle carrying it degrades
-  # against an older server instead of breaking. cic's own
+  # against an older server instead of breaking. cic's
   # MIN_SERVER_PROTOCOL_VERSION does not move for the same reason.
+  #
+  # cic's OTHER constant does: `CLIENT_PROTOCOL_VERSION` (socket.ts) moves
+  # 14 → 15 in lockstep, because it says what cic SPEAKS rather than what it
+  # requires. #1973's `protocol_test.exs` pin is what caught the half-done bump
+  # here — and with `wire_pin --check` blind to this payload, that pin was the
+  # ONLY automatic guard standing on this change.
   @protocol_version 15
   @min_protocol_version 1
 

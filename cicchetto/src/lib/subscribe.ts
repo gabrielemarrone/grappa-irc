@@ -890,10 +890,21 @@ moduleRoot(() => {
             // #546 narrowed WHAT reaches this arm, without changing it: a
             // peer's own NOTICE no longer lands at `channel == ownNick` at
             // all (it routes to `$server`, or to the peer's own topic when
-            // that query is already open). What still arrives here is the
-            // server-emitted CTCP-query visibility row above. No cic edit
-            // was needed for #546 precisely because this is a renderer —
-            // the routing it mirrors moved underneath it.
+            // that query is already open). No cic edit was needed for #546
+            // precisely because this is a renderer — the routing it
+            // mirrors moved underneath it.
+            //
+            // issue 2024 narrowed it AGAIN, and took away the one example
+            // the paragraph above used to end on ("what still arrives here
+            // is the server-emitted CTCP-query visibility row"). It does
+            // not: an inbound CTCP query now goes through the same #546
+            // door, so its visibility row lands on `$server` or in the
+            // already-open query, never at `channel == ownNick`. No cic
+            // edit was needed for that either, for the same reason.
+            // ⚠️ NOT claimed: that this arm is now unreachable. Its full
+            // input set was not enumerated, so it stays — a renderer arm
+            // that fires on nothing costs nothing, and deleting one whose
+            // inputs you have not measured is how a class goes silent.
             //
             // sender !== ownNick guard: don't route our OWN outbound NOTICEs
             // (they ride the topic too as fan-out echo). Service-to-self

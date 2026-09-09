@@ -581,31 +581,20 @@ defmodule Grappa.Session.EventRouter do
         version = Grappa.Version.current()
         reply = "NOTICE #{sender} :\x01VERSION grappa #{version}\x01"
 
-        # Persist the inbound query so cic surfaces it. Routing rule
-        # mirrors how a real inbound PRIVMSG would land: a private CTCP
-        # query (target == own_nick) persists on the own-nick topic —
-        # that's where cic's dm-listener observes inbound DM-shaped
-        # traffic and re-keys it onto the sender's window. The window
-        # itself is minted SERVER-side (#422): `build_persist/6` sets
-        # `dm_with = sender` via `Scrollback.dm_peer/4`, and
-        # `Session.Server.maybe_open_query_window/2` keys on
-        # `dm_with || channel`. Persisting at channel = sender instead
-        # would land the broadcast on a topic cic isn't subscribed to
-        # until that window already exists.
-        # Channel-targeted CTCP keeps target as channel (no re-key).
+        # Persist the inbound query so cic surfaces it. Where it lands is
+        # `ctcp_query_channel/3` — the ONE routing rule the four CTCP
+        # query arms share; see it for the whole argument.
         #
-        # #546 does NOT reach this arm: it reverses the NOTICE door
-        # (`route_non_channel_notice/3`), and a CTCP query arrives as a
-        # PRIVMSG. So this visibility row still opens the peer's window —
-        # the issue predicted it would go quiet, and it does not. Pinned
-        # by a `server_test.exs` case rather than left to be re-derived.
-        # #537 — `canonical_target/1` (fold at every identifier boundary)
-        # so a DM CTCP target (a peer nick) folds into a canonical window
-        # KEY; the sigil-gated form left it raw-cased.
-        dm_channel =
-          if nick_eq?(target, state.nick),
-            do: state.nick,
-            else: Identifier.canonical_target(target, casemapping(state))
+        # issue 2024 rewrote what used to stand here. This arm read: "a
+        # private CTCP query persists on the own-nick topic […] #546 does
+        # NOT reach this arm […] so this visibility row still opens the
+        # peer's window." Accurate then, and exactly the defect: the
+        # minting was a documented consequence nobody had ruled on. vjt
+        # ruled it (`<< network`), so the arm now goes through the #546
+        # door and a probe from a stranger mints nothing.
+        # Channel-targeted CTCP still keeps target as channel (no re-key),
+        # with #537's fold applied to the key — that half is unchanged.
+        dm_channel = ctcp_query_channel(target, sender, state)
 
         notice_body = "CTCP VERSION query → grappa #{version}"
         # sender_meta/1, not %{}: this row's sender is a peer nick off a real
@@ -3126,11 +3115,18 @@ defmodule Grappa.Session.EventRouter do
   # routed here. That is the whole mechanism by which a notice stops
   # spawning windows: routing, not a second carve-out at the open site.
   #
-  # Two doors, deliberately asymmetric:
+  # THREE doors, deliberately asymmetric — the third arrived with issue
+  # 2024, and the asymmetry is the point: the split is conversation vs
+  # control surface, not NOTICE vs PRIVMSG.
   #   * NOTICE (`route_non_channel_notice_non_chanserv/3`) — EVERY nick
   #     sender. A notice is announcement, not conversation.
-  #   * PRIVMSG (`privmsg_default/3`) — services senders ONLY. A peer's DM
-  #     still opens the conversation; that is what a DM is for.
+  #   * CTCP QUERY (`ctcp_query_channel/3`) — EVERY nick sender. A probe
+  #     is a control surface, and it arrives as a PRIVMSG, which is why
+  #     it walked past this door until somebody was handed a tab by a
+  #     stranger who only asked for a VERSION string.
+  #   * PRIVMSG (`privmsg_default/3`) — services senders ONLY. A peer's
+  #     ordinary DM still opens the conversation; that is what a DM is
+  #     for, and it is the one arm of the three that still mints.
   #
   # The open-window fact is a per-(subject, network) DB read. EventRouter
   # is a pure classifier ("No Repo"), so the lookup is injected as the
@@ -3163,6 +3159,41 @@ defmodule Grappa.Session.EventRouter do
     if open?.(state.subject, state.network_id, sender),
       do: sender,
       else: "$server"
+  end
+
+  # The window an inbound CTCP QUERY's visibility row lands in — the ONE
+  # place the four answering arms (VERSION, PING, USERINFO, AVATAR) get
+  # that key. It used to be four inline copies of the same three lines.
+  #
+  # issue 2024 — a DM-targeted query resolved to `state.nick`, which made
+  # `build_persist/6` set `dm_with = sender` (`Scrollback.dm_peer/4`
+  # returns the sender when the target IS us), and
+  # `Session.Server.maybe_open_query_window/2` keys on `dm_with ||
+  # channel`. So a stranger who probed the bouncer MINTED a tab with
+  # somebody the operator never talked to — the receiver paid a window for
+  # a wire line they did not ask for. vjt's ruling on #grappa was `<<
+  # network`: the `#546` door wins here too.
+  #
+  # It CALLS that door (`open_query_or_server/2`) rather than restating
+  # it. A second copy of "open query → that query, else `$server`" is a
+  # boundary violation, not a cure: the two would drift, and the reason
+  # this arm was broken in the first place is that the rule lived in one
+  # branch and the traffic arrived on another.
+  #
+  # The CHANNEL-targeted branch is deliberately untouched. A channel CTCP
+  # keeps the channel key, takes no `dm_with`, and minted nothing before
+  # or after — routing it through the peer-window door would drag a
+  # channel row into a query.
+  #
+  # NOT the same as the NOTICE short-circuit above it: that one sends
+  # CTCP-framed REPLIES to `$server` unconditionally, open window or not,
+  # because a reply is protocol we asked for. This is the QUERY direction,
+  # and an open conversation still claims it.
+  @spec ctcp_query_channel(String.t(), String.t(), state()) :: String.t()
+  defp ctcp_query_channel(target, sender, state) do
+    if nick_eq?(target, state.nick),
+      do: open_query_or_server(sender, state),
+      else: Identifier.canonical_target(target, casemapping(state))
   end
 
   @spec chanserv_bracket_match(String.t(), String.t()) :: {String.t(), String.t()} | nil
@@ -3213,10 +3244,7 @@ defmodule Grappa.Session.EventRouter do
         :none -> "NOTICE #{sender} :\x01PING\x01"
       end
 
-    dm_channel =
-      if nick_eq?(target, state.nick),
-        do: state.nick,
-        else: Identifier.canonical_target(target, casemapping(state))
+    dm_channel = ctcp_query_channel(target, sender, state)
 
     # Same as the VERSION row above: a real peer nick, so the key belongs.
     {state2, persist_eff} =
@@ -3250,10 +3278,7 @@ defmodule Grappa.Session.EventRouter do
     info = userinfo_text(state.profile)
     reply = "NOTICE #{sender} :\x01USERINFO #{info}\x01"
 
-    dm_channel =
-      if nick_eq?(target, state.nick),
-        do: state.nick,
-        else: Identifier.canonical_target(target, casemapping(state))
+    dm_channel = ctcp_query_channel(target, sender, state)
 
     {state2, persist_eff} =
       build_persist(
@@ -3289,10 +3314,7 @@ defmodule Grappa.Session.EventRouter do
     sender = Message.sender_nick(msg)
     reply = "NOTICE #{sender} :\x01AVATAR #{state.avatar_url}\x01"
 
-    dm_channel =
-      if nick_eq?(target, state.nick),
-        do: state.nick,
-        else: Identifier.canonical_target(target, casemapping(state))
+    dm_channel = ctcp_query_channel(target, sender, state)
 
     {state2, persist_eff} =
       build_persist(

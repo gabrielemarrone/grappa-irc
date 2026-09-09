@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { render, screen } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ScrollbackMessage } from "../lib/api";
 import { channelKey } from "../lib/channelKey";
 import { getDraft, setDraft } from "../lib/compose";
 import { closeMessageMenu, openMessageMenu, SELECTING_CLASS } from "../lib/messageMenu";
 import MessageContextMenu from "../MessageContextMenu";
+import { pressAndClick } from "./helpers/pointerEvents";
 
 // #1106 — the ORDERING half of "Select… installs no visible selection while the
 // compose keyboard is open".
@@ -90,7 +91,7 @@ describe("Select… with the compose keyboard up", () => {
       delivered.push(window.getSelection()?.toString() ?? "");
     });
 
-    fireEvent.click(screen.getByText("Select…"));
+    pressAndClick(screen.getByText("Select…"));
     expect(document.querySelectorAll(".context-menu")).toHaveLength(0);
 
     await settle();
@@ -154,7 +155,7 @@ describe("the !addquote item", () => {
     mountCompose();
     render(() => <MessageContextMenu />);
     openOver(scrollbackRow("12:34 <vjt> ciao"), { body: "ciao mondo" });
-    fireEvent.click(screen.getByText("!addquote"));
+    pressAndClick(screen.getByText("!addquote"));
     expect(getDraft(KEY)).toBe("!addquote <vjt> ciao mondo");
   });
 

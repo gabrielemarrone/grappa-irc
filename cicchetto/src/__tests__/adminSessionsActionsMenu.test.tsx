@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { render, screen } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdminCredential, AdminNetwork, AdminVisitor } from "../lib/api";
+import { pressAndClick } from "./helpers/pointerEvents";
 
 // #1157 — the dictated column 4: on a phone the row's verbs "collapse
 // into ONE button with a dropdown" (vjt, 2026-08-09). Desktop keeps them
@@ -159,7 +160,7 @@ describe("#1157 — column 4 collapses on a phone", () => {
     await mountWith({ credentials: [userCredential()] });
     await screen.findByTestId(`admin-session-row-${USER_KEY}`);
 
-    fireEvent.click(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`));
+    pressAndClick(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`));
 
     const menu = screen.getByRole("menu");
     expect(menu.textContent).toContain("Disconnect");
@@ -172,8 +173,8 @@ describe("#1157 — column 4 collapses on a phone", () => {
     await mountWith({ credentials: [userCredential()] });
     await screen.findByTestId(`admin-session-row-${USER_KEY}`);
 
-    fireEvent.click(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`));
-    fireEvent.click(screen.getByText("Terminate"));
+    pressAndClick(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`));
+    pressAndClick(screen.getByText("Terminate"));
 
     const api = await import("../lib/api");
     // The destructive verb has NOT fired: the menu replaces the arm step,
@@ -190,9 +191,9 @@ describe("#1157 — column 4 collapses on a phone", () => {
     await mountWith({ credentials: [userCredential()] });
     await screen.findByTestId(`admin-session-row-${USER_KEY}`);
 
-    fireEvent.click(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`));
-    fireEvent.click(screen.getByText("Terminate"));
-    fireEvent.click(screen.getByTestId(`admin-session-actions-cancel-${USER_KEY}`));
+    pressAndClick(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`));
+    pressAndClick(screen.getByText("Terminate"));
+    pressAndClick(screen.getByTestId(`admin-session-actions-cancel-${USER_KEY}`));
 
     expect(screen.queryByTestId(`admin-session-terminate-${USER_KEY}`)).toBeNull();
     expect(screen.getByTestId(`admin-session-actions-menu-${USER_KEY}`)).toBeTruthy();

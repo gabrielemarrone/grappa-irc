@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { render, screen } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { pressAndClick } from "./helpers/pointerEvents";
 
 // C5.1 — UserContextMenu: right-click submenu on member nick.
 //
@@ -145,43 +146,43 @@ describe("UserContextMenu", () => {
   describe("actions dispatch to correct socket helpers (ownModes = [@])", () => {
     it("Op button calls pushChannelOp with networkId, channel, [nick]", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^op$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^op$/i }));
       expect(mockPushChannelOp).toHaveBeenCalledWith(42, "#grappa", ["alice"]);
     });
 
     it("Deop button calls pushChannelDeop", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^deop$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^deop$/i }));
       expect(mockPushChannelDeop).toHaveBeenCalledWith(42, "#grappa", ["alice"]);
     });
 
     it("Voice button calls pushChannelVoice", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^voice$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^voice$/i }));
       expect(mockPushChannelVoice).toHaveBeenCalledWith(42, "#grappa", ["alice"]);
     });
 
     it("Devoice button calls pushChannelDevoice", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^devoice$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^devoice$/i }));
       expect(mockPushChannelDevoice).toHaveBeenCalledWith(42, "#grappa", ["alice"]);
     });
 
     it("Kick button calls pushChannelKick with empty reason", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^kick$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^kick$/i }));
       expect(mockPushChannelKick).toHaveBeenCalledWith(42, "#grappa", "alice", "");
     });
 
     it("Ban button calls pushChannelBan with nick!*@* fallback mask", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^ban$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^ban$/i }));
       expect(mockPushChannelBan).toHaveBeenCalledWith(42, "#grappa", "alice!*@*");
     });
 
     it("Query button calls openQueryWindowState and setSelectedChannel", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^query$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^query$/i }));
       expect(mockOpenQueryWindowState).toHaveBeenCalledWith(42, "alice", expect.any(String));
       expect(mockSetSelectedChannel).toHaveBeenCalledWith({
         networkSlug: "freenode",
@@ -192,7 +193,7 @@ describe("UserContextMenu", () => {
 
     it("CTCP drills into the six verbs instead of acting", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
 
       // The whole point of the group: six verbs behind ONE row, so the nick
       // menu does not grow to fourteen.
@@ -207,8 +208,8 @@ describe("UserContextMenu", () => {
     it("a CTCP verb dispatches against the SOURCE window, with no invented args", async () => {
       vi.spyOn(Date, "now").mockReturnValue(1706743200000);
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
-      fireEvent.click(screen.getByRole("button", { name: /^version$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^version$/i }));
 
       // `sourceChannel` is the window the operator is looking at (#640) and the
       // recipient travels separately — the probe must not mint a query tab.
@@ -232,8 +233,8 @@ describe("UserContextMenu", () => {
       // the drift #1192 moved the ordering into the seam to prevent.
       vi.spyOn(Date, "now").mockReturnValue(1706743200000);
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
-      fireEvent.click(screen.getByRole("button", { name: /^ping$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^ping$/i }));
 
       expect(mockSendCtcpQuery).toHaveBeenCalledWith({
         networkSlug: "freenode",
@@ -249,7 +250,7 @@ describe("UserContextMenu", () => {
 
     it("WHOIS button calls pushWhois with networkId and nick (server null)", async () => {
       render(() => <UserContextMenu {...baseProps} ownModes={["@"]} />);
-      fireEvent.click(screen.getByRole("button", { name: /^whois$/i }));
+      pressAndClick(screen.getByRole("button", { name: /^whois$/i }));
       // #198 — context-menu WHOIS is single-nick: null target-server.
       expect(mockPushWhois).toHaveBeenCalledWith(42, "alice", null);
     });
@@ -261,7 +262,7 @@ describe("UserContextMenu", () => {
       render(() => <UserContextMenu {...baseProps} onClose={onClose} />);
       const backdrop = document.querySelector(".context-menu-backdrop");
       expect(backdrop).toBeInTheDocument();
-      if (backdrop) fireEvent.click(backdrop);
+      if (backdrop) pressAndClick(backdrop);
       expect(onClose).toHaveBeenCalled();
     });
 

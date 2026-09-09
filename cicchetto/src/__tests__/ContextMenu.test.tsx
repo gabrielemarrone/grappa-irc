@@ -1,7 +1,11 @@
 import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import ContextMenu, { type ContextMenuItem } from "../ContextMenu";
+import { setDiagEnabled } from "../DiagFloat";
+import { diagLog } from "../lib/diagLog";
+import { runTopmostOverlayEscape } from "../lib/overlayScrollLock";
+import { pressAndClick } from "./helpers/pointerEvents";
 
 // #949 — the WIRING half of the safe-area clamp. The arithmetic is pinned as a
 // pure fn (lib/menuPosition.test.ts) and the stylesheet rules at source level
@@ -126,7 +130,7 @@ describe("ContextMenu safe-area placement (#949)", () => {
     // Now the taller level. 700 + 400 overflows too, and the flip lands at 300 —
     // a value only a RE-measurement can produce.
     height = 400;
-    fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
     expect(menuEl.style.top).toBe("300px");
   });
 
@@ -162,7 +166,7 @@ describe("ContextMenu drill-down (#1192)", () => {
     const onClose = vi.fn();
     render(() => <ContextMenu items={NESTED} position={{ x: 10, y: 10 }} onClose={onClose} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
 
     // The group row is a NAVIGATION, not an invocation: closing here would make
     // the six verbs unreachable.
@@ -174,8 +178,8 @@ describe("ContextMenu drill-down (#1192)", () => {
     const onClose = vi.fn();
     render(() => <ContextMenu items={NESTED} position={{ x: 10, y: 10 }} onClose={onClose} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^version$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^version$/i }));
 
     expect(VERSION_ACTION).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -185,8 +189,8 @@ describe("ContextMenu drill-down (#1192)", () => {
     const onClose = vi.fn();
     render(() => <ContextMenu items={NESTED} position={{ x: 10, y: 10 }} onClose={onClose} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^‹ ctcp$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^‹ ctcp$/i }));
 
     expect(labels()).toEqual(["whois", "ctcp ▸", "query"]);
     expect(onClose).not.toHaveBeenCalled();
@@ -201,11 +205,173 @@ describe("ContextMenu drill-down (#1192)", () => {
     const [position, setPosition] = createSignal({ x: 10, y: 10 });
     render(() => <ContextMenu items={NESTED} position={position()} onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /^ctcp ▸$/i }));
+    pressAndClick(screen.getByRole("button", { name: /^ctcp ▸$/i }));
     expect(labels()).toEqual(["‹ ctcp", "VERSION", "TIME"]);
 
     setPosition({ x: 400, y: 400 });
 
     expect(labels()).toEqual(["whois", "ctcp ▸", "query"]);
+  });
+});
+
+// issue 1956 — the menu refuses a pointer activation until it has seen a press
+// that BEGAN after it opened.
+//
+// The defect: on iOS the long-press menu opens 500ms into a touch that is STILL
+// DOWN, and `.context-menu-backdrop` (fixed, inset 0) lands under the finger.
+// When the finger lifts, WebKit synthesizes a click at the touch point; it
+// hit-tests the backdrop and closes the menu before it can be read — reported
+// three times, keyboard-down only, prod 1.5.4-c911f7cc. `lib/messageGestures`
+// tries to swallow that release, but only `if (e.cancelable)`.
+//
+// The guard is causal, not timed: the opening gesture's `pointerdown` fired
+// before this component existed, so the menu is born disarmed. These are the
+// tests that fail if it is ever removed — every other menu test now presses
+// first (helpers/pointerEvents), so this block is the only one that can tell.
+//
+// What jsdom does NOT prove: that WebKit synthesizes that click at all, or that
+// it is what vjt is seeing. That is the on-device half, and the diag lines in
+// the same change are what will answer it.
+describe("issue 1956 — activation needs a press that began after the menu opened", () => {
+  it("refuses a bare click on the backdrop — the shape of the synthesized one", () => {
+    const onClose = vi.fn();
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /close menu/i }));
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes on a backdrop click that a fresh press preceded", () => {
+    const onClose = vi.fn();
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={onClose} />);
+
+    pressAndClick(screen.getByRole("button", { name: /close menu/i }));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a bare click on an ITEM, and does not run its action", () => {
+    // #2014 puts the menu's bottom-right corner ON the press point, so the item
+    // nearest the finger is a pixel from the synthesized click: unguarded, the
+    // gesture that only meant "open the menu" would FIRE a verb.
+    const action = vi.fn();
+    const onClose = vi.fn();
+    render(() => (
+      <ContextMenu
+        items={[{ label: "whois", enabled: true, action }]}
+        position={{ x: 10, y: 10 }}
+        onClose={onClose}
+      />
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: /^whois$/i }));
+
+    expect(action).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("runs an item action once a fresh press preceded the click", () => {
+    const action = vi.fn();
+    const onClose = vi.fn();
+    render(() => (
+      <ContextMenu
+        items={[{ label: "whois", enabled: true, action }]}
+        position={{ x: 10, y: 10 }}
+        onClose={onClose}
+      />
+    ));
+
+    pressAndClick(screen.getByRole("button", { name: /^whois$/i }));
+
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets Escape out with no press at all — the guard is pointer-only", () => {
+    // A way out that is always available must not depend on having pressed
+    // something first, and no synthesized touch sequence produces a keydown.
+    const onClose = vi.fn();
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={onClose} />);
+
+    expect(runTopmostOverlayEscape()).toBe(true);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-disarms when the same instance is re-opened at new coordinates", () => {
+    // The two call sites reuse this instance across a value→value change. A
+    // press made against the FIRST menu must not arm the second one, or the
+    // reused instance walks straight back into the defect.
+    const [position, setPosition] = createSignal({ x: 10, y: 10 });
+    const onClose = vi.fn();
+    render(() => <ContextMenu items={ITEMS} position={position()} onClose={onClose} />);
+
+    document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    setPosition({ x: 400, y: 400 });
+    fireEvent.click(screen.getByRole("button", { name: /close menu/i }));
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+// issue 1956, the diagnosis half — and the reason the guard logs its OWN
+// refusal rather than just returning.
+//
+// Once the cure is in, a menu that correctly stays put is SILENT, and silence
+// cannot tell "the synthesized click arrived and was refused" from "no click
+// ever arrived". Those are exactly the two candidates the on-device round has
+// to separate, so the cure would blind the instrument that says which one it
+// closed. These pin that it does not.
+describe("issue 1956 — the on-device diag names the door", () => {
+  afterEach(() => {
+    setDiagEnabled(false);
+  });
+
+  it("names the refused door, so a menu that stays up is not silent", () => {
+    setDiagEnabled(true);
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /close menu/i }));
+
+    expect(diagLog()[0]).toContain("REFUSED backdrop");
+  });
+
+  it("names the door that actually closed it", () => {
+    setDiagEnabled(true);
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={vi.fn()} />);
+
+    pressAndClick(screen.getByRole("button", { name: /close menu/i }));
+
+    expect(diagLog()[0]).toContain("close via backdrop");
+  });
+
+  it("distinguishes an item from the backdrop, and names WHICH item", () => {
+    setDiagEnabled(true);
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={vi.fn()} />);
+
+    pressAndClick(screen.getByRole("button", { name: /^whois$/i }));
+
+    expect(diagLog()[0]).toContain("close via item:whois");
+  });
+
+  it("names Escape too, so the keyboard exit is not mistaken for a vanish", () => {
+    setDiagEnabled(true);
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={vi.fn()} />);
+
+    runTopmostOverlayEscape();
+
+    expect(diagLog()[0]).toContain("close via escape");
+  });
+
+  it("costs nothing with the flag off — neither door pushes a line", () => {
+    setDiagEnabled(false);
+    render(() => <ContextMenu items={ITEMS} position={{ x: 10, y: 10 }} onClose={vi.fn()} />);
+    const before = diagLog();
+
+    fireEvent.click(screen.getByRole("button", { name: /close menu/i })); // refused
+    pressAndClick(screen.getByRole("button", { name: /close menu/i })); // closed
+
+    expect(diagLog()).toBe(before);
   });
 });

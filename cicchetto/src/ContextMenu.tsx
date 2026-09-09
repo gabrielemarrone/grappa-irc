@@ -1,5 +1,16 @@
-import { type Component, createEffect, createSignal, For, on, Show } from "solid-js";
+import {
+  type Component,
+  createEffect,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 import { Portal } from "solid-js/web";
+import { isDiagEnabled } from "./DiagFloat";
+import { diagPush } from "./lib/diagLog";
 import { computeMenuPosition, type MenuAnchor } from "./lib/menuPosition";
 import { createOverlayEscape } from "./lib/overlayScrollLock";
 import { isCoarsePointer } from "./lib/platform";
@@ -101,9 +112,76 @@ const ContextMenu: Component<Props> = (props) => {
   // UIKit as a page pan while the menu itself — `position: fixed` — stayed put
   // and the content slid out from under it. The stylesheet half (backdrop
   // claims the stream, menu re-opens its own pan) is in `default.css`.
+  // issue 1956 — the menu must not be closed, and no item fired, by the very
+  // gesture that OPENED it.
+  //
+  // On iOS a long-press opens this menu 500ms into a touch that is STILL DOWN,
+  // and `.context-menu-backdrop` (`position: fixed; inset: 0`) lands under the
+  // finger. When that finger lifts, WebKit synthesizes mousemove/mousedown/
+  // mouseup/click at the touch point; the click hit-tests the backdrop and
+  // closes the menu before it can be read. `lib/messageGestures` tries to
+  // swallow that release with `preventDefault` on the touchend, but that is
+  // conditional on `e.cancelable`, and on device it is failing — keyboard-down
+  // only, three sightings, prod 1.5.4-c911f7cc.
+  //
+  // The guard is CAUSAL, not a timeout: the opening gesture's `pointerdown`
+  // fired BEFORE this component existed, so a menu is born DISARMED and the
+  // click synthesized from that same gesture finds no arm. Every genuine
+  // interaction — a tap outside, a tap on an item, a mouse click — begins with a
+  // fresh `pointerdown`, which arms it.
+  //
+  // 🔴 It MUST arm on `pointerdown`, NEVER on `mousedown`: the synthesized
+  // mousedown PRECEDES the click inside the same release, so arming there would
+  // arm exactly the click this exists to refuse — a no-op that reads as applied.
+  // `touchstart` is the fallback for an engine without Pointer Events.
+  //
+  // Why it is here and not in the long-press binder: the defect is not "the
+  // scrollback's gesture leaks", it is "a menu can be actioned by the gesture
+  // that opened it", which is true of every door this shell has (the #1115
+  // desktop `contextmenu` door, and the nick + admin menus that share it).
+  // Fixing it at the opener would leave the other doors open.
+  const [armed, setArmed] = createSignal(false);
+  onMount(() => {
+    const arm = (): void => {
+      setArmed(true);
+    };
+    // Capture, so a handler that stops propagation cannot starve the arm.
+    document.addEventListener("pointerdown", arm, { capture: true });
+    document.addEventListener("touchstart", arm, { capture: true, passive: true });
+    onCleanup(() => {
+      document.removeEventListener("pointerdown", arm, { capture: true });
+      document.removeEventListener("touchstart", arm, { capture: true });
+    });
+  });
+
+  // issue 1956, the diagnosis half — WHICH door closed the menu. The reported
+  // symptom cannot say, and the two candidates want different cures: a release
+  // WebKit refused to let us cancel, or a close arriving through another door.
+  // Gated like every other diag line (keepKeyboard:200-205); a no-op with the
+  // flag off.
+  const reportAndClose = (door: string): void => {
+    if (isDiagEnabled()) diagPush(`menu: close via ${door}`);
+    props.onClose();
+  };
+
+  // May this menu act on a pointer event? It logs its OWN refusal, and that is
+  // load-bearing rather than tidy: once the guard is in, a menu that correctly
+  // stays put is SILENT, and silence cannot tell "the click was refused" from
+  // "no click ever arrived" — which is exactly the pair the on-device
+  // diagnosis has to separate. Without this line the cure blinds the
+  // instrument that says which candidate it closed.
+  const mayAct = (door: string): boolean => {
+    if (armed()) return true;
+    if (isDiagEnabled()) diagPush(`menu: REFUSED ${door} (no fresh press since open)`);
+    return false;
+  };
+
+  // Escape is deliberately OUTSIDE the guard: a way out that is always
+  // available must not depend on having pressed something first, and no
+  // synthesized touch sequence can produce a keydown.
   createOverlayEscape(
     () => true,
-    () => props.onClose(),
+    () => reportAndClose("escape"),
   );
 
   // #1192 — the drill-down level, held as an INDEX into `props.items` rather
@@ -137,19 +215,34 @@ const ContextMenu: Component<Props> = (props) => {
   createEffect(
     on(
       () => [props.position.x, props.position.y],
-      () => setDrilledIndex(null),
+      () => {
+        setDrilledIndex(null);
+        // issue 1956 — and the arm resets for the same reason: a reused
+        // instance would otherwise carry the PREVIOUS interaction's press into
+        // the new open, and the second menu would be born armed against the
+        // gesture that opened it. A fresh mount needs no reset (the signal
+        // starts false); this covers only the value→value reuse.
+        setArmed(false);
+      },
       { defer: true },
     ),
   );
 
   const handleItemClick = (item: ContextMenuItem, index: number): void => {
     if (!item.enabled) return;
+    // issue 1956 — the same refusal the backdrop takes, and it sits BEFORE the
+    // action on purpose. #2014 puts the menu's bottom-right corner ON the press
+    // point, so the item nearest the finger is a pixel from the synthesized
+    // click: unguarded, a gesture the operator meant only as "open the menu"
+    // could FIRE a verb (Copy, Reply, !addquote, Select…). Refusing after the
+    // action would close the barn door.
+    if (!mayAct(`item:${item.label}`)) return;
     if ("submenu" in item) {
       setDrilledIndex(index);
       return;
     }
     item.action();
-    props.onClose();
+    reportAndClose(`item:${item.label}`);
   };
 
   let menuRef: HTMLDivElement | undefined;
@@ -223,7 +316,9 @@ const ContextMenu: Component<Props> = (props) => {
         type="button"
         class="context-menu-backdrop"
         aria-label="Close menu"
-        onClick={props.onClose}
+        onClick={() => {
+          if (mayAct("backdrop")) reportAndClose("backdrop");
+        }}
       />
       <div
         ref={menuRef}

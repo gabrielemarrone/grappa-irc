@@ -10,6 +10,7 @@ import {
   onMount,
   Show,
 } from "solid-js";
+import { isDiagEnabled } from "./DiagFloat";
 import LusersCard from "./LusersCard";
 import { isContentKind, ownNickForNetwork, type ScrollbackMessage } from "./lib/api";
 import { casemappingForSlug, sigilRankForSlug } from "./lib/casemapping";
@@ -27,6 +28,7 @@ import {
 import { isChannelName } from "./lib/chantypes";
 import { type CommandOutputEntry, commandOutputByWindow } from "./lib/commandOutput";
 import { stripCtcpAction } from "./lib/ctcpAction";
+import { diagPush } from "./lib/diagLog";
 import { isDocumentVisible } from "./lib/documentVisibility";
 import { highlightPatterns } from "./lib/highlightList";
 import { type InviteAckEntry, inviteAckBySlug } from "./lib/inviteAck";
@@ -41,7 +43,7 @@ import {
 } from "./lib/mentionScroll";
 import { bindMessageContextMenu } from "./lib/messageContextMenu";
 import { bindMessageGestures } from "./lib/messageGestures";
-import { closeMessageMenu, openMessageMenu } from "./lib/messageMenu";
+import { closeMessageMenu, messageMenu, openMessageMenu } from "./lib/messageMenu";
 import { networkIdBySlug, networks, user } from "./lib/networks";
 import { snapshotSenderPrefix } from "./lib/nickColor";
 import { nickEquals } from "./lib/nickEquals";
@@ -2198,7 +2200,18 @@ const ScrollbackPane: Component<Props> = (props) => {
     }
     // A menu left open over a row this pane is about to destroy would float
     // above the next channel, still holding a detached element.
-    onCleanup(closeMessageMenu);
+    //
+    // issue 1956 — the FOURTH door to a closed menu, and the only one outside
+    // `ContextMenu`. It is named in the diag so the on-device log can tell a
+    // menu that vanished under the finger from one the pane tore down; the
+    // guard on the read keeps the line honest (log honesty: state what was
+    // OBSERVED, so a channel switch with no menu up says nothing at all).
+    onCleanup(() => {
+      if (messageMenu() !== null && isDiagEnabled()) {
+        diagPush("menu: close via unmount (pane cleanup)");
+      }
+      closeMessageMenu();
+    });
 
     // #285 — ResizeObserver on the scroll container so the gate follows REAL
     // container geometry, not just discrete events. It fires on ANY container

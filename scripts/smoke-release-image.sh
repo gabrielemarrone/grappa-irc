@@ -153,7 +153,12 @@ CAPTURED="$SMOKE_HOME/captured.log"
 # same bytes came back green, so the phenomenon is not deterministic across
 # runner instances. An assertion about seccomp, or about a CPU feature, would
 # encode a guess; a match on the message the VM actually printed does not.
-HARNESS_SIGNATURE='sys_sigaltstack|Failed to set alternate signal stack|Internal error: .*sys/unix'
+#
+# The third alternative is ordered the way ERTS actually prints, which is not
+# the way it reads: the format is `<file>:<line>:<func>(): Internal error: <msg>`,
+# so the path comes BEFORE the words "Internal error" and a pattern written the
+# other way round would never have matched the very line it was drawn from.
+HARNESS_SIGNATURE='sys_sigaltstack|Failed to set alternate signal stack|sys/unix/.*Internal error'
 
 # runner_facts — what this run's SUBSTRATE was, printed UNCONDITIONALLY.
 #
@@ -197,6 +202,7 @@ runner_facts() {
         # when the CPU simply has none of these flags, which is a fact worth
         # printing, and a bare blank would read identically to a reader that
         # broke. arm64 has no `flags` line at all and lands in the same arm.
+        local xsave_flags
         xsave_flags="$(awk -F': ' '/^flags/ {print $2; exit}' /proc/cpuinfo \
                | tr ' ' '\n' | grep -E '^(avx512|amx|xsave|osxsave)' \
                | sort -u | tr '\n' ' ' || true)"
@@ -271,7 +277,12 @@ trap teardown EXIT
 
 # Before anything is attempted, and on every run whatever its outcome — see the
 # function's own comment for why the GREEN sample is the one that was missing.
-runner_facts | tee -a "$CAPTURED"
+# `|| true` is the contract stated in the function, made real rather than
+# merely promised: under `set -euo pipefail` a non-zero anywhere in there would
+# abort the run, and a block whose whole job is to DESCRIBE the run must not be
+# able to end it. Its readers already degrade individually; this covers the
+# pipeline too.
+runner_facts | tee -a "$CAPTURED" || true
 
 # A crashed earlier run leaves the box behind, and `install` refuses to run
 # onto an existing container. Clear the dedicated names before, not just after.

@@ -36,6 +36,18 @@ defmodule Grappa.Session.EventRouterTest do
   # longer has, which is the whole thing the bundle is supposed to make visible.
   defp deps(open?), do: %Deps{query_window_open?: open?}
 
+  # issue 2024 — the four arms that answer an inbound CTCP query package
+  # their visibility row in TWO different shapes: VERSION and PING pair it
+  # INSIDE an `:auto_reply` (one budget buys the outbound line and the row
+  # together, #1404), while USERINFO and AVATAR emit it alongside a plain
+  # `:reply`. The routing key is the same question in both shapes, so the
+  # shapes are unwrapped here instead of forking the shared test body in
+  # two. Deliberately total over exactly those two: a third shape arriving
+  # later raises `FunctionClauseError` at the assertion rather than
+  # skipping the arm in silence.
+  defp ctcp_persist([{:auto_reply, _, {:persist, _, _} = persist}]), do: persist
+  defp ctcp_persist([{:reply, _, :event_router_reply}, {:persist, _, _} = persist]), do: persist
+
   defp base_state(overrides \\ %{}) do
     Map.merge(
       %{
@@ -562,15 +574,14 @@ defmodule Grappa.Session.EventRouterTest do
       assert IO.iodata_to_binary(line) ==
                "NOTICE alice :\x01VERSION grappa #{version}\x01"
 
-      # Persist effect: visible row routed via the own-nick topic so
-      # cic's dm-listener arm (CP23 NOTICE auto-open) re-keys onto
-      # the sender's window. Persisting at channel = sender directly
-      # bypasses the dm-listener and silently drops the broadcast on
-      # the floor unless the peer's window is already open. channel
-      # = own_nick (the target the peer addressed) is the same shape
-      # an inbound PRIVMSG from the peer would land at — same routing,
-      # one less special case.
-      assert attrs.channel == "vjt"
+      # Persist effect: the visibility row goes through the `#546` door
+      # (issue 2024). It used to persist at `channel = own_nick` so cic's
+      # dm-listener re-keyed it onto the sender's window — which is
+      # precisely how a stranger's probe minted a tab. With no query open
+      # the row lands on `$server`; the arms' shared behaviour is pinned
+      # by the four-arm block below, and this line keeps the VERSION arm's
+      # own answer honest.
+      assert attrs.channel == "$server"
       assert attrs.sender == "alice"
       assert attrs.body == "CTCP VERSION query → grappa #{version}"
     end
@@ -596,7 +607,9 @@ defmodule Grappa.Session.EventRouterTest do
       assert IO.iodata_to_binary(line) ==
                "NOTICE alice :\x01USERINFO Age=30; Gender=X; Location=Italy; Languages=it, en; here for the vibes\x01"
 
-      assert attrs.channel == "vjt"
+      # issue 2024 — through the `#546` door, like every other CTCP query
+      # arm. No open query with alice here, so the row lands on `$server`.
+      assert attrs.channel == "$server"
       assert attrs.sender == "alice"
 
       assert attrs.body ==
@@ -671,7 +684,8 @@ defmodule Grappa.Session.EventRouterTest do
       assert IO.iodata_to_binary(line) ==
                "NOTICE alice :\x01AVATAR https://grappa.example/uploads/abc123.png\x01"
 
-      assert attrs.channel == "vjt"
+      # issue 2024 — through the `#546` door, like every other CTCP query arm.
+      assert attrs.channel == "$server"
       assert attrs.sender == "alice"
       assert attrs.body == "CTCP AVATAR query → https://grappa.example/uploads/abc123.png"
     end
@@ -683,6 +697,95 @@ defmodule Grappa.Session.EventRouterTest do
       m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
 
       assert {:cont, ^state, []} = EventRouter.route(m, state)
+    end
+
+    # issue 2024 — an inbound CTCP QUERY used to MINT the sender's window.
+    # A DM-shaped query persisted at `channel = own_nick`, `build_persist/6`
+    # set `dm_with = sender` off that key, and
+    # `Session.Server.maybe_open_query_window/2` keys on `dm_with ||
+    # channel` — so a stranger probing the bouncer opened a tab with
+    # somebody the operator never talked to. The `#546` door already
+    # answers this for NOTICE ("open query → that query, else `$server`,
+    # never auto-open") and vjt ruled the same answer here: `<< network`.
+    #
+    # 🔴 FOUR arms, not the three the issue enumerated. `ctcp_ping_reply/4`
+    # computes the identical key and was missed by the issue's own grep;
+    # it is included because leaving it would keep one inline copy of the
+    # rule beside a shared helper, which is the half-migration CLAUDE.md
+    # forbids — and because the tree ALREADY holds "CTCP is protocol, not
+    # conversation" for PING on the reply direction
+    # (`route_non_channel_notice/3`'s CTCP short-circuit names it).
+    #
+    # The oracle is `dm_with == nil`, not merely the channel. `dm_with` is
+    # what the auto-open PREFERS, so a row that moved to `$server` while
+    # keeping a peer in `dm_with` would still mint a window — asserting
+    # the channel alone would pass on exactly that bug. Same oracle the
+    # CTCP-framed NOTICE test below uses.
+    #
+    # Driven off ONE list on purpose: the cure is one shared helper, so
+    # the proof that it reaches every arm belongs in one body. Each arm's
+    # own reply text stays asserted by its own test above.
+    for {verb, overrides} <- [
+          {"VERSION", %{}},
+          {"PING 1753776000123", %{}},
+          {"USERINFO", %{profile: %{age: nil, gender: nil, location: nil, languages: nil, custom: nil}}},
+          {"AVATAR", %{avatar_url: "https://grappa.example/uploads/abc123.png"}}
+        ] do
+      test "2024 a DM-targeted CTCP #{verb} query routes to $server and mints nothing" do
+        state = base_state(unquote(Macro.escape(overrides)))
+
+        body = <<0x01>> <> unquote(verb) <> <<0x01>>
+        m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+        assert {:cont, _, effects} = EventRouter.route(m, state)
+        assert {:persist, :notice, attrs} = ctcp_persist(effects)
+
+        assert attrs.channel == "$server"
+        assert attrs.dm_with == nil
+        assert attrs.sender == "alice"
+      end
+    end
+
+    # The other half of the door, and the reason this is a REUSE and not a
+    # hardcoded `$server`: with a query already open the row belongs in
+    # THAT conversation. A cure that always answered `$server` would pass
+    # every test above and fail this one.
+    test "2024 a DM-targeted CTCP query lands in the ALREADY-OPEN query, not $server" do
+      state = base_state(%{deps: deps(fn _, _, _ -> true end)})
+
+      body = <<0x01, "VERSION", 0x01>>
+      m = msg(:privmsg, ["vjt", body], {:nick, "alice", "u", "h"})
+
+      assert {:cont, _, effects} = EventRouter.route(m, state)
+      assert {:persist, :notice, attrs} = ctcp_persist(effects)
+
+      # `channel = sender` with `dm_with: nil` is exactly the shape the
+      # NOTICE door produces post-#546 for an open window: the auto-open
+      # keys on the channel, finds the window already there, and the
+      # re-open is a no-op.
+      assert attrs.channel == "alice"
+      assert attrs.dm_with == nil
+    end
+
+    # NEGATIVE CONTROL — the channel-targeted branch is untouched. It took
+    # the `else` arm before and takes it now: the channel stays the key,
+    # `dm_with` stays nil, and it minted nothing either way. Exercised on
+    # BOTH sides of the open-window predicate, because the door must not
+    # reach this branch at all — if it did, an open query with `alice`
+    # would drag a #italia row into her window.
+    test "2024 a CHANNEL-targeted CTCP query keeps the channel key, open query or not" do
+      for open? <- [true, false] do
+        state = base_state(%{deps: deps(fn _, _, _ -> open? end)})
+
+        body = <<0x01, "VERSION", 0x01>>
+        m = msg(:privmsg, ["#italia", body], {:nick, "alice", "u", "h"})
+
+        assert {:cont, _, effects} = EventRouter.route(m, state)
+        assert {:persist, :notice, attrs} = ctcp_persist(effects)
+
+        assert attrs.channel == "#italia", "open?=#{open?} moved a channel-targeted row"
+        assert attrs.dm_with == nil
+      end
     end
 
     test "a CTCP-framed NOTICE lands on $server and mints no query window" do
@@ -895,10 +998,11 @@ defmodule Grappa.Session.EventRouterTest do
 
       assert IO.iodata_to_binary(line) == "NOTICE alice :\x01PING 1753776000123\x01"
 
-      # Same routing as VERSION: the DM-shaped query persists on the
-      # own-nick topic so the row reaches a client that has no window
-      # with this peer open yet.
-      assert attrs.channel == "vjt"
+      # Same routing as VERSION, and issue 2024 moved BOTH: a DM-shaped
+      # CTCP query goes through the `#546` door. PING is the arm the
+      # issue's own enumeration missed — it computed the identical key
+      # and minted the identical window.
+      assert attrs.channel == "$server"
       assert attrs.sender == "alice"
       assert attrs.body == "CTCP PING query → answered"
     end

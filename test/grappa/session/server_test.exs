@@ -3106,19 +3106,36 @@ defmodule Grappa.Session.ServerTest do
       :ok = GenServer.stop(pid, :normal, 1_000)
     end
 
-    # #546 regression the issue called out as the one concrete casualty: the
-    # "CTCP VERSION query → grappa X" visibility row. It does NOT ride the
-    # NOTICE door at all — it is emitted by the inbound-PRIVMSG CTCP arm,
-    # persisted at `channel = own_nick` with `dm_with = sender`, and the
-    # auto-open keys off `dm_with || channel` (#422). So it survives the
-    # reversal untouched. Pinned here because "it still works" is a claim
-    # about a path #546 does not visit, and nobody should have to re-derive
-    # that from the routing table six months from now.
-    test "#546 a peer CTCP VERSION query still opens the peer's query window" do
+    # issue 2024 — REVERSED, and the reversal is a PRODUCT call, not a
+    # flake. This case used to read "#546 a peer CTCP VERSION query still
+    # opens the peer's query window" and asserted the window was minted. It
+    # was an accurate description of the code and a correct pin of the
+    # contract as it then stood; vjt ruled that contract WRONG (`<<
+    # network` on #grappa, recorded on the issue), so the assertion is
+    # INVERTED rather than relaxed. Nothing here was weakened: the same
+    # facts are asserted, with the opposite expected answer, plus the row's
+    # destination which the old case never checked.
+    #
+    # Why it matters: `dm_with || channel` (#422) is what the auto-open
+    # keys on, so a stranger who probes the bouncer used to leave a tab
+    # open with somebody the operator never talked to. The `#546` door
+    # ("open query → that query, else `$server`, never auto-open") now
+    # covers this arm too.
+    test "#546/2024 a peer CTCP VERSION query routes to $server and opens NO query window" do
       {server, port} = IRCServer.start_server(IRCServer.passthrough_handler())
       {user, network, _} = setup_user_and_network(port, %{nick: "vjt"})
 
+      # BOTH topics, and each carries one half of the claim: the row rides
+      # the per-CHANNEL topic (`$server`, its new home) while
+      # `query_windows_list` rides the USER topic. Subscribing to only one
+      # is how the first draft of this test failed — against working code.
       :ok = Phoenix.PubSub.subscribe(Grappa.PubSub, Topic.user(user.name))
+
+      :ok =
+        Phoenix.PubSub.subscribe(
+          Grappa.PubSub,
+          Topic.channel(user.name, network.slug, "$server")
+        )
 
       pid = start_session_for(user, network)
       :ok = IRCServer.await_handshake(server, 1_000)
@@ -3127,14 +3144,79 @@ defmodule Grappa.Session.ServerTest do
 
       net_id = network.id
 
+      # The row must ARRIVE before the refutes mean anything — a `refute`
+      # that races the write passes for the wrong reason. Arriving on the
+      # `$server` topic IS the destination assertion, so the barrier and
+      # the positive claim are the same `assert_receive`. The body is
+      # pinned IN THE PATTERN, not asserted after binding it: a free
+      # binding takes the first `:message` in the mailbox, whatever it is.
       assert_receive %Phoenix.Socket.Broadcast{
                        event: "event",
-                       payload: %{kind: :query_windows_list, windows: %{^net_id => entries}}
+                       payload: %{
+                         kind: :message,
+                         message: %{body: "CTCP VERSION query → grappa" <> _}
+                       }
                      },
                      2_000
 
-      assert Enum.any?(entries, &(&1.target_nick == "bob"))
-      assert QueryWindows.open?({:user, user.id}, net_id, "bob")
+      refute_receive %Phoenix.Socket.Broadcast{
+                       event: "event",
+                       payload: %{kind: :query_windows_list}
+                     },
+                     300
+
+      refute QueryWindows.open?({:user, user.id}, net_id, "bob")
+
+      :ok = GenServer.stop(pid, :normal, 1_000)
+    end
+
+    # The issue's own "Not measured" line: whether a peer's USERINFO probe
+    # and its AVATAR sibling mint ONE window or TWO. Answered here by
+    # exercising two DIFFERENT arms from the same peer and counting the
+    # windows that survive — post-cure the answer is zero either way, and
+    # the count (rather than a bare `refute open?`) is what distinguishes
+    # "the cure reached both arms" from "the cure reached one and the
+    # other never fired".
+    test "2024 two different CTCP query arms from one peer mint zero windows between them" do
+      {server, port} = IRCServer.start_server(IRCServer.passthrough_handler())
+      {user, network, _} = setup_user_and_network(port, %{nick: "vjt"})
+
+      :ok =
+        Phoenix.PubSub.subscribe(
+          Grappa.PubSub,
+          Topic.channel(user.name, network.slug, "$server")
+        )
+
+      pid = start_session_for(user, network)
+      :ok = IRCServer.await_handshake(server, 1_000)
+
+      IRCServer.feed(server, ":bob!~b@host PRIVMSG vjt :\x01USERINFO\x01\r\n")
+      IRCServer.feed(server, ":bob!~b@host PRIVMSG vjt :\x01VERSION\x01\r\n")
+
+      # Both rows must have been written before the count is meaningful.
+      # VERSION is fed LAST and the session routes in arrival order, so its
+      # row arriving is a durable witness that USERINFO's is already down.
+      # Pinned in the PATTERN: `assert_receive` returns the first message
+      # that matches, and USERINFO's row is ahead of VERSION's in the
+      # mailbox — a free `body` binding would match USERINFO and retire
+      # the barrier one row too early.
+      assert_receive %Phoenix.Socket.Broadcast{
+                       event: "event",
+                       payload: %{
+                         kind: :message,
+                         message: %{body: "CTCP VERSION query → grappa" <> _}
+                       }
+                     },
+                     2_000
+
+      # `list_for_subject/1` (a map keyed by network) rather than a per-nick
+      # `open?/3`: the quantity the issue asked about is a COUNT, and
+      # inspecting the whole map puts that count in the failure message
+      # instead of collapsing it to a boolean.
+      windows = QueryWindows.list_for_subject({:user, user.id})
+
+      assert windows == %{},
+             "an inbound CTCP query minted a window: #{inspect(windows)}"
 
       :ok = GenServer.stop(pid, :normal, 1_000)
     end
@@ -3158,9 +3240,15 @@ defmodule Grappa.Session.ServerTest do
       {server, port} = IRCServer.start_server(IRCServer.passthrough_handler())
       {user, network, _} = setup_user_and_network(port, %{nick: "vjt"})
 
-      # The per-channel topic, not the user topic: these rows land at
-      # `channel = own_nick` (the DM-shaped key an inbound query takes), and
-      # a `:message` broadcast rides the channel topic.
+      # The per-channel topic, not the user topic, because a `:message`
+      # broadcast rides the channel topic. The own-nick topic specifically,
+      # and issue 2024 narrowed WHY: the PING visibility rows this test
+      # counts now land on `$server` (the `#546` door), but the BARRIER
+      # below is a plain PRIVMSG marker, and a peer's ordinary DM still
+      # keys at `channel = own_nick`. That door was deliberately left where
+      # it was — a DM is a conversation, a CTCP query is a probe. The
+      # counted rows are read straight off the table, so they need no
+      # subscription at all.
       :ok =
         Phoenix.PubSub.subscribe(Grappa.PubSub, Topic.channel(user.name, network.slug, "vjt"))
 

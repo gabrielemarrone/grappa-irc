@@ -1,5 +1,6 @@
 import { render } from "@solidjs/testing-library";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setStripFormatting } from "../lib/stripFormatting";
 import { MircBody } from "../MircText";
 
 // #220 — per-surface link-vs-surface event routing.
@@ -237,5 +238,95 @@ describe("MircText channel affordance (#648)", () => {
     const { container } = render(() => <MircBody body="join #chan" emphasis />);
     expect(container.querySelector(".channel-clickable")).toBeNull();
     expect(container.textContent).toBe("join #chan");
+  });
+});
+
+// #2029 — the strip preference, asserted where it actually acts. `MircBody` is
+// the ONE chokepoint: `parseMircFormat` has a single production render caller,
+// and colour resolution never leaves `mircFormat.ts`. So these tests stand in
+// for all 39 `<MircBody>` call sites across 12 files — the surfaces the issue
+// names AND the nine it does not.
+describe("MircText strip-formatting preference (#2029)", () => {
+  // Bold + red + a plain tail: one attribute the CLASS carries, one the inline
+  // STYLE carries, and text on both sides so a strip that ate characters shows.
+  const COLOURED = "\x02\x034alert\x03\x02 and calm";
+
+  beforeEach(() => setStripFormatting(false));
+  afterEach(() => setStripFormatting(false));
+
+  it("OFF (the default): the colours and the bold still render", () => {
+    const { container } = render(() => <MircBody body={COLOURED} />);
+
+    expect(container.querySelector(".scrollback-mirc-bold")).not.toBeNull();
+    const styled = container.querySelector("span[style]") as HTMLElement;
+    expect(styled.style.color).not.toBe("");
+    expect(container.textContent).toBe("alert and calm");
+  });
+
+  it("ON: the same body renders with NO formatting class and NO colour", () => {
+    setStripFormatting(true);
+    const { container } = render(() => <MircBody body={COLOURED} />);
+
+    expect(container.querySelector(".scrollback-mirc-bold")).toBeNull();
+    expect(container.querySelector(".scrollback-mirc-italic")).toBeNull();
+    expect(container.querySelector(".scrollback-mirc-underline")).toBeNull();
+    expect(container.querySelector(".scrollback-mirc-strikethrough")).toBeNull();
+    expect(container.querySelector(".scrollback-mirc-monospace")).toBeNull();
+    expect(container.querySelector(".scrollback-mirc-reverse")).toBeNull();
+    for (const span of container.querySelectorAll("span")) {
+      expect((span as HTMLElement).style.color).toBe("");
+      expect((span as HTMLElement).style.backgroundColor).toBe("");
+    }
+  });
+
+  // The half that is easy to lose: stripping must cost the reader NOTHING but
+  // the decoration. `+c` rejects the message; this must not.
+  it("ON: every visible character survives — the words arrive, they arrive plain", () => {
+    setStripFormatting(true);
+    const { container } = render(() => <MircBody body={COLOURED} />);
+    expect(container.textContent).toBe("alert and calm");
+  });
+
+  // THE issue's own contract: "toggling it back must restore colours without a
+  // reconnect". Nothing re-renders here and no body is re-fetched — the signal
+  // flips under a MOUNTED tree and the DOM has to follow. A `localStorage`
+  // read at the chokepoint passes both tests above and fails this one.
+  it("toggles LIVE under a mounted pane, both ways, with no re-render and no refetch", async () => {
+    const { container } = render(() => <MircBody body={COLOURED} />);
+    expect(container.querySelector(".scrollback-mirc-bold")).not.toBeNull();
+
+    setStripFormatting(true);
+    await Promise.resolve();
+    expect(container.querySelector(".scrollback-mirc-bold")).toBeNull();
+    expect(container.textContent).toBe("alert and calm");
+
+    setStripFormatting(false);
+    await Promise.resolve();
+    expect(container.querySelector(".scrollback-mirc-bold")).not.toBeNull();
+    const restyled = container.querySelector("span[style]") as HTMLElement;
+    expect(restyled.style.color).not.toBe("");
+    expect(container.textContent).toBe("alert and calm");
+  });
+
+  // #455's emphasis layer is cic's own markup over PLAIN text, not an mIRC
+  // control code. The issue asks for the control codes to go; taking the
+  // emphasis layer with them would be scope the reader never asked for.
+  it("ON: does not disturb the #455 emphasis layer, which is not a control code", () => {
+    setStripFormatting(true);
+    const { container } = render(() => <MircBody body="a *bold* word" emphasis />);
+    expect(container.querySelector(".scrollback-mirc-bold")).not.toBeNull();
+    expect(container.textContent).toBe("a *bold* word");
+  });
+
+  // Links are structure, not decoration. A stripped body must still linkify.
+  it("ON: a URL is still rendered as an anchor", () => {
+    setStripFormatting(true);
+    // Braces, not a bare attribute string: `"\x03"` inside JSX attribute
+    // quotes is a literal backslash, so the body would carry no control byte
+    // at all and the test would pass on nothing.
+    const { container } = render(() => <MircBody body={"\x0312see https://example.com/x"} />);
+    const link = container.querySelector(".scrollback-link") as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.href).toBe("https://example.com/x");
   });
 });

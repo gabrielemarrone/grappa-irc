@@ -332,13 +332,47 @@ export function parseMircFormat(body: string): Run[] {
 // the runs already carry exactly the printable text with the control bytes
 // consumed. Used for plain-text-only DOM surfaces that cannot render
 // formatting — e.g. an element's `title` tooltip attribute, where leaking
-// the raw `\x02`/`\x03` bytes would show as garbage. This is NOT a render
-// strip (the visible body always routes through `MircBody`); it is the
-// canonical projection for attribute surfaces that are plain text by nature.
+// the raw `\x02`/`\x03` bytes would show as garbage: the canonical
+// projection for attribute surfaces that are plain text by nature.
+//
+// This used to add "and it is NOT a render strip — the visible body always
+// routes through `MircBody`". #2029 made that false, so it is gone rather
+// than left to mislead: there IS a render strip now, it is opt-in per
+// viewer, and it is `mircPlainRuns` below. This one still has no render
+// caller — a STRING cannot carry the run boundaries the renderer needs.
 export function mircPlainText(body: string): string {
   let out = "";
   for (const run of parseMircFormat(body)) out += run.text;
   return out;
+}
+
+// #2029 — the same de-formatting, projected for the RENDERER instead of for a
+// string attribute: the run STRUCTURE survives, every formatting attribute is
+// cleared. `MircBody` swaps `parseMircFormat` for this when the reader has the
+// strip preference on, which is what makes the toggle reach all twelve
+// mIRC-rendering surfaces from one place.
+//
+// NOT a second stripper, and the distinction is load-bearing: the control
+// bytes are removed by `parseMircFormat` — the one parser, the same one the
+// styled render and `mircPlainText` both go through — and this only drops the
+// attributes it decoded. A new scanner over `\x03`/`\x02` here would be the
+// second implementation of the rule that CLAUDE.md forbids.
+//
+// The runs are deliberately NOT merged into one. Merging would repair a URL
+// that a colour code splits mid-link (linkify runs per-run), which is a real
+// improvement and a BEHAVIOUR CHANGE that has nothing to do with removing
+// colours — it does not ride in on this issue's back. Same text, same
+// boundaries, no attributes.
+export function mircPlainRuns(body: string): Run[] {
+  return parseMircFormat(body).map((run) => ({
+    text: run.text,
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    monospace: false,
+    reverse: false,
+  }));
 }
 
 function isDigit(charCode: number): boolean {

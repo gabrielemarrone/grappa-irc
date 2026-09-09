@@ -4,9 +4,10 @@ import { splitEmphasis } from "./lib/emphasisMarkers";
 import { linkify } from "./lib/linkify";
 import { classifyMediaLink, sameHostHref } from "./lib/mediaLink";
 import { openMediaViewer } from "./lib/mediaViewer";
-import { parseMircFormat, type Run } from "./lib/mircFormat";
+import { mircPlainRuns, parseMircFormat, type Run } from "./lib/mircFormat";
 import { maybeEscapePwaClick } from "./lib/platform";
 import { serverSettings } from "./lib/serverSettings";
+import { getStripFormatting } from "./lib/stripFormatting";
 
 // Shared mIRC-formatting renderer. Extracted from ScrollbackPane (#125) so
 // the channel-directory topic reuses the SAME typed-formatting render path
@@ -291,7 +292,20 @@ export const MircBody: Component<{
   // linkPolicy / emphasis — a per-surface handler, not a reactive signal.
   onChannelClick?: (channel: string) => void;
 }> = (props) => {
-  const runs = (): Run[] => parseMircFormat(props.body);
+  // #2029 — THE chokepoint. `parseMircFormat` has exactly one production
+  // render caller (this line), and colour resolution never leaves
+  // `mircFormat.ts`, so every mIRC-formatted surface in cic — 39 `<MircBody>`
+  // call sites across 12 files, nine of which the issue never names — honours
+  // the strip preference by funnelling through here. Per-surface opt-in was
+  // never on the table: "if a surface renders colour, it must honour the
+  // strip", and enumerating them is how such a list rots.
+  //
+  // A TRACKED read of the signal, inside the same accessor that already
+  // re-runs on `props.body`: toggling re-renders every open pane with no
+  // reconnect and no refetch, because the raw body is untouched and only its
+  // projection changed. That is the issue's own contract, not a nicety.
+  const runs = (): Run[] =>
+    getStripFormatting() ? mircPlainRuns(props.body) : parseMircFormat(props.body);
   // Default "navigate" is the genuine config default — correct
   // production behavior for every non-tappable-surface consumer.
   //

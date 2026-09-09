@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIRC_PALETTE, parseMircFormat } from "../lib/mircFormat";
+import { MIRC_PALETTE, mircPlainRuns, parseMircFormat } from "../lib/mircFormat";
 
 // mIRC text formatting parser. Pinned at the per-Run output level: the
 // test asserts the structure of the runs (text + flag set + resolved
@@ -218,5 +218,78 @@ describe("parseMircFormat", () => {
       expect(MIRC_PALETTE[0]).toBe("#ffffff");
       expect(MIRC_PALETTE[1]).toBe("#000000");
     });
+  });
+});
+
+// #2029 — the render-side projection of the SAME parse: run structure kept,
+// every formatting attribute cleared. This is what `MircBody` swaps in when
+// the reader has the strip preference on, so what it preserves and what it
+// drops IS the feature.
+describe("mircPlainRuns", () => {
+  // The body carries the whole control set the issue enumerates: colour,
+  // hex colour, bold, italic, underline, strikethrough, monospace, reverse,
+  // reset. If one of them survived as an attribute, this fails.
+  const EVERYTHING =
+    "\x02bold\x02 \x1ditalic\x1d \x1funder\x1f \x1estrike\x1e " +
+    "\x11mono\x11 \x16rev\x16 \x034red\x03 \x04ff8800hex\x04 \x0fplain";
+
+  it("keeps the visible text byte-for-byte, the same text the styled parse yields", () => {
+    // Not a hardcoded expectation: the styled parse is the reference, so this
+    // cannot drift into asserting a text the renderer never produces.
+    const styled = parseMircFormat(EVERYTHING)
+      .map((r) => r.text)
+      .join("");
+    expect(
+      mircPlainRuns(EVERYTHING)
+        .map((r) => r.text)
+        .join(""),
+    ).toBe(styled);
+  });
+
+  it("clears every formatting attribute on every run", () => {
+    const runs = mircPlainRuns(EVERYTHING);
+    expect(runs.length).toBeGreaterThan(1); // the body really does split
+    for (const run of runs) {
+      expect(run.bold).toBe(false);
+      expect(run.italic).toBe(false);
+      expect(run.underline).toBe(false);
+      expect(run.strikethrough).toBe(false);
+      expect(run.monospace).toBe(false);
+      expect(run.reverse).toBe(false);
+      expect(run.fg).toBeUndefined();
+      expect(run.bg).toBeUndefined();
+    }
+  });
+
+  // The control that proves the fixture is not vacuous: the STYLED parse of
+  // the same body must carry the attributes this strips. Without it, a body
+  // that happened to be plain would make the block above pass on nothing.
+  it("NEGATIVE CONTROL: the styled parse of the same body DOES carry attributes", () => {
+    const styled = parseMircFormat(EVERYTHING);
+    expect(styled.some((r) => r.bold)).toBe(true);
+    expect(styled.some((r) => r.italic)).toBe(true);
+    expect(styled.some((r) => r.underline)).toBe(true);
+    expect(styled.some((r) => r.strikethrough)).toBe(true);
+    expect(styled.some((r) => r.monospace)).toBe(true);
+    expect(styled.some((r) => r.reverse)).toBe(true);
+    expect(styled.some((r) => r.fg !== undefined)).toBe(true);
+  });
+
+  // Pins the ruling that the runs are NOT merged. Merging would repair a URL
+  // split by a colour code — a real improvement, and a behaviour change that
+  // does not belong to an issue about removing colours.
+  it("does NOT merge the runs — same boundaries as the styled parse", () => {
+    const styled = parseMircFormat(EVERYTHING);
+    const plain = mircPlainRuns(EVERYTHING);
+    expect(plain).toHaveLength(styled.length);
+    expect(plain.map((r) => r.text)).toEqual(styled.map((r) => r.text));
+  });
+
+  it("leaves a body with no control bytes exactly as the styled parse leaves it", () => {
+    expect(mircPlainRuns("hello world")).toEqual(parseMircFormat("hello world"));
+  });
+
+  it("yields no runs for an empty body (the zero-run contract MircBody relies on)", () => {
+    expect(mircPlainRuns("")).toEqual([]);
   });
 });

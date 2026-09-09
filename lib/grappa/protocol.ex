@@ -298,7 +298,30 @@ defmodule Grappa.Protocol do
   # @min_protocol_version stays at 1: no bundle predating v14 knows the
   # `/ignore` verb, so none can send the request that earns the new token —
   # the only frame an old client could fail to read is one it cannot cause.
-  @protocol_version 14
+  #
+  # v15 (#2029) — `display_prefs` grows a FIFTH key, `strip_formatting`: the
+  # per-viewer opt-in that renders message bodies with the mIRC control codes
+  # stripped. Same carrier as v6's `show_bottom_bar`, same reason it counts:
+  # `display_prefs` is a client-facing REST payload and its shape changed,
+  # which under the #1393d ruling is enough on its own.
+  #
+  # 🔴 `mix grappa.wire_pin --check` DID NOT force this bump, and the run is
+  # on the record rather than inherited from v6: with the key already added to
+  # `Grappa.UserSettings` and this number still reading 14, the gate answered
+  # `wire shape and protocol 14 agree.` at rc=0. The digest spans the codegen
+  # artefacts, whose sources are `lib/grappa/**/*wire.ex` plus a hand-kept
+  # list of web envelopes, and `GrappaWeb.UserSettingsJSON` is on neither —
+  # the same silence #1679 hit with `BootJSON`. v6 recorded that as a gap in
+  # the DETECTOR; a second carrier hitting it identically makes it a property
+  # of every hand-written `*_json.ex`, so the bump here is a deliberate manual
+  # act and the next one will be too, until the digest's coverage widens.
+  #
+  # @min_protocol_version stays at 1, and deliberately: the key is absent-
+  # tolerant in BOTH directions (`fetch_optional_display_bool/3` server-side,
+  # `?? DEFAULT_DISPLAY_PREFS` client-side), so a bundle carrying it degrades
+  # against an older server instead of breaking. cic's own
+  # MIN_SERVER_PROTOCOL_VERSION does not move for the same reason.
+  @protocol_version 15
   @min_protocol_version 1
 
   @doc "The protocol version the server currently speaks."
@@ -309,7 +332,7 @@ defmodule Grappa.Protocol do
   # alongside `@protocol_version`; the spec doubles as the bump tripwire,
   # and now that the bump is routine the tripwire is what keeps it from
   # being done half-way.
-  @spec version() :: 14
+  @spec version() :: 15
   def version, do: @protocol_version
 
   @doc """

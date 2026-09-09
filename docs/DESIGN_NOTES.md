@@ -50123,12 +50123,24 @@ carries the count the question was about.
 
 ### What is NOT claimed
 
-* **No e2e.** The visible outcome ("no tab appears from a stranger") wants a
-  peer sending a DM-targeted CTCP, and the e2e harness drives cic against a
-  fixture API rather than a peer on a real ircd. Rather than write a spec that
-  asserts nothing, the coverage is stated: unit at the classifier for all four
-  arms plus both controls, integration through a real `IRCServer` for the
-  window count. The felt outcome stays dogfood.
+* **The e2e is written but NOT YET RUN.** It needs the exclusive stack lane,
+  which is the orchestrator's to allocate; the result is reported separately
+  and this entry does not pre-date it green.
+
+  🔎 It nearly was not written at all. The draft of this very bullet read "no
+  e2e — the harness drives cic against a fixture API rather than a peer on a
+  real ircd". **Measured, that premise is false**: the stack runs a real
+  grappa against the testnet ircd, `IrcPeer.connect` gives a real peer, and a
+  CTCP query is a PRIVMSG whose body is delimiter-wrapped, so the ordinary
+  send verb carries it and no shared-fixture seam was needed. A declaration
+  of "cannot be covered" is a measurement like any other, and this one would
+  have been wrong — the lesson is worth more than the spec.
+
+  It exists because the unit and integration layers prove the routing key and
+  the absent `query_windows` row, and neither proves the thing reported: a
+  TAB. The sidebar is projected from `windowStateByChannel` off the user
+  topic, so "no row in the table" and "no tab on the screen" are two claims
+  with a whole client between them.
 * **That the cic arm is now dead.** `subscribe.ts`'s own-nick NOTICE branch
   documented the CTCP-query visibility row as the last thing still reaching it
   after #546. It no longer does. Its comment is corrected; the arm is NOT

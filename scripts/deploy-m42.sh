@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Host-side one-command deploy to the m42 bastille jail.
 #
-# Wraps `ssh m42` + `sudo bastille cmd grappa <jail script>`; the jail-side
+# Wraps `ssh m42` + `sudo bastille cmd grappa-new <jail script>`; the jail-side
 # scripts live in infra/freebsd/. Runnable from anywhere with ssh access to
 # m42 (workstation, repo checkout, CI).
 #
@@ -24,7 +24,8 @@
 #
 # Overridable via env:
 #   M42_HOST   ssh host alias            (default: m42)
-#   JAIL       bastille jail name        (default: grappa)
+#   JAIL       bastille jail name        (default: $BASTILLE_JAIL, from
+#                                        infra/lib/bastille_jail.sh)
 #   JAIL_REPO  repo path inside the jail (default: /home/grappa/grappa)
 #   FULL_RESTART_HC_URL/RETRIES/SLEEP    --full-restart post-bounce
 #                                        healthcheck (defaults below)
@@ -32,8 +33,16 @@
 # Exit codes: 0 ok, 64 usage, non-zero on ssh / remote failure.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+
+# The jail's NAME — the one fact this script and the in-jail deploy's restart
+# hint MUST agree on, so both read it from here rather than each carrying a
+# literal. Why a constant and not a derivation: infra/lib/bastille_jail.sh (#2022).
+# shellcheck source=infra/lib/bastille_jail.sh
+. "${SCRIPT_DIR}/../infra/lib/bastille_jail.sh"
+
 M42_HOST="${M42_HOST:-m42}"
-JAIL="${JAIL:-grappa}"
+JAIL="${JAIL:-$BASTILLE_JAIL}"
 JAIL_REPO="${JAIL_REPO:-/home/grappa/grappa}"
 
 # --full-restart post-bounce healthcheck (30×2s, like deploy.sh). Each
@@ -153,7 +162,7 @@ if [ "$full_restart" -eq 1 ]; then
   exit 0
 fi
 
-# bastille cmd runs the jail script as root inside the jail. Quote the
+# `bastille cmd` runs the jail script as root inside the jail. Quote the
 # remote command so the flag (if any) reaches the jail script intact.
 # shellcheck disable=SC2029  # intentional client-side expansion of vars
 ssh "$M42_HOST" "sudo bastille cmd ${JAIL} ${jail_script} ${remote_args}"

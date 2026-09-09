@@ -20,6 +20,12 @@ load ../bats_helpers
 setup() {
     DEPLOY_M42="$BATS_TEST_DIRNAME/../../scripts/deploy-m42.sh"
 
+    # The jail these cases expect to be addressed comes from the same place
+    # the script reads it (#2022) — asserting a literal here would let the
+    # test and the default drift apart, which is the bug it now covers.
+    # shellcheck source=infra/lib/bastille_jail.sh
+    . "$BATS_TEST_DIRNAME/../../infra/lib/bastille_jail.sh"
+
     FAKE_DIR="$BATS_TEST_TMPDIR/fake"
     mkdir -p "$FAKE_DIR"
     SSH_LOG="$BATS_TEST_TMPDIR/ssh.log"
@@ -72,12 +78,12 @@ run_m42() {
     [ "$status" -eq 0 ]
 
     grep -q "deploy.sh --force-cold --defer-restart" "$SSH_LOG"
-    grep -q "bastille restart grappa" "$SSH_LOG"
+    grep -q "bastille restart ${BASTILLE_JAIL}" "$SSH_LOG"
     grep -q "curl -fsS -o /dev/null http://127.0.0.1:4000/healthz" "$SSH_LOG"
     grep -q "last-deployed-sha" "$SSH_LOG"
 
     stage_line=$(grep -n "force-cold --defer-restart" "$SSH_LOG" | head -1 | cut -d: -f1)
-    restart_line=$(grep -n "bastille restart grappa" "$SSH_LOG" | head -1 | cut -d: -f1)
+    restart_line=$(grep -n "bastille restart ${BASTILLE_JAIL}" "$SSH_LOG" | head -1 | cut -d: -f1)
     health_line=$(grep -n "healthz" "$SSH_LOG" | head -1 | cut -d: -f1)
     marker_line=$(grep -n "last-deployed-sha" "$SSH_LOG" | head -1 | cut -d: -f1)
     [ "$stage_line" -lt "$restart_line" ]
@@ -90,7 +96,7 @@ run_m42() {
     run_m42 --full-restart
     [ "$status" -ne 0 ]
     grep -q "deploy.sh --force-cold --defer-restart" "$SSH_LOG"
-    grep -q "bastille restart grappa" "$SSH_LOG"
+    grep -q "bastille restart ${BASTILLE_JAIL}" "$SSH_LOG"
     grep -q "healthz" "$SSH_LOG"
     refute grep -q "last-deployed-sha" "$SSH_LOG"
 }
@@ -179,6 +185,30 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"still RUNNING"* ]]
     refute grep -q "PRODUCTION IS DOWN" <<<"$output"
+}
+
+# --- #2022: the default addresses a jail that EXISTS -------------------------
+#
+# `JAIL` defaulted to `grappa`, which is the jail's host.hostname, not its
+# bastille NAME (`grappa-new`) — so an unoverridden run addressed nothing.
+# These two pin the default itself and the recovery line, because the second
+# is read while production is down and a wrong jail there costs an outage.
+
+@test "#2022 no JAIL override: the ssh addresses the jail by its declared name" {
+    run_m42
+    [ "$status" -eq 0 ]
+    grep -q "bastille cmd ${BASTILLE_JAIL} " "$SSH_LOG"
+    # …and says so on stdout, which is what the operator reads back.
+    [[ "$output" == *"jail=${BASTILLE_JAIL} "* ]]
+}
+
+@test "#2022 the PRODUCTION IS DOWN line names a jail that exists" {
+    export HEALTH_RC=1 SERVICE_STATUS_RC=1
+    run_m42 --full-restart
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"PRODUCTION IS DOWN"* ]]
+    # The pasteable recovery command, not just the shout.
+    [[ "$output" == *"bastille cmd ${BASTILLE_JAIL} service grappa start"* ]]
 }
 
 @test "#1656 --full-restart: a dead jail is never restarted for you" {

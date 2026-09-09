@@ -2,9 +2,9 @@
 # Grappa native FreeBSD deploy — preflight-driven hot-vs-cold dispatcher.
 #
 # Run inside the jail as ROOT (the rc.d restart on the cold path needs it):
-#   sudo bastille cmd grappa /home/grappa/grappa/infra/freebsd/deploy.sh
-#   sudo bastille cmd grappa /home/grappa/grappa/infra/freebsd/deploy.sh --force-hot
-#   sudo bastille cmd grappa /home/grappa/grappa/infra/freebsd/deploy.sh --force-cold
+#   sudo bastille cmd grappa-new /home/grappa/grappa/infra/freebsd/deploy.sh
+#   sudo bastille cmd grappa-new /home/grappa/grappa/infra/freebsd/deploy.sh --force-hot
+#   sudo bastille cmd grappa-new /home/grappa/grappa/infra/freebsd/deploy.sh --force-cold
 #
 # A thin consumer of the shared deploy algorithm in
 # `infra/lib/deploy_common.sh`: this file sets config, flips the feature
@@ -35,6 +35,16 @@
 
 set -eu
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+
+# The jail's NAME. This script runs INSIDE the jail and never invokes
+# bastille — but the hints below quote the HOST-side incantation, and those
+# are what an operator pastes while production is down. They must name the
+# same jail `scripts/deploy-m42.sh` addresses, so both read it from here.
+# Why a constant and not a derivation: infra/lib/bastille_jail.sh (#2022).
+# shellcheck source=infra/lib/bastille_jail.sh
+. "${SCRIPT_DIR}/../lib/bastille_jail.sh"
+
 REPO_ROOT="${REPO_ROOT:-/home/grappa/grappa}"
 ENV_FILE="${ENV_FILE:-/usr/local/etc/grappa/grappa.env}"
 HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:4000/healthz}"
@@ -52,10 +62,11 @@ DEPLOY_FEATURE_REEXEC=1
 DEPLOY_FEATURE_MARKER=1
 DEPLOY_FEATURE_PREV_SHA_CARRY=1
 DEPLOY_FEATURE_RECONCILE=1
-DEPLOY_SEED_RETRY_HINT="sudo bastille cmd grappa ${REPO_ROOT}/infra/freebsd/jail_release.sh eval 'Grappa.Release.seed_themes()'"
+DEPLOY_SEED_RETRY_HINT="sudo bastille cmd ${BASTILLE_JAIL} ${REPO_ROOT}/infra/freebsd/jail_release.sh eval 'Grappa.Release.seed_themes()'"
 # Host-side spelling, like the seed hint above: what the operator types, not
-# what this script (already inside the jail) would run.
-DEPLOY_RESTART_HINT="sudo bastille cmd grappa service grappa start"
+# what this script (already inside the jail) would run. `service grappa` is
+# the rc.d SERVICE name and stays as it is — only the jail moves.
+DEPLOY_RESTART_HINT="sudo bastille cmd ${BASTILLE_JAIL} service grappa start"
 
 # Run one build step as the grappa user. `su -l` strips the environment,
 # so PATH/MIX_ENV/MIX_OS_CONCURRENCY_LOCK are re-set inside every
@@ -186,10 +197,10 @@ substrate_restart() {
 
 	# --defer-restart: BEAM stopped and the new release + rc.d wrappers
 	# staged, but deliberately no start, no healthcheck and no marker —
-	# the host's single `bastille restart grappa` completes the deploy.
+	# the host's single `bastille restart grappa-new` completes the deploy.
 	# Why: docs/OPERATIONS.md § "The FreeBSD jail rails (infra/freebsd/)".
 	if [ "${DEFER}" -eq 1 ]; then
-		deploy_log "--defer-restart: BEAM stopped, new release+rc.d wrappers staged; host must bastille-restart grappa to boot it (marker NOT written)"
+		deploy_log "--defer-restart: BEAM stopped, new release+rc.d wrappers staged; host must bastille-restart ${BASTILLE_JAIL} to boot it (marker NOT written)"
 		exit 0
 	fi
 
@@ -224,7 +235,8 @@ substrate_done_banner() {
 }
 
 # ---- run ------------------------------------------------------------
-SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+# SCRIPT_DIR is set at the top of the file — the jail-name lib is sourced
+# before the hints that quote it, and one definition is enough for both.
 # shellcheck source=infra/lib/deploy_common.sh
 . "${SCRIPT_DIR}/../lib/deploy_common.sh"
 

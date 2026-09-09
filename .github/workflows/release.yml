@@ -1377,7 +1377,7 @@ jobs:
           provenance: false
 
   smoke:
-    name: deploy + probe the release image (amd64)
+    name: deploy + probe the release image (${{ matrix.arch }})
     needs: [docker]
     # Exactly the docker job's trigger set, all three shapes: a real tag and a
     # repair (probe what was just PUBLISHED) or a docker_validation dry-run
@@ -1389,8 +1389,75 @@ jobs:
     # proves the deb job alone and must not build images nobody asked for. The
     # docker_validation arm is untouched — asking for both dry-runs at once is
     # contradictory but harmless, since neither publishes anything.
+    #
+    # ── RELEASE-ONLY IS DELIBERATE, and this is the statement of why (#2018) ──
+    #
+    # This job never runs on plain main, which means no run on main could have
+    # caught the v1.5.4 red, and that reads like a gap until the subject is
+    # named. THE SUBJECT OF THIS GATE IS THE PUBLISHED IMAGE. Before the tag
+    # there is no published image to probe: release-only here is arithmetic, not
+    # a cadence anybody chose, and moving it earlier would mean probing a
+    # different artefact while calling it the same one.
+    #
+    # What main CAN rot is the RECIPE, and the recipe is not uncovered — it is
+    # held by gates that need no container and therefore already run on every
+    # PR: test/infra/base_image_digest_pin_test.bats (#103),
+    # test/infra/toolchain_pin_test.bats (#1408 D-S10), the ABI floor proved at
+    # build time by infra/docker/assert-abi-lockstep.sh, and the ~50 suites in
+    # test/infra/ that exercise the deploy scripts with `docker` stubbed.
+    #
+    # A `schedule:` for the `docker_validation` dry-run was considered and
+    # REFUSED (vjt's ruling, 2026-09-09): a cron red has no owner, nobody is on
+    # duty at the hour it fires, and a signal nobody reads is indistinguishable
+    # from a signal that is not there. There is no `schedule:` anywhere in this
+    # repository, and that is a decision rather than an omission.
     if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.docker_validation) || (github.event_name == 'workflow_dispatch' && !inputs.docker_validation && !inputs.deb_validation && inputs.tag != '') }}
-    runs-on: ubuntu-latest
+    # ── BOTH published architectures are BOOTED, not just built (#2018) ──────
+    #
+    # The docker job publishes `linux/amd64,linux/arm64`. Until #2018 this job
+    # ran on `ubuntu-latest` alone and its name said `(amd64)`, with the posture
+    # written out as "amd64 only: the arm64 leg is proven by the build".
+    #
+    # Measured, and it is why that posture fell: EVERY job in every workflow in
+    # this repository was `ubuntu-latest`, so no arm64 binary had ever been
+    # EXECUTED here by anything. `assert-abi-lockstep.sh` does gate arm64 at
+    # build time — it runs per-platform and fails the build unless the runtime
+    # stage's musl and openssl SONAME majors match what the build stage linked —
+    # but linking is not starting. For an arm64 puller of ghcr.io/<owner>/grappa
+    # the first process ever to run the image was a user's, on every release
+    # that has ever shipped. That is structural rather than intermittent, and
+    # `ubuntu-24.04-arm` is a free GitHub-hosted runner on a public repository,
+    # so closing it costs nothing but this block.
+    #
+    # `fail-fast: false` is LOAD-BEARING and is not a softening: without it, an
+    # amd64 failure CANCELS the arm64 leg, and the cancelled leg is exactly the
+    # reading that would have been worth having. Two independent runner
+    # substrates probing one artefact is the only cross-check this gate has ever
+    # had against a failure that belongs to the machine rather than to the image
+    # — "amd64 red while arm64 is green on the same run" is a sentence nobody
+    # could write before this.
+    #
+    # THE DRY-RUN KEEPS ONE LEG, deliberately (vjt's ruling, 2026-09-09). A
+    # `docker_validation` dispatch re-exports an amd64 image from the gha build
+    # cache; giving it an arm64 leg would mean standing up a SECOND cache for a
+    # path that nothing fires automatically (there is no `schedule:` anywhere in
+    # this repo) — maintenance that drifts with nobody watching it. So the
+    # matrix is one leg on the dry-run and two on the paths that publish, which
+    # is where the coverage is owed. Better light and stated than complete and
+    # never exercised; if a cadence ever exists, this is the line to revisit.
+    #
+    # Note for whoever wires branch protection: the amd64 check-run keeps its
+    # EXACT name, `deploy + probe the release image (amd64)`, because `name:`
+    # is spelled with the matrix value rather than left to the default suffix.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && inputs.docker_validation)
+          && '[{"arch":"amd64","runner":"ubuntu-latest"}]'
+          || '[{"arch":"amd64","runner":"ubuntu-latest"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]'
+          ) }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: read

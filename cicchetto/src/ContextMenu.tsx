@@ -1,7 +1,8 @@
 import { type Component, createEffect, createSignal, For, on, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { computeMenuPosition } from "./lib/menuPosition";
+import { computeMenuPosition, type MenuAnchor } from "./lib/menuPosition";
 import { createOverlayEscape } from "./lib/overlayScrollLock";
+import { isCoarsePointer } from "./lib/platform";
 
 // The context-menu SHELL: portal, backdrop, Escape, and the measured
 // flip/clamp placement. Extracted from `UserContextMenu` when #1067 needed a
@@ -21,6 +22,21 @@ import { createOverlayEscape } from "./lib/overlayScrollLock";
 // proven in the Playwright e2e (issue487-context-menu-viewport-clamp.spec.ts)
 // since jsdom gives no real viewport dimensions. Opacity-gated until measured
 // so the pre-measure frame never flashes off-screen.
+//
+// #2014 — WHICH CORNER lands on the press point is decided HERE, once, off
+// `isCoarsePointer()`: on a touch device the menu's bottom-right corner goes on
+// the press point so it opens up-and-left, out from under the hand that opened
+// it; under a mouse it keeps the native down-and-right. Reported on iOS against
+// the long-press message menu, and vjt ruled the scope "tutta la shell"
+// (2026-09-09 00:24Z) — so no host passes an anchor and none can drift: the
+// nick menu and the admin verb menu inherit the same answer from the module
+// that already owns placement.
+//
+// The flip/clamp above is UNCHANGED and is not what this touches. From a
+// screenshot the two are indistinguishable, which is the trap the issue names:
+// near the far edges the flip already produces the wanted geometry, so the
+// defect was only ever which side we PREFER. One parameter on the existing
+// primitive, not a second placement mechanism beside it.
 //
 // #949 — "inside the viewport" was the LAYOUT viewport, whose origin under
 // `viewport-fit=cover` is the physical top of the display. #913 fixed the same
@@ -159,6 +175,7 @@ const ContextMenu: Component<Props> = (props) => {
     if (!menuRef || !safeAreaRef) return;
     const rect = menuRef.getBoundingClientRect();
     const safe = safeAreaRef.getBoundingClientRect();
+    const anchor: MenuAnchor = isCoarsePointer() ? "bottom-right" : "top-left";
     setPlacement(
       computeMenuPosition({
         clickX,
@@ -179,6 +196,10 @@ const ContextMenu: Component<Props> = (props) => {
         // no inset (every desktop browser, every engine in the e2e suite) this
         // is exactly {0, w, h, 0} and the placement is bit-identical to #487's.
         safeArea: { top: safe.top, right: safe.right, bottom: safe.bottom, left: safe.left },
+        // #2014 — read HERE, next to the other two live environment reads, and
+        // for the same reason: it is measured at the moment the menu opens, off
+        // the device rather than off anything a caller passed down.
+        anchor,
       }),
     );
     setPlaced(true);

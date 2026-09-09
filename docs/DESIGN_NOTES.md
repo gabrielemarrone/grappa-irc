@@ -50334,6 +50334,17 @@ CI will not catch its absence.** Widening the digest's coverage is a change
 the pin deliberately cannot tell apart from a shape change, so it is not
 smuggled in here either.
 
+**Which gate DID hold, and it is not the one you would name.** The bump has a
+second half — cic's `CLIENT_PROTOCOL_VERSION` (socket.ts), what the bundle
+SPEAKS — and this branch shipped the server half without it. #1973's
+`protocol_test.exs` is what went red: *"cicchetto declares
+CLIENT_PROTOCOL_VERSION = 14 while the server speaks 15"*. So on a payload the
+codegen does not cover, that pin is the ONLY automatic guard on the pair, and
+it was carrying the whole change alone. Worth knowing in the order the failure
+arrives: `wire_pin` is silent, `protocol_test` is not. (cic's OTHER constant,
+`MIN_SERVER_PROTOCOL_VERSION`, correctly stays at 9 — it says what cic
+REQUIRES, and the new key is absent-tolerant.)
+
 ### One chokepoint, twelve surfaces, and why the issue's list was not used
 
 The issue enumerates *"channel and query panes, notices, quit/part reasons,

@@ -50158,3 +50158,110 @@ carries the count the question was about.
 
 _Test-only + routing. No wire change, no protocol bump, no migration.
 Deploy: ordinary._
+<!-- entry #1956 -->
+
+---
+
+## 2026-09-09 — issue 1956: the long-press menu that vanishes with the keyboard down — what the source CAN decide, and what it cannot
+
+Reported three times on iOS, most recently against **production `1.5.4-c911f7cc`**
+(the sha this work branched from, so the code read here IS the code that
+misbehaves). The discriminator has been stable across all three: with a compose
+field focused there is no problem; with the keyboard down, a finger held STILL
+makes the menu dismiss itself, while a movement that produces vertical scroll
+leaves it up. #2014's anchoring cure is already live and is not this.
+
+### What the source decides
+
+**The class of focus-dependent branches is CLOSED, and it has one member.**
+Enumerating every `document.activeElement` / `isTextEntry` read in `cicchetto/src`
+gives six production sites; five are off this path (`Shell.tsx` tab-complete,
+`AdminDebugTab` display, `globalPaste`, `mediaViewer`, and `messageMenu.ts`'s
+`selectMessageText`, which only runs once the menu is already open). The sixth,
+`keepKeyboard.ts:182`, is the only one the long-press gesture can reach. So the
+issue's "candidate to check first" is not a starting point — it is the only
+door, by enumeration.
+
+**The menu has exactly three pointer/key doors and one lifecycle door**:
+`.context-menu-backdrop`'s `onClick`, an item's `onClick`, `createOverlayEscape`,
+and `ScrollbackPane`'s `onCleanup`. `ContextMenu` binds no touch or pointer
+listener of its own, so every pointer-driven close is a `click`.
+
+### What the source REFUTES
+
+The natural reading — *keepKeyboard's `preventDefault` suppresses the synthesized
+click with the keyboard up, and with it down the click closes the menu* — **is
+false**, and the shipped code is what falsifies it. `preventDefault` on a
+mousedown cancels the focus shift and the selection-drag start; it does not
+cancel the click. If it did, every chrome control in the app would be dead to a
+tap while the compose box holds focus, because that same always-fire
+`preventDefault` covers them all. UX-3 has shipped since 2026-06-11 and they
+work; `keepKeyboard`'s own moduledoc states it outright ("The click still fires
+… the tapped element's onClick still runs").
+
+So the focus discriminator's mechanism is **not determinable from the source**.
+Two candidates survive:
+
+* **A** — the real shield, `messageGestures.onEnd`'s `if (e.cancelable)
+  e.preventDefault()`, is a silent no-op because WebKit hands out a
+  non-cancelable touchend. `preventDefault` on one throws nothing and leaves
+  `defaultPrevented` false, so the shield reads applied while doing nothing.
+* **B** — the shield holds and the close arrives through another door (with
+  #2014 the menu's bottom-right corner sits ON the press point, so an item is a
+  pixel from the synthesized click).
+
+**Open tension, deliberately unresolved.** `keepKeyboard.ts:188-191` asserts that
+"on real iOS a long-press synthesizes NO mousedown at all". If true, candidate A
+is impossible by construction. That assertion is reasoning, not a measurement —
+the comment uses it to justify a branch it calls a cross-platform net. It is
+used here in neither direction. **If the diag below prints `cancelable=false`
+with the keyboard down, that comment is falsified and must be corrected in the
+same round**: a module comment is a claim about the present.
+
+### What ships, and why both halves
+
+**The diag** names the two facts nothing off-device can supply: the `cancelable`
+of the release after a hold, and WHICH door closed the menu. Gated on
+`isDiagEnabled()` like `keepKeyboard:200-205`; a no-op with the flag off.
+
+**The cure** is focus-INDEPENDENT, which is the point: it is correct under A and
+under B, so it does not wait on a measurement it cannot take. *The menu refuses
+any pointer activation until it has seen a press that BEGAN after it opened.*
+Causal, not timed — the opening gesture's `pointerdown` fired before the
+component existed, so the menu is born disarmed and the click synthesized from
+that same gesture finds no arm, while every genuine interaction starts with a
+fresh one.
+
+🔴 **It must arm on `pointerdown`, never on `mousedown`.** The synthesized
+mousedown PRECEDES the click inside the same release: arming there would arm
+exactly the click this refuses — a no-op that reads as applied. Escape stays
+outside the guard; a way out that is always available must not require a prior
+press.
+
+It lives in the shared shell rather than in the long-press binder because the
+defect is not "the scrollback's gesture leaks" but "a menu can be actioned by
+the gesture that opened it", which is true of every door the shell has — the
+#1115 desktop door and the nick and admin menus included. vjt ruled the scope,
+including the vitest churn (relayed, not seen first-hand).
+
+### The guard would have blinded the diagnosis, so it logs its own refusal
+
+Once the cure is in, a menu that correctly stays put is **silent**, and silence
+cannot separate "the click arrived and was refused" from "no click ever
+arrived" — which is precisely the pair the on-device round has to settle. The
+refusal therefore emits its own line. Without it the cure would have closed the
+defect while destroying the instrument that says WHICH candidate it closed, and
+whether a third remains.
+
+### Cost measured, not estimated
+
+`fireEvent.click` dispatches a bare `click`, which no browser produces, so the
+guard reddened **4** test files and 21 tests — not the 5 files predicted;
+`RailContext` is a different component and has zero `fireEvent.click`. They are
+updated to press first (`helpers/pointerEvents.pressAndClick`), which makes the
+simulation faithful rather than compliant, and the refusal keeps its own direct
+coverage. Verified by mutation: neutering the guard reds exactly the three
+refusal tests and nothing else.
+
+_Client-only. No wire change, no protocol bump, no migration. The verification
+that matters is vjt's, on device, with the flag on._

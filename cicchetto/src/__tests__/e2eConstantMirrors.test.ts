@@ -101,6 +101,19 @@ const MIRRORS: readonly Mirror[] = [
     production: SERVER_WINDOW_NAME,
     origin: "SERVER_WINDOW_NAME (src/lib/windowKinds.ts)",
   },
+  // issue 2024 — the CTCP-query spec asserts the visibility row lands in the
+  // network window, so `$server` IS the fact under test and copying it is not
+  // an option to be talked out of: the e2e runner mounts `cicchetto/e2e` alone
+  // at `/work` (`compose.yaml`, `- .:/work`), so `../../src/lib/windowKinds`
+  // does not exist at runtime and an import of the VALUE cannot resolve. A
+  // pinned copy is the mechanism; KNOWN_UNPINNED would be a lie, because this
+  // value is not a question.
+  {
+    file: "e2e/tests/issue2024-ctcp-query-no-minted-tab.spec.ts",
+    name: "SERVER_WINDOW",
+    production: SERVER_WINDOW_NAME,
+    origin: "SERVER_WINDOW_NAME (src/lib/windowKinds.ts)",
+  },
   {
     file: "e2e/tests/m12-motd-server-window-routes-notice.spec.ts",
     name: "SERVER_CHANNEL",

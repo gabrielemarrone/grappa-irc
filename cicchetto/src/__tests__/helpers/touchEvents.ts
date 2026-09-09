@@ -10,15 +10,44 @@
 
 export type TouchPoint = { clientX: number; clientY: number };
 
-export function fireTouch(el: HTMLElement, type: string, ...points: TouchPoint[]): Event {
-  const ev = new Event(type, { bubbles: true, cancelable: true });
+// The ONE dispatcher the three wrappers below share. Extracted when issue 1956
+// needed a NON-cancelable touchend: a third near-copy of the same nine lines is
+// how the `touches` / `changedTouches` shaping drifts between them, and the
+// shaping is the part every gesture listener actually reads.
+function dispatchTouch(
+  el: HTMLElement,
+  type: string,
+  init: { cancelable: boolean; timeStamp?: number },
+  points: TouchPoint[],
+): Event {
+  const ev = new Event(type, { bubbles: true, cancelable: init.cancelable });
   const list = points as unknown as TouchList;
   Object.defineProperty(ev, "touches", {
     value: type === "touchend" ? ([] as unknown as TouchList) : list,
   });
   Object.defineProperty(ev, "changedTouches", { value: list });
+  if (init.timeStamp !== undefined) {
+    Object.defineProperty(ev, "timeStamp", { value: init.timeStamp });
+  }
   el.dispatchEvent(ev);
   return ev;
+}
+
+export function fireTouch(el: HTMLElement, type: string, ...points: TouchPoint[]): Event {
+  return dispatchTouch(el, type, { cancelable: true }, points);
+}
+
+// issue 1956 — a touch the browser will NOT let a listener cancel. WebKit hands
+// these out once it has decided the gesture is its own, and `preventDefault` on
+// one is SILENT: no throw, no `defaultPrevented`, so a shield built on it reads
+// applied while doing nothing. Candidate A of the iOS long-press-menu diagnosis
+// is exactly that shape, which is why the suite has to be able to spell it.
+export function fireTouchUncancelable(
+  el: HTMLElement,
+  type: string,
+  ...points: TouchPoint[]
+): Event {
+  return dispatchTouch(el, type, { cancelable: false }, points);
 }
 
 // Same, with a chosen `timeStamp` — for gestures whose decision reads the clock
@@ -34,15 +63,7 @@ export function fireTouchAt(
   timeStamp: number,
   ...points: TouchPoint[]
 ): Event {
-  const ev = new Event(type, { bubbles: true, cancelable: true });
-  const list = points as unknown as TouchList;
-  Object.defineProperty(ev, "touches", {
-    value: type === "touchend" ? ([] as unknown as TouchList) : list,
-  });
-  Object.defineProperty(ev, "changedTouches", { value: list });
-  Object.defineProperty(ev, "timeStamp", { value: timeStamp });
-  el.dispatchEvent(ev);
-  return ev;
+  return dispatchTouch(el, type, { cancelable: true, timeStamp }, points);
 }
 
 // One full edge swipe: start → two moves → end. The intermediate moves are what

@@ -50005,3 +50005,43 @@ _Deploy scripts, infra comments and docs. No wire change, no protocol bump, no
 supervision-tree or schema change. Deploy: the changed files are the deploy
 machinery itself — the value they now carry is the one tonight's deploy was
 already run with by hand._
+<!-- entry #2022b -->
+
+---
+
+## 2026-09-09 — #2022b: adding a second `source` to a deploy script breaks a fixture that names its libs by hand
+
+#2022 gave `infra/freebsd/deploy.sh` a second sourced lib. Main went red
+immediately: 35 `not ok`, all in `test/infra/deploy_jail_test.bats`, each
+failing at its FIRST assertion.
+
+That fixture builds a throwaway repo and copies in, **by name**, the libs the
+script sources. It had one such line. With the second lib absent, `set -eu`
+kills the script at the source — `deploy.sh: line 46: …/lib/bastille_jail.sh:
+No such file or directory`, rc=1 — before a single assertion runs.
+
+Two things are worth keeping, and neither is "remember to copy the file".
+
+**The fixture is a hand-maintained mirror of a source list, and nothing
+derives one from the other.** Six fixtures across docker, linux and the jail
+follow the same one-`cp`-per-lib shape; it is consistent, and it is a mirror
+that will drift again the next time a deploy script gains a source line. The
+cure here follows the convention rather than inventing a second one — but a
+reader adding a `.` to any deploy script should know the fixture is the other
+half of that edit.
+
+**bats reports the symptom thirty-five times and the cause zero times.** The
+CI log carries 35 assertion failures and not one line of the script's stderr;
+`No such file or directory` appears nowhere in it. The failure is legible only
+by running the suite, or by running the script from a sandbox by hand — which
+is how the mechanism here was established rather than guessed, together with
+the control that proves it: with the lib present the script runs past line 46
+into `git pull`, i.e. fails somewhere else entirely. That control is what ruled
+out the rival reading, that `SCRIPT_DIR` was resolving to the wrong place.
+
+Process note, recorded because the cost was real: `scripts/check.sh` already
+runs `scripts/bats.sh`. The red did not escape a gap in the gates — it escaped
+because the gate was not run before pushing.
+
+_Test fixture only. No wire change, no protocol bump, no supervision-tree or
+schema change. Deploy: nothing — the change is in a bats fixture._

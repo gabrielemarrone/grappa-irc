@@ -877,6 +877,44 @@ export async function partChannel(
   }
 }
 
+// The PART-side twin of `listChannelNames`' lesson (#793): the DELETE only
+// ASKS. `partChannel` returns as soon as the bouncer has dropped the channel
+// from its own state — the sidebar tab vanishes on that alone — but the
+// upstream PART is still in flight, and the ECHO comes back a full second
+// later on a connection that spent its penalty budget on connect + autojoin
+// (measured on CI: `headroom_s=-1.155`, PART sent → echo ingested in 1.002 s
+// and 1.003 s across two runs).
+//
+// Ingesting that echo WRITES a `:part` row into the channel's scrollback, and
+// the archive is derived from scrollback. So a spec that deletes the archive
+// entry inside that window sees the row DELETED AND RECREATED with a fresh
+// `last_activity` — not "failing to disappear". Nothing removes the new row
+// afterwards, so a bigger timeout buys a slower red: measured, the assertion
+// polled 9 times over 5 s and saw `1` every time, losing the race by 13 ms
+// and 8 ms on two runs of `ux-2-mobile-archive`.
+//
+// Await this after `partChannel` and before anything that deletes archive
+// state or asserts an ABSENCE. Asserting the entry is PRESENT needs no
+// barrier — the echo can only recreate it, never remove it.
+//
+// Distinct from calling `assertMessagePersisted` directly, which m9 does:
+// there the persisted PART row is the CLAIM under test, here it is a setup
+// barrier. Same verb, different job, hence the name.
+export async function awaitPartEcho(
+  token: string,
+  networkSlug: string,
+  channel: string,
+  nick: string,
+): Promise<void> {
+  await assertMessagePersisted({
+    token,
+    networkSlug,
+    channel,
+    sender: nick,
+    kind: "part",
+  });
+}
+
 // #1038 — the stored mute key: the network slug, a space, and the channel or
 // DM peer.
 //

@@ -49,7 +49,7 @@ import {
   selectChannel,
   sidebarWindow,
 } from "../fixtures/cicchettoPage";
-import { joinChannel, partChannel } from "../fixtures/grappaApi";
+import { awaitPartEcho, joinChannel, partChannel } from "../fixtures/grappaApi";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
@@ -119,6 +119,11 @@ test("@webkit @touch UX-Z cluster — Dynamic Island clearance + RailActions arc
   // PART seed channel so the UX-2 archive-button arm has an archived
   // entry to render in the modal.
   await partChannel(vjt.token, NETWORK_SLUG, CHANNEL);
+
+  // Barrier before the archive arm below deletes the entry: a late PART echo
+  // recreates it, and also repopulates the scrollback this journey later
+  // asserts is empty.
+  await awaitPartEcho(vjt.token, NETWORK_SLUG, CHANNEL, specNick());
 
   // ── UX-2 — archive opened via the always-on RailActions button (#473) ──
   //

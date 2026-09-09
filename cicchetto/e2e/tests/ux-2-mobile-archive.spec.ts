@@ -40,7 +40,7 @@ import {
   selectChannel,
   sidebarWindow,
 } from "../fixtures/cicchettoPage";
-import { joinChannel, partChannel } from "../fixtures/grappaApi";
+import { awaitPartEcho, joinChannel, partChannel } from "../fixtures/grappaApi";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
@@ -67,6 +67,11 @@ test("@webkit @touch UX-2 — rail archive opens the grouped modal + delete drop
   // selection-gated), so no server-tab dance is needed to surface it.
   await partChannel(vjt.token, NETWORK_SLUG, CHANNEL);
   await expect(sidebarWindow(page, NETWORK_SLUG, CHANNEL)).not.toBeVisible({ timeout: 10_000 });
+
+  // The sidebar going away proves the bouncer dropped the channel, NOT that
+  // the upstream echo landed — and the echo writes a `:part` row that
+  // recreates the archive entry the delete below is about to remove.
+  await awaitPartEcho(vjt.token, NETWORK_SLUG, CHANNEL, specNick());
 
   // openArchive (mobile) opens the rail drawer then taps
   // mobile-panel-archive → the grouped ArchiveModal. The header is

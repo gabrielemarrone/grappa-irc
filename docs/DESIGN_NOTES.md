@@ -50265,3 +50265,129 @@ refusal tests and nothing else.
 
 _Client-only. No wire change, no protocol bump, no migration. The verification
 that matters is vjt's, on device, with the flag on._
+<!-- entry #2029 -->
+
+---
+
+## 2026-09-09 — #2029: stripping mIRC formatting on render, and a gate that stayed silent twice
+
+`morph` (Azzurra staff) asked for a setting that renders messages with the
+mIRC control codes REMOVED, after a channel filled up with heavily coloured
+bot output. The neighbour to rule out first is channel mode `+c`, and it is a
+different thing on both axes: it is an operator's channel-wide policy rather
+than a per-viewer preference, and it REJECTS the message, so the reader loses
+the words along with the colours. This strips on RENDER — the words still
+arrive, they just arrive plain. Default OFF.
+
+### The issue said "client-side"; the codebase said otherwise, and the codebase won
+
+The issue's Scope section opens *"Setting lives client-side in cicchetto, per
+user, persisted with the other display preferences"*. The last five words are
+the ones that decide it, and they point at `display_prefs` — which has been
+SERVER-backed since #449 (`GET/PUT /me/settings/display-prefs`,
+`UserSettings.default_display_prefs/0` the authority). So the sentence is
+self-contradicting: persisting it *with the other display preferences* is
+exactly what makes it not client-side. Issue text is DATA about a defect, not
+an instruction about the fix.
+
+That does not settle it by itself, because a local-only class genuinely
+exists: `fontSize.ts` is localStorage with a stated reason (*"cic owns mobile
+UX; no server-side persistence, no wire bleed"*). The criterion for choosing
+between them was already fixed by #1766 and is not re-litigated here: a
+per-DEVICE toggle is right when the complaint is about a **viewport** (#914's
+`hide_next_active`, a fixed overlay on a phone), and wrong when it is about
+the **account**. A channel full of coloured bot output is identical on the
+phone and on the desktop. Reinforcing rather than deciding: the pref's nearest
+neighbour BY SHAPE — `colored_nicklist`, a boolean colour-rendering toggle —
+sits in the same settings fieldset and is synced, and two adjacent checkboxes
+that persist differently is a promise the interface should not break.
+
+### 🔴 The pin did not force the bump, and this is the SECOND carrier to prove it
+
+`Grappa.Protocol.version/0` moves 14 → 15, under #1393d: `display_prefs` is a
+client-facing REST payload and its shape changed, which is enough on its own.
+`@min_protocol_version` stays at 1, and cic's `MIN_SERVER_PROTOCOL_VERSION`
+stays at 9 — the key is absent-tolerant in BOTH directions
+(`fetch_optional_display_bool/3` server-side, `?? DEFAULT_DISPLAY_PREFS`
+client-side), so a bundle carrying it degrades against an older server instead
+of breaking.
+
+#1766 recorded that `mix grappa.wire_pin --check` *"did not force this and
+could not"*. That was its measurement of its own case; this is a fresh one, on
+this branch, and it agrees:
+
+* with `strip_formatting` ALREADY added to `Grappa.UserSettings` and the
+  version still reading **14**, the gate answered
+  `priv/wire/shape.pin: wire shape and protocol 14 agree.` at **rc=0**;
+* `--update` after the bump rewrote **one line**, `protocol_version 14 → 15`.
+  The digest is byte-identical before and after:
+  `sha256:f3c18a4c920e1bbf97d9fa7af80d1970fb3bbe47ef6e062d7f6f92817b4bf3c0`.
+
+One occurrence is an anecdote about `UserSettingsJSON`; two independent keys
+entering through the same hand-written `*_json.ex` and both passing green make
+it a property of the DETECTOR — the digest spans the codegen artefacts, whose
+sources are `lib/grappa/**/*wire.ex` plus a hand-kept list of web envelopes,
+and no hand-written JSON view is on it (the same silence #1679 hit with
+`BootJSON`). Consequence to carry forward rather than rediscover: **for a
+payload rendered by a hand-written `*_json.ex`, the bump is a manual act and
+CI will not catch its absence.** Widening the digest's coverage is a change
+the pin deliberately cannot tell apart from a shape change, so it is not
+smuggled in here either.
+
+### One chokepoint, twelve surfaces, and why the issue's list was not used
+
+The issue enumerates *"channel and query panes, notices, quit/part reasons,
+informational output"* and cites #142/#175. The set was derived from the code
+instead, and it is bigger: **39 `<MircBody>` call sites across 12 files**, of
+which **nine are surfaces the issue never names** (WhoisCard, WhowasCard,
+WhoModal, DirectoryPane topics, LinksModal, ServiceModal, ServerReplyModal,
+ServerInfoCard, RegistrationWizardModal).
+
+None of them were touched. `parseMircFormat` has exactly **one** production
+render caller — `MircText.tsx`'s `MircBody` — and `MIRC_PALETTE` has **zero**
+consumers outside `mircFormat.ts`, so colour resolution cannot leave the
+parser. One line at that chokepoint reaches every surface, including the nine.
+That is also the answer to *"if a surface renders colour, it must honour the
+strip"*: honoured by construction, not by a list that would rot the next time
+a card learns to render a body.
+
+### `mircPlainRuns`, and why it is not a second stripper
+
+`mircPlainText` (#142) already existed and already strips — for STRING
+surfaces (a `title` attribute), and it is the client twin of #1908's
+match-side strip. It could not be reused verbatim: a string cannot carry the
+run boundaries the renderer needs. `mircPlainRuns` is its render-side sibling
+— same input, same one parser, run structure kept, attributes cleared. The
+control bytes are still removed by `parseMircFormat` and nowhere else; what is
+new is only the projection. A fresh scanner over `\x03`/`\x02` here would have
+been the second implementation of the rule, and that is the thing forbidden.
+
+**The runs are deliberately NOT merged.** Merging them would repair a URL that
+a colour code splits mid-link (linkify runs per-run) — a real improvement, and
+a behaviour change with nothing to do with removing colours. It does not ride
+in on this issue's back; if it is worth having it is worth its own issue.
+
+### Two smaller things that would have rotted
+
+`mircPlainText`'s comment said *"This is NOT a render strip (the visible body
+always routes through `MircBody`)"*. #2029 makes that false, so it is
+rewritten in the same commit rather than left to mislead a future reader into
+thinking no render strip exists.
+
+The display fieldset's blurb read *"The first two follow your account onto
+every device you use"*. A third synced row makes it wrong, and nothing
+type-checks a sentence — so it is rephrased by BEHAVIOUR (*"Only the jump
+button is remembered on this device alone — the rest follow your account"*),
+which the next added row cannot falsify.
+
+### Open, and shipped anyway
+
+Two product questions were put to vjt and are unanswered at merge: whether the
+strip should also apply to one's OWN outgoing messages, and whether OFF is the
+right default. What shipped: the strip acts at the chokepoint, which makes the
+first a "yes, everything visible" at no cost, and the default is OFF as the
+issue specifies. Both are small, localised changes if the answers differ.
+
+_Not asserted: that the pref reaches every surface has been measured through
+the chokepoint (one parse caller, zero palette consumers elsewhere), not by
+exercising all twelve in a browser. The e2e covers one channel-pane line._

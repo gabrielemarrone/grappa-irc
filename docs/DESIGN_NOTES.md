@@ -50045,3 +50045,104 @@ because the gate was not run before pushing.
 
 _Test fixture only. No wire change, no protocol bump, no supervision-tree or
 schema change. Deploy: nothing — the change is in a bats fixture._
+<!-- entry #2024 -->
+
+---
+
+## 2026-09-09 — #2024: the probe that handed a stranger a tab, and the fourth arm nobody counted
+
+An inbound CTCP query MINTED the sender's query window. A DM-targeted query
+resolved its routing key to `state.nick`, which made `build_persist/6` set
+`dm_with = sender` (`Scrollback.dm_peer/4` returns the sender when the target
+IS us), and `Session.Server.maybe_open_query_window/2` keys on
+`dm_with || channel`. So anyone who asked the bouncer for a VERSION string
+left a tab open with somebody the operator had never talked to. **What the
+receiver paid was not a wire line, it was a window** — the asymmetry the #546
+door exists to remove for NOTICE.
+
+**The ruling, and its provenance.** vjt on `#grappa`, 08:45 Europe/Rome,
+verbatim `<< network`, answering "does an inbound CTCP query in a DM go to the
+network window (the #546 door), or does it keep minting the peer's query
+window?". Recorded on issue 2024 as comment `5597364131`. I did not see it —
+reading IRC is closed to me; it reached me relayed and I verified it against
+the issue before building. The issue deliberately carried no `status:` label
+until the ruling landed, because flipping this reverses a contract that a test
+was written to pin.
+
+### The cure is ONE call, and it calls the existing door
+
+`ctcp_query_channel/3` replaces four inline copies of the same three lines. It
+calls `open_query_or_server/2` — the #546 door itself — rather than restating
+"open query → that query, else `$server`". A second copy of the rule would be
+a boundary violation and not a cure: the two would drift, and the reason this
+arm was broken at all is that the rule lived in one branch while the traffic
+arrived on another.
+
+The CHANNEL-targeted branch is untouched, and is the negative control in the
+tests: a channel CTCP keeps the channel key, takes no `dm_with`, and minted
+nothing before or after. It is exercised on BOTH sides of the open-window
+predicate, because the door must not reach that branch at all — if it did, an
+open query with a peer would drag a channel row into her window.
+
+### 🔴 FOUR arms, not three — the issue's own enumeration was short
+
+The issue measured three (`VERSION`, `USERINFO`, `AVATAR`). `ctcp_ping_reply/4`
+is a fourth, computing the identical key with the identical consequence, and it
+is included. Two reasons, and the second is the load-bearing one. Curing three
+of four identical sites would leave one inline copy of the rule beside the
+shared helper — the half-migration that makes the next reader copy whichever
+pattern is closer. And the tree ALREADY holds "CTCP is protocol, not
+conversation" for PING on the *reply* direction: `route_non_channel_notice/3`'s
+CTCP short-circuit names a PING round trip in its own comment. Curing the query
+direction is the symmetric half of a rule the codebase had already accepted.
+
+The fourth arm surfaced from the RED run, not from reading: exactly four
+existing assertions flipped to `left: "vjt"`, one per arm.
+
+### Three doors now, and the split is not the one the names suggest
+
+`open_query_or_server/2` used to document "two doors, deliberately asymmetric"
+— NOTICE for every nick sender, PRIVMSG for services only. There are three now,
+and the axis is **conversation vs control surface**, not NOTICE vs PRIVMSG:
+
+* NOTICE — every nick sender. Announcement, not conversation.
+* CTCP QUERY — every nick sender. A probe is a control surface, and it arrives
+  as a PRIVMSG, which is exactly why it walked past the door for so long.
+* PRIVMSG — services senders ONLY. A peer's ordinary DM still opens the
+  conversation; it is the one arm of the three that still mints.
+
+### The issue's "not measured", measured
+
+Whether a peer's `USERINFO` probe and its `AVATAR` sibling minted ONE window or
+TWO: **one**. All four arms computed the same key from the same inputs, so
+`dm_with` was the same nick and `QueryWindows.open/4` is keyed on it. Evidence
+is the pre-cure assertion set — four arms, four `channel == "vjt"`, one key.
+Post-cure the count is zero, asserted end-to-end by inspecting the whole
+`list_for_subject/1` map rather than a per-nick boolean, so the failure message
+carries the count the question was about.
+
+### What is NOT claimed
+
+* **No e2e.** The visible outcome ("no tab appears from a stranger") wants a
+  peer sending a DM-targeted CTCP, and the e2e harness drives cic against a
+  fixture API rather than a peer on a real ircd. Rather than write a spec that
+  asserts nothing, the coverage is stated: unit at the classifier for all four
+  arms plus both controls, integration through a real `IRCServer` for the
+  window count. The felt outcome stays dogfood.
+* **That the cic arm is now dead.** `subscribe.ts`'s own-nick NOTICE branch
+  documented the CTCP-query visibility row as the last thing still reaching it
+  after #546. It no longer does. Its comment is corrected; the arm is NOT
+  removed, because its full input set was not enumerated and deleting a
+  renderer arm whose inputs you have not measured is how a class goes silent.
+* **Anything about the sender side.** The fan-out (`maybe_query_peer_profile/2`
+  on JOIN + 353) is rate limited per SENDER (`{subject, network_id}`), which
+  bounds one session's outbound and says nothing about the aggregate one
+  receiver takes from N sessions. That is a different slice and was not
+  redesigned here. The `LucentW` Excess Flood kill on Libera is ONE sighting,
+  unreproduced and untied to this path; it is not a cause and was not built on.
+* **Whether USERINFO/AVATAR replies should be surfaced at all.** A product call
+  nobody has made. Each still mints a visibility row; the ruling does not touch
+  it.
+
+_Test-only + routing. No wire change, no protocol bump, no migration.
+Deploy: ordinary._

@@ -49650,6 +49650,31 @@ a decision with two gates over it, not a gap. The lesson is the ordinary one:
 the gate that would contradict a finding is usually already in `test/`, and
 reading it costs less than publishing the finding.
 
+The version that SURVIVES the contradiction is narrower, and it took measuring
+the two gates rather than accepting that they cover the ground. They cover a
+different axis each, and neither is drift-over-time.
+`assert-abi-lockstep.sh` takes its eight arguments from ONE build — the `b_*`
+values out of `/tmp/abi-manifest`, written by that build's build stage
+(`Dockerfile.release:108-119`), the `r_*` values live from the same build's
+runtime stage (`:172-180`) — touches no network, and names no earlier build. It
+is a same-build coherence gate, so two stages moving TOGETHER to a newer alpine
+patch keep it green by construction, which is the intended behaviour rather than
+a hole. `toolchain_pin_test.bats` touches no network either; it reads files, and
+holds `.tool-versions` (`elixir 1.19.5-otp-28`, `erlang 28.5`) against the
+Dockerfile tag to minor-line and OTP-major precision, with its own moduledoc
+calling the Elixir PATCH floating underneath "real and deliberate".
+
+So neither gate reads the bytes that were pulled and neither compares two builds
+made at different times — nor should they. The consequence is what belongs to
+#2018: **if a drifted base ever produces an image that does not start, the only
+thing in this repository that finds out is the release-image smoke job.** It is
+not one check among several on the published container; it is the sole
+consequence-detector for a recipe the project has deliberately chosen to let
+move. That is why a blind spot in it costs more than its size suggests, and it
+is an argument FOR this gate rather than for pinning anything — a digest on
+`alpine:3.24` is argued in `base_image_digest_pin_test.bats` as the wrong move,
+because it would freeze security patches.
+
 ### 🔴 What this does NOT cure — say it before someone reads a cure into it
 
 **The non-determinism is untouched and its mechanism remains unknown.** This

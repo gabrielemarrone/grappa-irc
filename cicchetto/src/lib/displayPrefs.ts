@@ -11,6 +11,7 @@ import {
 } from "./presenceFilter";
 import { loadInitialScrollback, purgeScrollback } from "./scrollback";
 import { getShowBottomBar, setShowBottomBar } from "./showBottomBar";
+import { getStripFormatting, setStripFormatting } from "./stripFormatting";
 import { getTimeFormat, setTimeFormat, type TimeFormatKey } from "./timeFormat";
 import { type DisplayPrefs, getDisplayPrefs, putDisplayPrefs } from "./userSettings";
 
@@ -22,10 +23,14 @@ import { type DisplayPrefs, getDisplayPrefs, putDisplayPrefs } from "./userSetti
 // localStorage cache (the FOUC-free boot mirror); this coordinator adds the
 // server round-trip on top.
 //
-// #1766 added a FOURTH owner module (`showBottomBar.ts`) on exactly that shape.
-// Every function below that names the wire map has to grow with it — the
-// default baseline, `buildWireMap`, `applyServerPrefs` and a `syncedSet*` — and
-// the server's `default_display_prefs/0` is the authority for the default.
+// #1766 added a FOURTH owner module (`showBottomBar.ts`) on exactly that shape,
+// and #2029 a FIFTH (`stripFormatting.ts`). Every function below that names the
+// wire map has to grow with it — the default baseline, `buildWireMap`,
+// `applyServerPrefs` and a `syncedSet*` — and the server's
+// `default_display_prefs/0` is the authority for the default. Four touch points
+// per key, none of them optional: miss the baseline and logout leaves a
+// residual pref, miss `buildWireMap` and every PUT silently resets the key to
+// the server's default.
 //
 // ## The THEME sync shape, not the notification-prefs shape
 //
@@ -60,6 +65,7 @@ const DEFAULT_DISPLAY_PREFS: Required<DisplayPrefs> = {
   colored_nicklist: false,
   presence_filter: {},
   show_bottom_bar: true,
+  strip_formatting: false,
 };
 
 // #449 (issue222 regression fix) — the "unconfirmed local write" marker.
@@ -91,20 +97,22 @@ function hasUnsyncedWrite(): boolean {
   return localStorage.getItem(UNSYNCED_KEY) === "1";
 }
 
-// Read the four owner modules into the wire shape (the seed-up + every PUT
-// body). Pure snapshot; no reactivity intended. `show_bottom_bar` is OPTIONAL
-// on the type (a pre-#1766 server omits it on the way IN) but always populated
-// here — cic is the writer, and it knows the key.
+// Read the five owner modules into the wire shape (the seed-up + every PUT
+// body). Pure snapshot; no reactivity intended. `show_bottom_bar` (#1766) and
+// `strip_formatting` (#2029) are OPTIONAL on the type (an older server omits
+// them on the way IN) but always populated here — cic is the writer, and it
+// knows the keys.
 export function buildWireMap(): Required<DisplayPrefs> {
   return {
     time_format: getTimeFormat(),
     colored_nicklist: getColoredNicklist(),
     presence_filter: getAllPresencePrefs(),
     show_bottom_bar: getShowBottomBar(),
+    strip_formatting: getStripFormatting(),
   };
 }
 
-// Distribute a server-authoritative payload into the four owner modules'
+// Distribute a server-authoritative payload into the five owner modules'
 // LOCAL setters (write-through to signal + localStorage). No re-PUT — this is
 // the server-wins apply path only. The presence map is a full replace so unset
 // channels stay unset.
@@ -120,6 +128,13 @@ export function applyServerPrefs(prefs: DisplayPrefs): void {
   setColoredNicklist(prefs.colored_nicklist);
   replacePresencePrefs(prefs.presence_filter);
   setShowBottomBar(prefs.show_bottom_bar ?? DEFAULT_DISPLAY_PREFS.show_bottom_bar);
+  // #2029 — coalesced for the same reason, in the same direction: this bundle
+  // can ship AHEAD of the server (`--cic`), and a full-replace apply that
+  // passed the absent value through would write `undefined` into the owner
+  // module. `??` and not `||`: a server-sent `false` is a real preference —
+  // here it is even the DEFAULT one, so `||` would make the pref impossible to
+  // turn back off from a second device.
+  setStripFormatting(prefs.strip_formatting ?? DEFAULT_DISPLAY_PREFS.strip_formatting);
 }
 
 // Reactive server sync — re-runs on every `token()` change (registered inside a
@@ -216,6 +231,11 @@ export function syncedSetColoredNicklist(on: boolean): void {
 
 export function syncedSetShowBottomBar(on: boolean): void {
   setShowBottomBar(on);
+  pushDisplayPrefs();
+}
+
+export function syncedSetStripFormatting(on: boolean): void {
+  setStripFormatting(on);
   pushDisplayPrefs();
 }
 

@@ -10,6 +10,7 @@ import {
   syncedSetChannelPresencePref,
   syncedSetColoredNicklist,
   syncedSetShowBottomBar,
+  syncedSetStripFormatting,
   syncedSetTimeFormat,
 } from "../lib/displayPrefs";
 import {
@@ -19,6 +20,7 @@ import {
 } from "../lib/presenceFilter";
 import { loadInitialScrollback, purgeScrollback } from "../lib/scrollback";
 import { getShowBottomBar, setShowBottomBar } from "../lib/showBottomBar";
+import { getStripFormatting, setStripFormatting } from "../lib/stripFormatting";
 import { getTimeFormat, setTimeFormat } from "../lib/timeFormat";
 import type { DisplayPrefs } from "../lib/userSettings";
 
@@ -53,6 +55,7 @@ function resetLocal(): void {
   setColoredNicklist(false);
   replacePresencePrefs({});
   setShowBottomBar(true);
+  setStripFormatting(false);
   setToken(null);
 }
 
@@ -85,17 +88,19 @@ afterEach(() => {
 });
 
 describe("buildWireMap", () => {
-  it("reads the four module getters into the wire shape", () => {
+  it("reads the five module getters into the wire shape", () => {
     setTimeFormat("hm");
     setColoredNicklist(true);
     replacePresencePrefs({ [KEY_A]: "hide" });
     setShowBottomBar(false);
+    setStripFormatting(true);
 
     expect(buildWireMap()).toEqual({
       time_format: "hm",
       colored_nicklist: true,
       presence_filter: { [KEY_A]: "hide" },
       show_bottom_bar: false,
+      strip_formatting: true,
     });
   });
 
@@ -105,18 +110,57 @@ describe("buildWireMap", () => {
 });
 
 describe("applyServerPrefs", () => {
-  it("distributes server prefs into the four local setters", () => {
+  it("distributes server prefs into the five local setters", () => {
     applyServerPrefs({
       time_format: "hm",
       colored_nicklist: true,
       presence_filter: { [KEY_A]: "hide" },
       show_bottom_bar: false,
+      strip_formatting: true,
     });
 
     expect(getTimeFormat()).toBe("hm");
     expect(getColoredNicklist()).toBe(true);
     expect(getChannelPresencePref(KEY_A)).toBe("hide");
     expect(getShowBottomBar()).toBe(false);
+    expect(getStripFormatting()).toBe(true);
+  });
+
+  // #2029 — the same skew as #1766's, one key later, and the direction that
+  // bites is the SAME one: `--cic` can ship this bundle ahead of the server,
+  // so a server predating the fifth key answers four. A full-replace apply
+  // that passed the absent value through would write `undefined` into the
+  // owner module.
+  it("an absent strip_formatting (older server) takes the default, not undefined", () => {
+    setStripFormatting(true);
+
+    applyServerPrefs({
+      time_format: "hms",
+      colored_nicklist: false,
+      presence_filter: {},
+      show_bottom_bar: true,
+    });
+
+    expect(getStripFormatting()).toBe(false);
+  });
+
+  // `??` and not `||`, and here the trap is sharper than #1766's: `false` is
+  // this pref's DEFAULT, so under `||` a server-sent `false` would coalesce
+  // to the default too — which happens to be the same value, hiding the bug
+  // until the day the default flips. Asserted against a local `true` so the
+  // apply has something to overwrite.
+  it("a server-sent false OVERWRITES a local true (the coalesce is ??, not ||)", () => {
+    setStripFormatting(true);
+
+    applyServerPrefs({
+      time_format: "hms",
+      colored_nicklist: false,
+      presence_filter: {},
+      show_bottom_bar: true,
+      strip_formatting: false,
+    });
+
+    expect(getStripFormatting()).toBe(false);
   });
 
   // #1766 — the skew this bundle can be deployed INTO. `--cic` ships the
@@ -205,11 +249,13 @@ describe("mountDisplayPrefsSync — login reconcile", () => {
     // Local state the operator built on this device — must survive + push up.
     // #1766 — the fourth pref joins the seed-up with a NON-default value, so
     // "the key is in the body" cannot pass by accident: a coordinator that
-    // forgot to read the owner module would push `true` here.
+    // forgot to read the owner module would push `true` here. #2029's fifth
+    // key follows the same rule, inverted (its default is `false`).
     setTimeFormat("hm");
     setColoredNicklist(true);
     replacePresencePrefs({ [KEY_A]: "hide" });
     setShowBottomBar(false);
+    setStripFormatting(true);
 
     const serverDefaults: DisplayPrefs = {
       time_format: "hms",
@@ -245,6 +291,7 @@ describe("mountDisplayPrefsSync — login reconcile", () => {
         colored_nicklist: true,
         presence_filter: { [KEY_A]: "hide" },
         show_bottom_bar: false,
+        strip_formatting: true,
       },
     });
 
@@ -252,6 +299,7 @@ describe("mountDisplayPrefsSync — login reconcile", () => {
     expect(getTimeFormat()).toBe("hm");
     expect(getColoredNicklist()).toBe(true);
     expect(getShowBottomBar()).toBe(false);
+    expect(getStripFormatting()).toBe(true);
     dispose();
   });
 
@@ -319,6 +367,7 @@ describe("syncedSet* — optimistic local + full-map PUT", () => {
         colored_nicklist: true,
         presence_filter: { [KEY_A]: "hide" },
         show_bottom_bar: true,
+        strip_formatting: false,
       },
     });
   });
@@ -356,6 +405,44 @@ describe("syncedSet* — optimistic local + full-map PUT", () => {
     expect(init.method).toBe("PUT");
     expect(JSON.parse(init.body as string).display_prefs.show_bottom_bar).toBe(false);
   });
+
+  it("syncedSetStripFormatting sets local and PUTs the full wire map", async () => {
+    setToken(TOKEN);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ display_prefs: buildWireMap(), persisted: true }), {
+        status: 200,
+      }),
+    );
+
+    syncedSetStripFormatting(true);
+    await flush();
+
+    expect(getStripFormatting()).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/me/settings/display-prefs");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string).display_prefs.strip_formatting).toBe(true);
+  });
+
+  // The failure mode a fifth key invites, and the one no per-key test catches:
+  // forget `buildWireMap` and the pref still applies locally, still persists
+  // locally, and is silently reset to the server's default by the NEXT
+  // unrelated toggle — because the PUT is a full-map replace.
+  it("a sibling's PUT carries strip_formatting too (the full map, not a diff)", async () => {
+    setToken(TOKEN);
+    setStripFormatting(true);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ display_prefs: buildWireMap(), persisted: true }), {
+        status: 200,
+      }),
+    );
+
+    syncedSetColoredNicklist(true);
+    await flush();
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).display_prefs.strip_formatting).toBe(true);
+  });
 });
 
 // S1 (review) — clear-on-logout so a shared browser / visitor→user upgrade can
@@ -369,6 +456,7 @@ describe("mountDisplayPrefsSync — clear-on-logout (no cross-account bleed)", (
     colored_nicklist: false,
     presence_filter: {},
     show_bottom_bar: true,
+    strip_formatting: false,
   };
 
   // Phase-mutable fetch stub: the GET body changes across A-login / B-login.
@@ -383,10 +471,15 @@ describe("mountDisplayPrefsSync — clear-on-logout (no cross-account bleed)", (
   }
 
   it("resets local prefs to defaults on logout", async () => {
+    // #2029 — A's residual carries the strip pref ON, so the clear-on-logout
+    // and the never-seed-a-prior-subject guarantees are exercised for the
+    // fifth key too. A default-valued residual would be indistinguishable
+    // from a cleared one and would assert nothing.
     const aPrefs = {
       time_format: "hm",
       colored_nicklist: true,
       presence_filter: { [KEY_A]: "hide" },
+      strip_formatting: true,
     };
     getBody = { display_prefs: aPrefs, persisted: true };
     installPhaseFetch();
@@ -400,6 +493,7 @@ describe("mountDisplayPrefsSync — clear-on-logout (no cross-account bleed)", (
     setToken(TOKEN); // A logs in — server wins, A's prefs applied locally
     await flush();
     expect(getTimeFormat()).toBe("hm");
+    expect(getStripFormatting()).toBe(true);
 
     setToken(null); // A logs out
     await flush();
@@ -407,14 +501,20 @@ describe("mountDisplayPrefsSync — clear-on-logout (no cross-account bleed)", (
     expect(getTimeFormat()).toBe("hms");
     expect(getColoredNicklist()).toBe(false);
     expect(getAllPresencePrefs()).toEqual({});
+    expect(getStripFormatting()).toBe(false);
     dispose();
   });
 
   it("does NOT seed a prior subject's prefs into a never-persisted next login", async () => {
+    // #2029 — A's residual carries the strip pref ON, so the clear-on-logout
+    // and the never-seed-a-prior-subject guarantees are exercised for the
+    // fifth key too. A default-valued residual would be indistinguishable
+    // from a cleared one and would assert nothing.
     const aPrefs = {
       time_format: "hm",
       colored_nicklist: true,
       presence_filter: { [KEY_A]: "hide" },
+      strip_formatting: true,
     };
     getBody = { display_prefs: aPrefs, persisted: true };
     const fetchMock = installPhaseFetch();

@@ -345,6 +345,12 @@ export type DisplayPrefs = {
   // skew the server tolerates on the PUT. Absent ⇒ the default, exactly like
   // `persisted?` below. `buildWireMap()` always populates it.
   show_bottom_bar?: boolean;
+  // #2029 — OPTIONAL for exactly the reason above, and now the reason is a
+  // pattern rather than one key's quirk: every key added after the shape first
+  // shipped is absent-tolerant in BOTH directions, so a bundle and a server
+  // that disagree about the shape degrade instead of breaking. Absent ⇒ the
+  // default (strip OFF, colours render). `buildWireMap()` always populates it.
+  strip_formatting?: boolean;
 };
 
 export type DisplayPrefsResponse = {

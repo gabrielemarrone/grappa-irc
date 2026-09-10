@@ -51069,13 +51069,47 @@ any device had turned it on.
 
 `@protocol_version` goes 15 → 16 for the two new fields on the count
 response. `mix grappa.wire_pin --check` did not force it, for the THIRD
-release running: its digest does not span hand-written `*_json.ex` views, and
-v15 already recorded that as a property rather than an accident. The bump is
-a deliberate manual act and `protocol_test.exs` is the only automatic guard
-on the pair. `min_protocol_version` stays at 1: `countMessagesAfter` falls
-back to `{messages: count, events: 0}` when the pair is absent, which is
-exactly the pre-#2037 number in the pre-#2037 place, so a new bundle degrades
-against an old server instead of breaking.
+release running — and this time the gate printed the proof of its own
+blindness rather than leaving it to be argued. It failed on this branch, but
+on the VERSION field alone, and its own output is the measurement:
+
+```
+shape digest   pinned sha256:f3c18a4c…4bf3c0
+               now    sha256:f3c18a4c…4bf3c0
+protocol       pinned 15
+                now   16
+```
+
+The digest is byte-for-byte identical ACROSS a two-field addition to the
+wire. So the gate did not catch the shape change and then ask for a bump; it
+noticed that a human had already moved the number and asked to be re-pinned.
+
+Reversing the order is the discriminating control, and it was RUN rather than
+reasoned about: with both new fields still in `messages_json.ex`, put
+`@protocol_version` back to 15 and re-pin at 15, and the gate answers
+
+```
+priv/wire/shape.pin: wire shape and protocol 15 agree.     rc=0
+```
+
+That is green on exactly the violation the gate exists for — a wire-shape
+change carried in under a still number. (Measured on this branch, then
+reverted; `lib/grappa/protocol.ex` and the pin are byte-identical to their
+committed state afterwards.)
+
+Two more measurements pin down why, and both are one command:
+`grep count_split cicchetto/src/lib/wireTypes.ts cicchetto/src/lib/wireSchema.ts`
+finds nothing — the count response is absent from BOTH generated artefacts,
+so it was never inside the digest's span; and `mix grappa.gen_wire_types
+--check` answers `in sync.` on the same tree, which is the failure mode
+CLAUDE.md already names (it compares each artefact with its own SOURCE, so
+a route the generator does not cover is "in sync" by construction).
+
+The bump therefore remains a deliberate manual act, and `protocol_test.exs`
+is the only automatic guard on the pair. `min_protocol_version` stays at 1:
+`countMessagesAfter` falls back to `{messages: count, events: 0}` when the
+pair is absent, which is exactly the pre-#2037 number in the pre-#2037
+place, so a new bundle degrades against an old server instead of breaking.
 
 _Not asserted: that any of this explains the 1404-row residual. It does not
 and does not try. The four (bar posture, seed posture) assignments from

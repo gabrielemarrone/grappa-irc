@@ -50402,3 +50402,103 @@ issue specifies. Both are small, localised changes if the answers differ.
 _Not asserted: that the pref reaches every surface has been measured through
 the chokepoint (one parse caller, zero palette consumers elsewhere), not by
 exercising all twelve in a browser. The e2e covers one channel-pane line._
+<!-- entry #2035 -->
+
+---
+
+## 2026-09-10 — #2035: eight lines the box actually has, and an Enter that sets
+
+Two asks from dogfood, and they turned out to be different kinds of thing: one
+is a reversed decision, the other is an arithmetic bug that had been sitting in
+a comment-free stylesheet since #263.
+
+### Enter sets the topic — a reversal, on a ruling
+
+`TopicBar.tsx` used to carry this, in as many words: *"Enter in the textarea
+must stay a newline (save is the ✅ button only), the flatten collapses it on
+submit."* That is now false, and the reason it is false is that the product
+owner ruled the asserted behaviour wrong. Recording the reason matters more
+than recording the change: the decision was not flaky, not awkward to test, and
+not inconvenient — it was a product call, and it was reversed by the only
+person who can reverse one.
+
+It is worth adding that the premise it rested on was weak. An IRC topic is ONE
+wire line; the server rejects a body carrying `\r`/`\n` outright
+(`Identifier.safe_line_token?` → `:invalid_line`), and `flattenTopicNewlines`
+collapses every newline run to a single space BEFORE the send door. So the line
+break Enter bought was worth exactly one space and could never reach the wire
+as a break. The decision was defending a cosmetic that the next function call
+spent.
+
+**Shift+Enter was NOT ruled**, and the issue says so. It is answered here by
+#974 rather than by invention: vjt's 2026-08-07 ruling on `ComposeBox` — the
+sibling surface, same operator, same one-wire-line domain — reversed his own
+day-old split with the measurement that *a Shift+Enter that refuses also EATS
+the keystroke*, and that on his device the modifier arms itself on presses he
+never meant as Shift+Enter, so the send silently does not happen. Growing a
+second semantics for the same chord on a second surface is exactly the
+"whatever pattern is closest gets propagated" failure CLAUDE.md warns about, so
+the topic editor answers the chord the way the composer does: every Enter
+sends, modifier or not.
+
+Two guardrails, both held. The new element-level `keydown` handles `Enter` and
+returns on everything else — it is **not** a second ESC authority, which #232
+made the shared overlay stack's alone, and whose edit-aware branch already has
+real-browser coverage in `issue263-topic-modal-edit.spec.ts`. And **the flatten
+stays**: Enter no longer types a newline, but a PASTE still carries them in,
+which is now the route it exists for.
+
+### Three lines were not a preference — they were `box-sizing`
+
+The issue asked for eight lines and derived `min-height: 10em` from
+`4.5em / 1.25 = 3.6 lines`. Both halves of that arithmetic are wrong in the
+same way, and the wrongness is measurable rather than arguable.
+
+`* { box-sizing: border-box }` is global in `default.css`, and `html` sets
+`font-size: var(--font-size)`, so at the 14px root a `min-height` is a BORDER
+box: it swallows the editor's `0.3rem` vertical padding on each side and its
+1px borders before the text sees a pixel. The old `4.5em` = 63px therefore left
+`63 − 8.4 − 2 = 52.6px` of content over a `1.25 × 14 = 17.5px` line box —
+**3.0 lines, not 3.6**. Which is precisely the *"mo è solo tre righe"* that was
+reported: the operator counted correctly and the stylesheet's arithmetic did
+not. Carried forward unchanged, the `10em` quoted for "8 lines" would have
+rendered **7.4**.
+
+The cure is not a bigger number. `rows={8}` on the element is the platform's
+own line count: it tracks `font-size` and `line-height` by itself, cannot
+disagree with them, and leaves no coupled arithmetic for the next reader to get
+wrong — the `min-height` is deleted rather than corrected. `resize: vertical`
+stays, so an operator who wants more drags; the only floor a drag now meets is
+the global form-control `min-height: var(--tap-min)`, which is the tap-target
+one and correct.
+
+### Where each half is proven, and one test that lied
+
+The split is forced by the tooling. jsdom has no layout engine, so vitest pins
+the `rows` ATTRIBUTE, the `preventDefault`, the Shift+Enter pairing and the
+Esc-guardrail; `e2e/tests/issue2035-topic-editor-height.spec.ts` measures the
+rendered box (content height ÷ computed line-height, drift-proof against both
+properties moving) and witnesses the real `TOPIC #chan :<flattened>` from an
+in-channel peer after a keyboard `Enter`.
+
+🔴 **A Solid element handler cannot be probed with a non-bubbling event.** The
+first version of the Esc guardrail dispatched `keydown` with `bubbles: false`,
+reasoning that this isolated the element handler from the shared stack. It
+passed — and it also passed with an `Escape` branch deliberately smuggled into
+the handler, which is how it was caught: Solid DELEGATES `onKeyDown` to the
+document root, so a non-bubbling dispatch reaches no handler at all and the
+test asserted nothing. The isolation that does work is structural: `keybindings`
+(the one global keydown listener) is never installed in that test file, so a
+normally-bubbling Escape can only reach the element handler. The mutant dies
+now. The general rule is worth more than the fix — **a "the handler ignores X"
+test must be shown to fail when the handler stops ignoring X**, because the
+event never arriving looks exactly like the event being ignored.
+
+_Not asserted. The phone measurement is against the LAYOUT viewport (iPhone 15
+and Pixel 7 descriptors): Playwright raises no soft keyboard, and focusing the
+editor on a real phone roughly halves the visual viewport, so "the modal fits
+above the fold" is strictly weaker than "the ✅ is reachable while typing".
+Neither is the IME case covered: like `ComposeBox` before it, this handler has
+no `isComposing` guard, so an Enter that confirms a candidate mid-composition
+submits. That is a shared gap of the two surfaces and wants one issue over both,
+not a divergence introduced on one of them here._

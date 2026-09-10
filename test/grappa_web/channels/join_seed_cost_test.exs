@@ -21,7 +21,9 @@ defmodule GrappaWeb.JoinSeedCostTest do
   #1759 resolves it once (`channel_context/1`) and threads it, taking a join
   from 11 to 7. The tally below pins WHICH reads moved, so the win cannot be
   confused with a change to the arithmetic itself — and the law is unchanged:
-  `11·W + 1` became `7·W + 1`, and W full snapshots are still W.
+  `11·W` became `7·W`, and W full snapshots are still W. (Both were first
+  measured as `·W + 1`; the trailing 1 was never the door, it was the
+  fixture's own registration write, and issue 2060 stopped counting it.)
 
   ## Why the storm is the unit, not one join
 
@@ -36,7 +38,7 @@ defmodule GrappaWeb.JoinSeedCostTest do
   (displacement), rather than timing anything: a timing would measure this
   host's disk, while a count measures the fan-out that is the defect.
 
-  ## The counter does NOT filter on `self()`
+  ## The counter attributes by CAUSE, and neither by `self()` nor by nothing
 
   `GrappaWeb.BootCostTest` filters its telemetry handler to the test pid,
   which is exact there because a controller runs inside the request that
@@ -45,8 +47,32 @@ defmodule GrappaWeb.JoinSeedCostTest do
   CHANNEL process, so every query this file is about is emitted off the
   test pid. A filtered count would read `0` and be indistinguishable from
   "this door is already free", which is the exact false green the file
-  exists to prevent. `async: false` is what buys the unfiltered count back:
-  no sibling test is running to contaminate the mailbox.
+  exists to prevent.
+
+  This file's first answer was to count EVERY query any process emitted
+  during the window, on the argument that `async: false` means no sibling
+  test is running to contaminate the mailbox. That argument is true and
+  insufficient, and it cost eleven reds between 2026-08-30 and 2026-09-10
+  (issue 2060). Sibling tests are not the only emitters: the application
+  supervisor runs three ambient sweepers plus a session per bound network
+  in EVERY env, and `ChannelCase` puts the sandbox in SHARED mode for
+  `async: false`, which is precisely what lets an ambient process's query
+  run on this test's connection. Measured, and it reproduces the CI red
+  source-for-source: two `Grappa.Visitors.list_expired/0` reads emitted
+  from an unrelated process land in the window and the `/me` arm reads
+  `["read_cursors", nil, "visitors", "visitors"]` where it declared 2.
+  #893 hit the same class from the writing side and pushed the sweeper
+  cadence past the suite runtime (`config/test.exs`); that keeps the ticks
+  away but leaves every other ambient emitter, so it is a mitigation of
+  one instance and not of the class.
+
+  The third option is the one in force: attribute each event to the
+  process chain that CAUSED it (`forward_query/4` → `caused_by?/1`).
+  `$callers` is set on the channel process and absent on the ambient ones,
+  so the door is counted in full and nothing else is, without the counter
+  naming — or needing to know — a single interloper. Both directions are
+  guarded by a control test: the first arm below fails if attribution ever
+  reads zero, the second if it ever reads someone else's work.
 
   ## The storm arm measures a FLOOR, and says so
 
@@ -74,6 +100,30 @@ defmodule GrappaWeb.JoinSeedCostTest do
 
   @query_event [:grappa, :repo, :query]
 
+  # WHAT ONE JOIN COSTS, declared rather than sampled (issue 2060).
+  #
+  # Every storm arm below is pinned against `times(tally, w)` and against no
+  # other measurement. That is the whole difference: a relation between two
+  # samples goes red when EITHER moves and cannot say which, so a red used to
+  # mean "one of these two numbers is not what it was" — the one thing a cost
+  # oracle must never say. Against a constant, a red means the door changed,
+  # names the read that changed, and is fixed by editing exactly one map here
+  # with a measurement in the commit message.
+  @live_join_tally %{
+    "users" => 1,
+    "networks" => 1,
+    "read_cursors" => 1,
+    "user_settings" => 2,
+    "messages" => 2
+  }
+
+  # The cheap fixture's floor: same door, one `messages` read short, because
+  # with no live session there is no own nick and `count_mentions/6`'s `nil`
+  # clause answers 0 without touching the database. Derived from the live
+  # tally rather than restated, so the two cannot drift apart on the axis
+  # that is supposed to be their ONLY difference.
+  @nil_nick_join_tally %{@live_join_tally | "messages" => 1}
+
   describe "the per-channel join door" do
     test "the counter sees the join at all — the instrument's own control" do
       %{user_name: user_name, slug: slug, channels: [chan | _]} = account(1)
@@ -86,35 +136,72 @@ defmodule GrappaWeb.JoinSeedCostTest do
       # the instrument is proven to see the door before any number it
       # produces is believed.
       assert "read_cursors" in sources and "messages" in sources, """
-      the join did not reach `join_reply/2` — the counter is filtered, or the
-      topic was rejected before the seed. A zero is an instrument fault, not
-      a free door. See the moduledoc on the `self()` filter.
+      the join did not reach `join_reply/2` — the counter attributes to the
+      wrong process, or the topic was rejected before the seed. A zero is an
+      instrument fault, not a free door. See the moduledoc on attribution.
         sources: #{inspect(sources)}
       """
     end
 
-    test "the storm cost MOVES with the number of windows — displacement, not correlation" do
-      one = storm_cost(1)
-      eight = storm_cost(8)
+    test "an ambient process's query does NOT enter the window — the instrument's other control" do
+      # The NEGATIVE control, and the sibling of the one above: that one
+      # proves the counter is not blind, this one proves it is not credulous.
+      # Both are needed, because the two cures point in opposite directions —
+      # attribute too narrowly and every arm reads zero, attribute not at all
+      # and every arm reads whatever the VM happened to be doing.
+      #
+      # The interloper is a plain `spawn`: no `$callers`, no `$ancestors`, on
+      # the shared sandbox connection `ChannelCase` opens for `async: false`.
+      # That is the ambient sweepers' exact shape — `Grappa.Visitors.Reaper`
+      # and its two siblings are supervised GenServers whose ancestry is the
+      # application supervisor, and #893 already had to push their cadence
+      # past the suite runtime for the same reason (`config/test.exs`).
+      # It runs the sweeper's OWN verb, so the source string is the real one.
+      %{subject: subject} = account(1)
 
-      # The claim under test is that the join door is the unbounded one. If
-      # it were bounded like `/me`, these two would be equal.
-      assert eight.total > one.total, """
-      the join door did NOT scale with the window count, which contradicts
-      reading `join_reply/2` as an uncoalesced per-window snapshot.
-        W=1: #{one.total} #{inspect(one.sources)}
-        W=8: #{eight.total} #{inspect(eight.sources)}
+      {_, sources} =
+        measure(fn ->
+          parent = self()
+
+          spawn(fn ->
+            Grappa.Visitors.list_expired()
+            Grappa.Visitors.list_expired()
+            send(parent, :ambient_done)
+          end)
+
+          assert_receive :ambient_done, 2_000
+
+          Grappa.WindowCounts.bulk_snapshot(subject, %{}, [], %{})
+        end)
+
+      # The measured shape of the red this file went to eleven times: the two
+      # `visitors` reads land beside `bulk_snapshot`'s own two and the arm
+      # below reads four. Nothing about the door changed; the window was
+      # simply open to the whole VM.
+      assert sources == ["read_cursors", nil], """
+      an ambient process's queries were counted as the subject's.
+        sources: #{inspect(sources)}
       """
+    end
 
-      per_join = div(eight.total - one.total, 7)
+    test "the storm costs the FLOOR tally once per window, at W=1 and at W=8" do
+      # Both W are pinned against the same declared constant, and neither is
+      # pinned against the other. If it were bounded like `/me`, W=8 would
+      # read the W=1 tally and this arm would name the two reads that stopped
+      # scaling; if a read were added to the door, both W go red together and
+      # the constant is what needs editing.
+      for w <- [1, 8] do
+        # Bound once: re-measuring inside the message would report a DIFFERENT
+        # run than the one that failed.
+        measured = storm_tally(w)
+        declared = times(@nil_nick_join_tally, w)
 
-      assert eight.total == one.total * 8, """
-      DISPLACEMENT — the storm is linear in W at #{per_join} queries a join.
-        W=1: #{one.total}
-        W=8: #{eight.total}  (expected #{one.total * 8})
-        per-join delta: #{per_join}
-      Sources at W=1: #{inspect(one.sources)}
-      """
+        assert measured == declared, """
+        the cheap storm at W=#{w} is not #{w} × the declared floor tally.
+          measured: #{inspect(measured)}
+          declared: #{inspect(declared)}
+        """
+      end
     end
 
     test "a live session pays MORE — the cheap fixture's nil own_nick hides one read" do
@@ -132,12 +219,12 @@ defmodule GrappaWeb.JoinSeedCostTest do
         sources: #{inspect(sources)}
       """
 
-      # Pinned as a TALLY, not an ordered list: the counter is unfiltered and
-      # the session process emits into the same window, so arrival ORDER is a
-      # race (measured — `network_credentials` moved from position 9 to
-      # position 2 between two runs of this same test). The multiset is
-      # deterministic; the sequence is not, and pinning the sequence would
-      # have shipped a flake.
+      # Pinned as a TALLY, not an ordered list: the session process emits into
+      # the same window, so arrival ORDER is a race (measured —
+      # `network_credentials` moved from position 9 to position 2 between two
+      # runs of this same test, back when the counter still admitted it). The
+      # multiset is deterministic; the sequence is not, and pinning the
+      # sequence would have shipped a flake.
       #
       #   users/networks ×1  — the (subject, network) pair, resolved ONCE by
       #                        `channel_context/1` and threaded. Measured at
@@ -149,46 +236,31 @@ defmodule GrappaWeb.JoinSeedCostTest do
       #                        prefs. The lever #1768 named and left alone,
       #                        deliberately still here.
       #   messages ×2        — the split aggregate and the mention tail
-      #   network_credentials— the fixture's own `mark_registered/1` on 001,
-      #                        NOT part of the door: it does not scale with W
-      #                        and drops out of `per_join_tally/3`.
-      assert Enum.frequencies(sources) == %{
-               "users" => 1,
-               "networks" => 1,
-               "read_cursors" => 1,
-               "user_settings" => 2,
-               "messages" => 2,
-               "network_credentials" => 1
-             }
-
-      assert length(sources) == 8
+      #
+      # `network_credentials` is NOT in the tally and its absence is load
+      # bearing: the fixture's own `mark_registered/1` on 001 fires from the
+      # `Session.Server`, which this test did not call into, so attribution
+      # drops it. It used to be pinned here and cancelled again in the
+      # per-join delta; both are gone with the cause.
+      # A frequencies equality is total — it says what is there AND that
+      # nothing else is — so there is no separate length to assert.
+      assert Enum.frequencies(sources) == @live_join_tally
     end
 
-    test "the LIVE storm is linear in W — measured at three W, never extrapolated" do
+    test "the LIVE storm costs the door tally once per window — at three W" do
       # Displacement on the fixture that pays the real per-join cost. Three
       # points, because two can be joined by any line and the claim is
-      # linearity through the origin — that the door fires once per window
-      # with no amortization between firings.
-      {one, _} = w1 = live_storm(1)
-      {four, _} = w4 = live_storm(4)
-      {eight, _} = w8 = live_storm(8)
-
-      # Three points, because two can be joined by any line. The claim is a
-      # CONSTANT marginal cost — the door fires once per window with nothing
-      # amortized between firings — so the two independent deltas must agree.
-      low = per_join_tally(w4, w1, 3)
-      high = per_join_tally(w8, w4, 4)
-
-      assert low == high, """
-      the marginal cost of a join is not constant across W.
-        W=1→4: #{inspect(low)}
-        W=4→8: #{inspect(high)}
-        totals: #{one}, #{four}, #{eight}
-      """
-
+      # linearity THROUGH THE ORIGIN — the door fires once per window with
+      # nothing amortized between firings. Asserting each W against the
+      # declared constant states exactly that, and states it per point: a red
+      # names WHICH W diverged and by which read, where a ratio between two
+      # measurements could only say that they disagreed.
+      #
       # WHICH reads scale, named — not a bare total.
       #
-      # THE DISPLACEMENT. Measured on this same harness at the same three W:
+      # THE DISPLACEMENT, measured on this same harness at these same three W
+      # (with the counter as it then was, which also swept up the fixture's
+      # own registration write — hence the trailing +1 in the totals):
       #
       #   before: users 3, networks 3, read_cursors 1, user_settings 2,
       #           messages 2  =  11 a join   (totals 12, 45, 89)
@@ -199,15 +271,16 @@ defmodule GrappaWeb.JoinSeedCostTest do
       # the two redundant resolutions removed. The arithmetic did not move,
       # which is the control: had the total dropped while `messages` changed
       # too, something other than the cause under test would have acted.
-      assert high == %{
-               "users" => 1,
-               "networks" => 1,
-               "read_cursors" => 1,
-               "user_settings" => 2,
-               "messages" => 2
-             }
+      for w <- [1, 4, 8] do
+        measured = live_storm_tally(w)
+        declared = times(@live_join_tally, w)
 
-      assert Enum.sum(Map.values(high)) == 7
+        assert measured == declared, """
+        the live storm at W=#{w} is not #{w} × the declared door tally.
+          measured: #{inspect(measured)}
+          declared: #{inspect(declared)}
+        """
+      end
     end
 
     test "routing the join door through bulk_snapshot/4 does NOT fit — the 20% named" do
@@ -257,10 +330,14 @@ defmodule GrappaWeb.JoinSeedCostTest do
   # Harness
   # ---------------------------------------------------------------------------
 
+  # The declared per-join tally scaled to a W-window storm. The unit of the
+  # pin, so a red reads as "this many of this read, expected that many".
+  defp times(tally, w), do: Map.new(tally, fn {source, n} -> {source, n * w} end)
+
   # Joins every one of the account's channel topics, the way a phoenix.js
-  # auto-rejoin does after a socket drop, and returns the total query count
-  # plus the sources of the FIRST join (so a regression names the read).
-  defp storm_cost(w) do
+  # auto-rejoin does after a socket drop, and returns the tally of the reads
+  # it cost — so a regression names the read, not just a total.
+  defp storm_tally(w) do
     %{user_name: user_name, slug: slug, channels: channels} = account(w)
 
     {_, sources} =
@@ -268,7 +345,7 @@ defmodule GrappaWeb.JoinSeedCostTest do
         for chan <- channels, do: join_topic(user_name, slug, chan)
       end)
 
-    %{total: length(sources), sources: Enum.take(sources, 12)}
+    Enum.frequencies(sources)
   end
 
   defp join_topic(user_name, slug, chan) do
@@ -361,22 +438,25 @@ defmodule GrappaWeb.JoinSeedCostTest do
   end
 
   # The live storm: one session, W channel topics re-joined the way a
-  # phoenix.js auto-rejoin does. Returns `{total, tally}`.
+  # phoenix.js auto-rejoin does. Returns the tally of the reads it cost.
   #
-  # ## Why the caller must compare two W and never read one
+  # ## Why a single W can be read on its own now
   #
-  # The counter is unfiltered (see the moduledoc), so it also catches the
-  # SESSION process's own reads — `Networks.mark_registered/1` fires on the
-  # 001 this fixture feeds, and whether that write lands inside or outside
-  # the measured window is a race. Measured: it shifted `network_credentials`
-  # from position 9 to position 2 between two runs of the same test, and it
-  # is why the total is `11·W + 1` rather than `12·W`.
+  # It could not be, before issue 2060. The `Session.Server` fires
+  # `Networks.mark_registered/1` on the 001 this fixture feeds, and whether
+  # that write landed inside or outside the window was a race — measured, it
+  # shifted `network_credentials` from position 9 to position 2 between two
+  # runs of the same test, and it is why the live total then read `7·W + 1`
+  # rather than `7·W`. The file's answer was to compare two W so the
+  # fixture-constant would cancel, which worked and cost the oracle its
+  # meaning: a delta between two samples is red whenever EITHER moves.
   #
-  # A DELTA between two W cancels any such fixture-constant noise exactly,
-  # and a tally is immune to the arrival ORDER that the cross-process race
-  # scrambles. So both robustness problems are solved by the same move, and
-  # neither is papered over with a retry or a sleep.
-  defp live_storm(w) do
+  # `measure/1` now drops that write on CAUSE — the session process is not in
+  # this test's `$callers` chain — so the noise is gone rather than
+  # cancelled, and each W can be pinned against the declared constant on its
+  # own. The tally is still a multiset because arrival ORDER remains a race;
+  # that part was always right.
+  defp live_storm_tally(w) do
     {irc, port} = IRCServer.start_server(IRCServer.passthrough_handler())
     %{user: user, network: network, channels: channels} = account_with_session(port, w)
     welcome(irc)
@@ -386,18 +466,7 @@ defmodule GrappaWeb.JoinSeedCostTest do
         for chan <- channels, do: join_topic(user.name, network.slug, chan)
       end)
 
-    {length(sources), Enum.frequencies(sources)}
-  end
-
-  # The per-join cost, isolated: what `hi - lo` joins added, divided by how
-  # many they were. Any read that does NOT scale with W cancels out and is
-  # absent from the result — which is the point, and how the fixture's own
-  # registration write disappears without being special-cased.
-  defp per_join_tally({_, hi_tally}, {_, lo_tally}, joins) do
-    hi_tally
-    |> Map.merge(lo_tally, fn _, hi, lo -> hi - lo end)
-    |> Enum.reject(fn {_, n} -> n == 0 end)
-    |> Map.new(fn {source, n} -> {source, div(n, joins)} end)
+    Enum.frequencies(sources)
   end
 
   defp row(user, network, chan, st, body) do
@@ -412,8 +481,8 @@ defmodule GrappaWeb.JoinSeedCostTest do
     })
   end
 
-  # Counts `[:grappa, :repo, :query]` emitted by ANY process while `fun`
-  # runs. Unfiltered on purpose — see the moduledoc.
+  # Counts the `[:grappa, :repo, :query]` events this test CAUSED while
+  # `fun` runs — see the moduledoc on attribution.
   defp measure(fun) do
     test_pid = self()
     ref = make_ref()
@@ -429,12 +498,30 @@ defmodule GrappaWeb.JoinSeedCostTest do
     end
   end
 
+  # A telemetry handler runs INSIDE the emitting process, so `self()` and the
+  # process dictionary here are the emitter's — which is what makes the
+  # attribution decision possible at all, and why it is taken here rather
+  # than in `drain/2`, where the evidence no longer exists.
   @doc false
   @spec forward_query([atom()], map(), map(), {pid(), reference()}) :: :ok
   def forward_query(_, _, metadata, {test_pid, ref}) do
-    send(test_pid, {ref, Map.get(metadata, :source)})
+    if caused_by?(test_pid), do: send(test_pid, {ref, Map.get(metadata, :source)})
     :ok
   end
+
+  # Did THIS test cause the query the handler is looking at?
+  #
+  # `$callers` is the standard Elixir provenance chain — the same one Ecto's
+  # own Sandbox reads for automatic allowance — and it is set on the process
+  # `Phoenix.ChannelTest.subscribe_and_join/3` spawns. Measured on this
+  # harness: every query of a live join carries `$callers: [test_pid]` from
+  # the CHANNEL process, and the `Session.Server`'s own
+  # `Networks.mark_registered/1` write carries `$callers: nil` with the
+  # application supervisor as its ancestry. The two are then separable by
+  # cause rather than by name, which is the whole point: nothing here knows
+  # or cares WHICH ambient process it is declining to count.
+  @spec caused_by?(pid()) :: boolean()
+  defp caused_by?(test_pid), do: self() == test_pid or test_pid in Process.get(:"$callers", [])
 
   defp drain(ref, acc) do
     receive do

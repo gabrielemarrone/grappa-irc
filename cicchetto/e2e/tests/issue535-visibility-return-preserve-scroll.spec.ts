@@ -78,6 +78,26 @@ async function distanceFromBottom(page: Page): Promise<number> {
   return g.scrollHeight - g.scrollTop - g.clientHeight;
 }
 
+// `page.mouse.wheel` DISPATCHES the gesture and returns; it does not wait for
+// the resulting scroll to finish. A `before` snapshot taken while the glide is
+// still running makes any later comparison measure the tail of OUR OWN gesture
+// rather than the product's behaviour — measured: it read a 400px "jump" on a
+// -400 wheel. Wait for scrollTop to stop moving before pinning a baseline.
+async function waitForScrollSettled(page: Page): Promise<void> {
+  let last = Number.NaN;
+  await expect
+    .poll(
+      async () => {
+        const { scrollTop } = await scrollbackGeometry(page);
+        const stable = scrollTop === last;
+        last = scrollTop;
+        return stable;
+      },
+      { timeout: 5_000, intervals: [100] },
+    )
+    .toBe(true);
+}
+
 // A REAL Chromium wheel gesture over the scrollback — the ONLY way to flip
 // `atBottom` false: onScroll gates the false-flip on `st < lastScrollTop`
 // (a genuine upward scroll), and the settle/loadMore paths gate on a real
@@ -231,6 +251,7 @@ test.describe("#535 — visibility-return preserves the mid-backlog reader's pos
     expect(g.scrollHeight).toBeGreaterThan(g.clientHeight);
     await wheelBy(page, -400);
     await expect.poll(async () => await distanceFromBottom(page)).toBeGreaterThan(200);
+    await waitForScrollSettled(page);
     const before = await scrollbackGeometry(page);
 
     // Leave the app and come back.

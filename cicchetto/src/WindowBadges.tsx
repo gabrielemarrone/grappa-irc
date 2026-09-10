@@ -1,6 +1,7 @@
 import { type Component, Show } from "solid-js";
 import type { ChannelKey } from "./lib/channelKey";
 import { isConversationMuted } from "./lib/conversationMute";
+import { getShowEventBadge } from "./lib/eventBadge";
 import { mentionCounts } from "./lib/mentions";
 import { notificationPrefs } from "./lib/notificationPrefs";
 import { farBehindByChannel } from "./lib/scrollback";
@@ -76,7 +77,14 @@ const WindowBadges: Component<Props> = (props) => {
   // clear the record and the modifier must clear with it (#888 acceptance).
   const farBehind = () => farBehindByChannel()[props.channelKey] !== undefined;
   const messages = () => messagesUnread()[props.channelKey] ?? 0;
-  const events = () => eventsUnread()[props.channelKey] ?? 0;
+  // #2037 B — `!messaggi` render only when opted in. Gated on the SIGNAL, not
+  // a snapshot, so flipping the checkbox clears the pills without a reload.
+  //
+  // Zeroed rather than hidden at the `<Show>`: the count feeds `title` and
+  // `aria-label` too, and a hidden element whose accessible name still claims
+  // "216 unread events" is the wrong half of the change. Zero fails the
+  // `> 0` guard once, for every consumer in this component.
+  const events = () => (getShowEventBadge() ? (eventsUnread()[props.channelKey] ?? 0) : 0);
   const mentions = () => mentionCounts()[props.channelKey] ?? 0;
   // #1077 — the SAME predicate the cycle-skip consults (`activeWindows`
   // .orderUnreadWindows, #1018), so the badge cannot drift from the mute it

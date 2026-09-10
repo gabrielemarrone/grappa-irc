@@ -13,6 +13,7 @@ import {
   syncedSetStripFormatting,
   syncedSetTimeFormat,
 } from "../lib/displayPrefs";
+import { getShowEventBadge, setShowEventBadge } from "../lib/eventBadge";
 import {
   getAllPresencePrefs,
   getChannelPresencePref,
@@ -56,6 +57,7 @@ function resetLocal(): void {
   replacePresencePrefs({});
   setShowBottomBar(true);
   setStripFormatting(false);
+  setShowEventBadge(false);
   setToken(null);
 }
 
@@ -88,12 +90,13 @@ afterEach(() => {
 });
 
 describe("buildWireMap", () => {
-  it("reads the five module getters into the wire shape", () => {
+  it("reads the six module getters into the wire shape", () => {
     setTimeFormat("hm");
     setColoredNicklist(true);
     replacePresencePrefs({ [KEY_A]: "hide" });
     setShowBottomBar(false);
     setStripFormatting(true);
+    setShowEventBadge(true);
 
     expect(buildWireMap()).toEqual({
       time_format: "hm",
@@ -101,7 +104,17 @@ describe("buildWireMap", () => {
       presence_filter: { [KEY_A]: "hide" },
       show_bottom_bar: false,
       strip_formatting: true,
+      show_event_badge: true,
     });
+  });
+
+  // #2037 B — the sixth key is the first whose default REMOVES something an
+  // operator already sees, so the default earns its own pin: a bundle that
+  // shipped it opt-OUT by accident would silently keep the third number on
+  // screen and nothing else here would notice.
+  it("defaults show_event_badge to false — the events pill is opt-in", () => {
+    expect(getShowEventBadge()).toBe(false);
+    expect(buildWireMap().show_event_badge).toBe(false);
   });
 
   it("emits an empty presence_filter when no channel is pinned", () => {
@@ -292,6 +305,7 @@ describe("mountDisplayPrefsSync — login reconcile", () => {
         presence_filter: { [KEY_A]: "hide" },
         show_bottom_bar: false,
         strip_formatting: true,
+        show_event_badge: false,
       },
     });
 
@@ -368,6 +382,7 @@ describe("syncedSet* — optimistic local + full-map PUT", () => {
         presence_filter: { [KEY_A]: "hide" },
         show_bottom_bar: true,
         strip_formatting: false,
+        show_event_badge: false,
       },
     });
   });
@@ -457,6 +472,7 @@ describe("mountDisplayPrefsSync — clear-on-logout (no cross-account bleed)", (
     presence_filter: {},
     show_bottom_bar: true,
     strip_formatting: false,
+    show_event_badge: false,
   };
 
   // Phase-mutable fetch stub: the GET body changes across A-login / B-login.

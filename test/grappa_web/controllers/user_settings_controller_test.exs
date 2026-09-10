@@ -680,7 +680,8 @@ defmodule GrappaWeb.UserSettingsControllerTest do
       "colored_nicklist" => false,
       "presence_filter" => %{},
       "show_bottom_bar" => true,
-      "strip_formatting" => false
+      "strip_formatting" => false,
+      "show_event_badge" => false
     }
   end
 
@@ -736,7 +737,8 @@ defmodule GrappaWeb.UserSettingsControllerTest do
                "colored_nicklist" => true,
                "presence_filter" => %{"libera #bofh" => "hide"},
                "show_bottom_bar" => true,
-               "strip_formatting" => false
+               "strip_formatting" => false,
+      "show_event_badge" => false
              }
     end
 

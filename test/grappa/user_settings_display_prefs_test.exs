@@ -42,7 +42,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
         "colored_nicklist" => false,
         "presence_filter" => %{},
         "show_bottom_bar" => true,
-        "strip_formatting" => false
+        "strip_formatting" => false,
+        "show_event_badge" => false
       },
       overrides
     )
@@ -61,7 +62,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                colored_nicklist: false,
                presence_filter: %{},
                show_bottom_bar: true,
-               strip_formatting: false
+               strip_formatting: false,
+               show_event_badge: false
              }
     end
 
@@ -75,7 +77,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                colored_nicklist: false,
                presence_filter: %{},
                show_bottom_bar: true,
-               strip_formatting: false
+               strip_formatting: false,
+               show_event_badge: false
              }
     end
 
@@ -95,7 +98,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                colored_nicklist: false,
                presence_filter: %{},
                show_bottom_bar: true,
-               strip_formatting: false
+               strip_formatting: false,
+               show_event_badge: false
              }
     end
 
@@ -112,7 +116,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                colored_nicklist: false,
                presence_filter: %{},
                show_bottom_bar: true,
-               strip_formatting: false
+               strip_formatting: false,
+               show_event_badge: false
              }
     end
   end
@@ -188,7 +193,8 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                colored_nicklist: true,
                presence_filter: %{"libera #bofh" => "hide", "libera #cat" => "show"},
                show_bottom_bar: true,
-               strip_formatting: false
+               strip_formatting: false,
+               show_event_badge: false
              }
     end
 
@@ -558,6 +564,74 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
                UserSettings.put_display_prefs(subject, valid_wire(%{"presence_filter" => %{"n #v" => "hide"}}))
 
       assert UserSettings.get_display_prefs(subject).presence_filter == %{"n #v" => "hide"}
+    end
+  end
+  # ---------------------------------------------------------------------------
+  # show_event_badge (#2037 B) — the SIXTH key, and the first whose default
+  # TAKES something away
+  # ---------------------------------------------------------------------------
+  #
+  # vjt's ruling on #2037: "dobbiamo avere due bucket: messaggi e !messaggi. i
+  # !messaggi non sono interessanti e devono solo finire nell'opt-in badge."
+  # So the faint events pill stops rendering unless the operator asks for it,
+  # and OFF is therefore the default — unlike the other five, this default
+  # changes what an existing operator sees on their next load.
+  #
+  # Server-backed on #1766's criterion, same as the fifth: "is my sidebar
+  # cluttered with join/part counts" is a property of the ACCOUNT, identical on
+  # the phone and the desktop, not of a viewport.
+  #
+  # ⚠️ The behaviour change this carries is NOT limited to join/part. The
+  # events bucket is `kind not in @content_kinds`, which includes `topic`,
+  # `kick` and `server_event` — the three that sit OUTSIDE
+  # `suppressed_presence_kinds/0` on purpose (#458) because the pane still
+  # renders them. Under this pref a KICK stops contributing to a badge by
+  # default. That is deliberate and called out rather than discovered: a kick
+  # that needs to stay loud belongs in the mention/severity channel (#267),
+  # not smuggled back into the message bucket.
+
+  describe "show_event_badge (#2037 B)" do
+    test "defaults to FALSE — the events pill is opt-in, not opt-out" do
+      assert UserSettings.default_display_prefs().show_event_badge == false
+
+      assert UserSettings.get_display_prefs({:user, Ecto.UUID.generate()}).show_event_badge ==
+               false
+    end
+
+    test "round-trips true" do
+      user = user_fixture()
+
+      assert {:ok, _} =
+               UserSettings.put_display_prefs(
+                 {:user, user.id},
+                 valid_wire(%{"show_event_badge" => true})
+               )
+
+      assert UserSettings.get_display_prefs({:user, user.id}).show_event_badge == true
+    end
+
+    test "a PUT from a client predating the key is ACCEPTED, and reads as the default" do
+      user = user_fixture()
+      older_body = Map.delete(valid_wire(), "show_event_badge")
+
+      assert {:ok, _} = UserSettings.put_display_prefs({:user, user.id}, older_body)
+      assert UserSettings.get_display_prefs({:user, user.id}).show_event_badge == false
+    end
+
+    test "a five-key PUT still persists the keys it DID send" do
+      user = user_fixture()
+
+      older_body =
+        Map.delete(
+          valid_wire(%{"time_format" => "hm", "colored_nicklist" => true}),
+          "show_event_badge"
+        )
+
+      assert {:ok, _} = UserSettings.put_display_prefs({:user, user.id}, older_body)
+
+      prefs = UserSettings.get_display_prefs({:user, user.id})
+      assert prefs.time_format == "hm"
+      assert prefs.colored_nicklist == true
     end
   end
 end

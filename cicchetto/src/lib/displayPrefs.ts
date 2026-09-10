@@ -2,6 +2,7 @@ import { createEffect } from "solid-js";
 import { token } from "./auth";
 import { type ChannelKey, decodeChannelKey } from "./channelKey";
 import { getColoredNicklist, setColoredNicklist } from "./colorNicklist";
+import { getShowEventBadge, setShowEventBadge } from "./eventBadge";
 import { identityMoved } from "./identityMoved";
 import {
   getAllPresencePrefs,
@@ -24,7 +25,8 @@ import { type DisplayPrefs, getDisplayPrefs, putDisplayPrefs } from "./userSetti
 // server round-trip on top.
 //
 // #1766 added a FOURTH owner module (`showBottomBar.ts`) on exactly that shape,
-// and #2029 a FIFTH (`stripFormatting.ts`). Every function below that names the
+// and #2029 a FIFTH (`stripFormatting.ts`), and #2037 a SIXTH
+// (`eventBadge.ts`). Every function below that names the
 // wire map has to grow with it — the default baseline, `buildWireMap`,
 // `applyServerPrefs` and a `syncedSet*` — and the server's
 // `default_display_prefs/0` is the authority for the default. Four touch points
@@ -66,6 +68,7 @@ const DEFAULT_DISPLAY_PREFS: Required<DisplayPrefs> = {
   presence_filter: {},
   show_bottom_bar: true,
   strip_formatting: false,
+  show_event_badge: false,
 };
 
 // #449 (issue222 regression fix) — the "unconfirmed local write" marker.
@@ -97,7 +100,7 @@ function hasUnsyncedWrite(): boolean {
   return localStorage.getItem(UNSYNCED_KEY) === "1";
 }
 
-// Read the five owner modules into the wire shape (the seed-up + every PUT
+// Read the six owner modules into the wire shape (the seed-up + every PUT
 // body). Pure snapshot; no reactivity intended. `show_bottom_bar` (#1766) and
 // `strip_formatting` (#2029) are OPTIONAL on the type (an older server omits
 // them on the way IN) but always populated here — cic is the writer, and it
@@ -109,10 +112,11 @@ export function buildWireMap(): Required<DisplayPrefs> {
     presence_filter: getAllPresencePrefs(),
     show_bottom_bar: getShowBottomBar(),
     strip_formatting: getStripFormatting(),
+    show_event_badge: getShowEventBadge(),
   };
 }
 
-// Distribute a server-authoritative payload into the five owner modules'
+// Distribute a server-authoritative payload into the six owner modules'
 // LOCAL setters (write-through to signal + localStorage). No re-PUT — this is
 // the server-wins apply path only. The presence map is a full replace so unset
 // channels stay unset.
@@ -135,6 +139,12 @@ export function applyServerPrefs(prefs: DisplayPrefs): void {
   // here it is even the DEFAULT one, so `||` would make the pref impossible to
   // turn back off from a second device.
   setStripFormatting(prefs.strip_formatting ?? DEFAULT_DISPLAY_PREFS.strip_formatting);
+  // #2037 B — coalesced for the third time and for the same reason (`--cic`
+  // ships this bundle ahead of the server). `??` and not `||` matters MORE
+  // here than for its two predecessors: `false` is this pref's default, so
+  // `||` would make it impossible to turn the badge back OFF from a second
+  // device once any device had turned it on.
+  setShowEventBadge(prefs.show_event_badge ?? DEFAULT_DISPLAY_PREFS.show_event_badge);
 }
 
 // Reactive server sync — re-runs on every `token()` change (registered inside a
@@ -236,6 +246,11 @@ export function syncedSetShowBottomBar(on: boolean): void {
 
 export function syncedSetStripFormatting(on: boolean): void {
   setStripFormatting(on);
+  pushDisplayPrefs();
+}
+
+export function syncedSetShowEventBadge(on: boolean): void {
+  setShowEventBadge(on);
   pushDisplayPrefs();
 }
 

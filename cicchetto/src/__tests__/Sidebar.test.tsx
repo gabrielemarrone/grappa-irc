@@ -208,6 +208,7 @@ import * as apiMod from "../lib/api";
 // `await import` would resolve a second instance under vitest's mocked graph
 // and never reflect the requestConfirm write).
 import { acceptConfirm, confirmRequest, dismissConfirm } from "../lib/confirmDialog";
+import { setShowEventBadge } from "../lib/eventBadge";
 // Capture mocked module references at import time, before any resetModules
 import * as qwMod from "../lib/queryWindows";
 import * as scrollCmd from "../lib/scrollToBottomCommand";
@@ -222,6 +223,8 @@ import {
 import Sidebar from "../Sidebar";
 
 beforeEach(() => {
+  // #2037 B — the events pill is opt-in now; this spec asserts it renders.
+  setShowEventBadge(true);
   vi.clearAllMocks();
   // #96 — `clearAllMocks` clears CALL HISTORY but keeps a spy's
   // implementation, so the two `vi.spyOn(selMod, "selectedChannel")

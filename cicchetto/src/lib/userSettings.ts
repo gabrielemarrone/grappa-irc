@@ -351,6 +351,9 @@ export type DisplayPrefs = {
   // that disagree about the shape degrade instead of breaking. Absent ⇒ the
   // default (strip OFF, colours render). `buildWireMap()` always populates it.
   strip_formatting?: boolean;
+  // #2037 B — the events pill opt-in. Optional for the same reason as the two
+  // above: an older server omits it on the way in.
+  show_event_badge?: boolean;
 };
 
 export type DisplayPrefsResponse = {

@@ -29,10 +29,12 @@ import { CREDITS_LABEL, openCreditsModal } from "./lib/creditsModal";
 import {
   syncedSetColoredNicklist,
   syncedSetShowBottomBar,
+  syncedSetShowEventBadge,
   syncedSetStripFormatting,
   syncedSetTimeFormat,
 } from "./lib/displayPrefs";
 import { formatDuration } from "./lib/duration";
+import { getShowEventBadge } from "./lib/eventBadge";
 import { type FontSizeKey, getFontSize, setFontSize } from "./lib/fontSize";
 import { errorMessage, friendlyApiError } from "./lib/friendlyApiError";
 import { getHideNextActive, setHideNextActive } from "./lib/hideNextActive";
@@ -279,6 +281,13 @@ const SettingsDrawer: Component<Props> = (props) => {
   // coordinator (the single PUT authority for the #449 synced prefs).
   const onStripFormattingChange = (e: Event) => {
     syncedSetStripFormatting((e.currentTarget as HTMLInputElement).checked);
+  };
+
+  // #2037 B — same shape again. The one difference worth knowing is the
+  // DEFAULT: this is the first synced display pref that ships OFF and thereby
+  // removes something an operator already sees.
+  const onShowEventBadgeChange = (e: Event) => {
+    syncedSetShowEventBadge((e.currentTarget as HTMLInputElement).checked);
   };
 
   // #986 — the `onDetach` / `onQuit` handlers moved to RailActions with
@@ -2270,6 +2279,30 @@ const SettingsDrawer: Component<Props> = (props) => {
                     data-testid="strip-formatting-toggle"
                   />
                   strip colours and formatting from messages
+                </label>
+
+                {/* #2037 B — the events badge, OFF by default. vjt's ruling:
+                  "i !messaggi non sono interessanti e devono solo finire
+                  nell'opt-in badge". The sidebar's faint pill counted
+                  everything that is not a message, next to a bold pill that
+                  counted messages and a far-behind bar that counted raw rows —
+                  three numbers for what a reader takes to be one quantity
+                  (#2037). The bar and the bold pill are now the same number by
+                  construction; this takes the third out of the default view.
+                  ⚠️ Wider than join/part: the bucket is every non-content kind,
+                  so `topic`, `kick` and `server_event` follow it — they sit
+                  outside the suppressed-presence set on purpose (#458) because
+                  the PANE still renders them, which is a different question
+                  from whether they earn a badge. A kick that must stay loud
+                  belongs in the mention channel (#267). */}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={getShowEventBadge()}
+                    onChange={onShowEventBadgeChange}
+                    data-testid="show-event-badge-toggle"
+                  />
+                  count joins, parts and other events in the sidebar badge
                 </label>
 
                 {/* #1766 — the mobile window bar (BottomBar), ON by default:

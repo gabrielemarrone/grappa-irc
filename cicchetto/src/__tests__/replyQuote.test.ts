@@ -494,3 +494,108 @@ describe("replyToMessage", () => {
     expect(getDraft(KEY)).toBe("<a> primo << ciao<b> secondo << ");
   });
 });
+
+// issue 2033 — a BRIDGE relays somebody else's words under its own IRC nick and
+// wraps the real author into the body:
+//
+//   <Gazzurbo> <THREADelli> ne parlavamo in un talk...
+//
+// `msg.sender` is then the RELAY, not the speaker. Quoting it names a bot and
+// buries the person being answered, and the far side receives three
+// attributions deep (`<vjt> <Gazzurbo> <THREADelli> …`).
+//
+// vjt's rulings (2026-09-10, relayed in the issue): detection is the head shape
+// ALONE — no configured relay list — and reply re-emits the recovered author as
+// `@nick`, a real mention on the far side, because this bridge relays the
+// Telegram USERNAME and not the display name.
+describe("replyQuote — a bridged message quotes its AUTHOR, not the relay (issue 2033)", () => {
+  it("drops the relay's nick and mentions the wrapped author", () => {
+    expect(
+      replyQuote(msg({ sender: "Gazzurbo", body: "<THREADelli> ne parlavamo in un talk" })),
+    ).toBe("@THREADelli ne parlavamo in un talk << ");
+  });
+
+  // The `@` is what makes the far side notify the person. Asserted apart from
+  // the shape above: an implementation that recovered the author but left it
+  // wrapped would pass a `toContain("THREADelli")` and still notify nobody.
+  it("leaves the relay's nick nowhere in the quote", () => {
+    const quote = replyQuote(msg({ sender: "Gazzurbo", body: "<THREADelli> ciao" })) ?? "";
+    expect(quote).toBe("@THREADelli ciao << ");
+    expect(quote).not.toContain("Gazzurbo");
+    expect(quote).not.toContain("<THREADelli>");
+  });
+
+  // The ACCEPTED LIMITATION, pinned as an assertion rather than left to be
+  // rediscovered as a bug report (vjt's ruling 1). Detection is structural, so
+  // a human writing `<foo> bar` IS read as a relay — and the cost is not a
+  // stray `@`: `alice`, the actual speaker, is DROPPED. Priced in knowingly.
+  it("misreads a human who writes `<foo> bar` — and drops her, knowingly", () => {
+    expect(replyQuote(msg({ sender: "alice", body: "<foo> bar" }))).toBe("@foo bar << ");
+  });
+
+  // The other half of the same ruling: what is NOT nick-shaped is not a relay.
+  // These are the shapes that keep ordinary prose out of the heuristic.
+  it("refuses a head that is not nick-shaped", () => {
+    expect(replyQuote(msg({ body: "<3 you" }))).toBe("<vjt> <3 you << ");
+    expect(replyQuote(msg({ body: "<two words> a" }))).toBe("<vjt> <two words> a << ");
+    expect(replyQuote(msg({ body: "<nospace>x" }))).toBe("<vjt> <nospace>x << ");
+  });
+
+  // The head must be at position 0, exactly as #1123 requires of a previous
+  // quote: mid-string, the leading text is the sender's own words.
+  it("refuses a wrapping that is not at the head of the body", () => {
+    expect(replyQuote(msg({ sender: "alice", body: "guarda <bob> ciao" }))).toBe(
+      "<alice> guarda <bob> ciao << ",
+    );
+  });
+
+  // A relay line with nothing past the wrapping is nobody saying anything.
+  it("refuses a body that is only the wrapping", () => {
+    expect(replyQuote(msg({ sender: "Gazzurbo", body: "<THREADelli> " }))).toBeNull();
+  });
+
+  // vjt's ruling 5: the cap is measured on the body AFTER the relay head comes
+  // off — the head is not what overflows, the same reading #1235 already made
+  // for the nick. Discriminating by construction: `<THREADelli> ` is 13 chars
+  // and the body is 95, so the pre-cure string is 108 (capped, ellipsis) and
+  // the cured one is 95 (whole).
+  it("measures the 100-char cap on the body left AFTER the relay head", () => {
+    const words = "x".repeat(95);
+    const quote = replyQuote(msg({ sender: "Gazzurbo", body: `<THREADelli> ${words}` })) ?? "";
+    expect(quote).toBe(`@THREADelli ${words} << `);
+    expect(quote).not.toContain(REPLY_QUOTE_ELLIPSIS);
+  });
+
+  it("still caps a bridged body that overflows on its own", () => {
+    const words = "y".repeat(REPLY_QUOTE_BODY_LIMIT + 5);
+    const quote = replyQuote(msg({ sender: "Gazzurbo", body: `<THREADelli> ${words}` })) ?? "";
+    expect(quote).toBe(
+      `@THREADelli ${"y".repeat(REPLY_QUOTE_BODY_LIMIT)}${REPLY_QUOTE_ELLIPSIS}${REPLY_QUOTE_TAIL}`,
+    );
+  });
+
+  // NOT ruled, and decided here rather than left ambiguous: an ACTION row is
+  // never read as bridged. #1126 forbids rendering an action as speech, and
+  // `!addquote` — which shares this detection — would emit exactly that
+  // (`<THREADelli> waves` for something nobody said). No transcript of an
+  // action-shaped relay exists, so this falls back to today's behaviour, the
+  // same bounded silence rulings 1 and 3 already accept.
+  it("never reads an ACTION as bridged — #1126 outranks the heuristic", () => {
+    expect(
+      replyQuote(
+        msg({ kind: "action", sender: "Gazzurbo", body: "\x01ACTION <THREADelli> waves\x01" }),
+      ),
+    ).toBe("* Gazzurbo <THREADelli> waves << ");
+  });
+
+  // The ORDER of the two peels is forced, not free. #1123's cut runs FIRST: a
+  // plain reply body (`<bob> original<< answer`) opens with a nick wrapping
+  // too, so peeling the relay first would recover `bob` — who is being QUOTED,
+  // not speaking — and strand `original<< answer` past a cut that no longer
+  // matches. This is the test that fails if the two are swapped.
+  it("peels a previous quote BEFORE looking for a relay head", () => {
+    expect(replyQuote(msg({ sender: "alice", body: "<bob> original<< answer" }))).toBe(
+      "<alice> answer << ",
+    );
+  });
+});

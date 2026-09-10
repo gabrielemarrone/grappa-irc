@@ -49,7 +49,14 @@ export function replyQuote(msg: ScrollbackMessage): string | null {
   const body = quotableBody(msg);
   if (body === null) return null;
   // #1126's heads, shared with `!addquote` since #1264 — see `attributionHead`.
-  return `${attributionHead(msg)} ${capQuotedBody(body)}${REPLY_QUOTE_TAIL}`;
+  //
+  // issue 2033 — `"mention"`: when the row is a bridge relay, the recovered
+  // author is emitted as `@nick`, which is what makes the far side notify them
+  // (vjt measured that his bridge relays the USERNAME, not the display name).
+  // The cap then falls on a body that has already shed the relay head, because
+  // `quotableBody` took it off — ruling 5, and the same reading #1235 made for
+  // the nick: the head is not what overflows.
+  return `${attributionHead(msg, "mention")} ${capQuotedBody(body)}${REPLY_QUOTE_TAIL}`;
 }
 
 // The marker and its trailing space — the part of the tail a second reply takes

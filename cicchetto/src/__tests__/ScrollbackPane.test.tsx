@@ -3281,7 +3281,7 @@ describe("ScrollbackPane", () => {
     // `applyReadCursorSet` boundary (same wire bytes), so the freeze is
     // uniform: cross-device reads reflect on the next refocus, not
     // mid-stare. Accepted tradeoff (vjt: "consistency").
-    it("Bug A (revised): bare cursor advance keeps the marker frozen; refocus releases it", async () => {
+    it("Bug A (revised): bare cursor advance keeps the marker frozen; so does a visibility-return; an own send releases it", async () => {
       const { applyReadCursorSet } = await import("../lib/readCursor");
       const proto = fixture[0];
       if (!proto) throw new Error("fixture[0] missing");
@@ -3304,11 +3304,24 @@ describe("ScrollbackPane", () => {
       // FROZEN: marker unchanged despite the live cursor reaching sessionTopId.
       expect(screen.getByTestId("unread-marker")).toHaveTextContent("4 unread");
 
-      // Refocus (tab/app visibility-return) re-latches the marker baseline
-      // to the live cursor → cursor caught up to sessionTopId → marker gone.
+      // issue 2032 — a tab/app visibility-return is a RESUME, not a focus
+      // acquisition, so it does NOT re-latch: the divider still reads its
+      // frozen count after a full hide→show cycle.
+      //
+      // This block used to assert the divider VANISHED here (freeze-contract
+      // "option (b)"). That is the behaviour 2032 reversed: re-latching
+      // materialises a divider move the reader never asked for, and the
+      // `rows()` recompute it triggers recreates the ref-keyed `<For>` list,
+      // collapsing their scrollTop to 0.
       setDocVisible(false);
       await new Promise((r) => queueMicrotask(() => r(undefined)));
       setDocVisible(true);
+      await new Promise((r) => queueMicrotask(() => r(undefined)));
+      expect(screen.getByTestId("unread-marker")).toHaveTextContent("4 unread");
+
+      // An own send IS an explicit caught-up acquisition and still releases it
+      // (the live cursor already reached sessionTopId above).
+      pushOwnSend("freenode #grappa");
       await waitFor(() => {
         expect(screen.queryByTestId("unread-marker")).toBeNull();
       });
@@ -3337,7 +3350,12 @@ describe("ScrollbackPane", () => {
       expect(screen.getByTestId("unread-marker")).toHaveTextContent("4 unread");
     });
 
-    it("marker re-latches to the advanced cursor on visibility-return (option b)", async () => {
+    // issue 2032 — the INVERSE of what this case used to pin. It was
+    // "marker re-latches to the advanced cursor on visibility-return (option
+    // b)"; the owner ruling on 2032 made a visibility-return a RESUME, so the
+    // frozen divider must survive it untouched. A deliberate switch, a
+    // cold-mount and an own send still re-latch — covered by their own cases.
+    it("marker does NOT re-latch on visibility-return — a resume is not a focus acquisition", async () => {
       const { applyReadCursorSet } = await import("../lib/readCursor");
       const proto = fixture[0];
       if (!proto) throw new Error("fixture[0] missing");
@@ -3358,14 +3376,15 @@ describe("ScrollbackPane", () => {
       await new Promise((r) => queueMicrotask(() => r(undefined)));
       expect(screen.getByTestId("unread-marker")).toHaveTextContent("4 unread");
 
-      // Step away + back: divider re-latches to the live cursor (62) → only
-      // id 63 remains in (62, 63] → "1 unread".
+      // Step away + back. Pre-2032 the divider re-latched to the live cursor
+      // (62) and collapsed to "1 unread" — moving under a reader who only
+      // stepped away. It must now hold at "4 unread": same rows, same frozen
+      // boundary, nothing moved.
       setDocVisible(false);
       await new Promise((r) => queueMicrotask(() => r(undefined)));
       setDocVisible(true);
-      await waitFor(() => {
-        expect(screen.getByTestId("unread-marker")).toHaveTextContent("1 unread");
-      });
+      await new Promise((r) => queueMicrotask(() => r(undefined)));
+      expect(screen.getByTestId("unread-marker")).toHaveTextContent("4 unread");
     });
 
     // Send-relatch (2026-06-09, vjt prod report): a focused OWN send must
@@ -3622,16 +3641,17 @@ describe("ScrollbackPane", () => {
 
       // FREEZE CONTRACT (2026-06-08): a bare cursor advance no longer removes
       // the divider — it's frozen. The divider row unmounts when a FOCUS
-      // acquisition re-latches the frozen boundary past the unread block.
-      // Advance the live cursor, then drive ONE visibility-return: that
-      // re-latches markerCursorId=53 → divider unmounts. (Yield between
-      // transitions so SolidJS flushes the false state — effect captures
-      // prev=false — before we flip back to true; otherwise both writes
-      // batch and the effect's prev=undefined guard returns early.)
+      // ACQUISITION re-latches the frozen boundary past the unread block.
+      // Advance the live cursor, then drive an OWN SEND: that re-latches
+      // markerCursorId=53 → divider unmounts.
+      //
+      // issue 2032 — this used to drive a visibility-return instead. A resume
+      // no longer re-latches, so it can no longer remove the divider; the
+      // property under test here is the #168 display-only one (removal leaves
+      // the pane following the tail), not which trigger does the removing, so
+      // the trigger was swapped for one that still qualifies.
       applyReadCursorSet("freenode", "#grappa", 53);
-      setDocVisible(false);
-      await new Promise((r) => queueMicrotask(() => r(undefined)));
-      setDocVisible(true);
+      pushOwnSend("freenode #grappa");
       await waitFor(() => {
         expect(screen.queryByTestId("unread-marker")).toBeNull();
       });

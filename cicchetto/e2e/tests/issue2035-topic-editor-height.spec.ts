@@ -17,7 +17,8 @@
 //       line-height, which is drift-proof against both properties moving.
 //
 //   (2) ENTER's key handling is unit-covered (the preventDefault and the
-//       Shift+Enter pairing are jsdom's, per #974's every-Enter-sends rule),
+//       Shift+Enter pairing are jsdom's — the chord is RULED, vjt 2026-09-10,
+//       and agrees with #974's every-Enter-sends rule one surface over),
 //       but what reaches the WIRE is not. Here an in-channel peer witnesses
 //       the real `TOPIC #chan :<flattened>`, which proves in one action both
 //       that Enter went through the send door and that the flatten SURVIVED
@@ -71,10 +72,16 @@ type EditorGeometry = {
   paddingBottomPx: number;
   borderTopPx: number;
   borderBottomPx: number;
-  // clientHeight excludes the border and INCLUDES the padding — the content
-  // box is what the text actually gets, and it is what "eight lines" is
-  // about. Subtracting them here is the whole correction the issue needed.
+  // The BORDER box, fractional. `clientHeight` was the obvious reader and is
+  // the wrong one: it is an INTEGER, so it rounded 148.4 to 148 and reported
+  // 7.98 lines for a box that holds exactly eight — a measurement artefact
+  // arriving as a near miss, which is the one shape a height pin must not
+  // have. `getBoundingClientRect` keeps the subpixels.
+  borderBoxHeightPx: number;
   clientHeightPx: number;
+  // What the TEXT gets: border box less padding less border. Doing that
+  // subtraction is the whole correction the issue needed, since
+  // `* { box-sizing: border-box }` means neither is free.
   contentHeightPx: number;
   textLines: number;
 };
@@ -83,23 +90,29 @@ async function measureEditor(editor: Locator): Promise<EditorGeometry> {
   return await editor.evaluate((el) => {
     const ta = el as HTMLTextAreaElement;
     const cs = getComputedStyle(ta);
-    const num = (v: string): number => Math.round(Number.parseFloat(v) * 100) / 100;
+    const round = (n: number): number => Math.round(n * 100) / 100;
+    const num = (v: string): number => round(Number.parseFloat(v));
     const paddingTopPx = num(cs.paddingTop);
     const paddingBottomPx = num(cs.paddingBottom);
+    const borderTopPx = num(cs.borderTopWidth);
+    const borderBottomPx = num(cs.borderBottomWidth);
     const lineHeightPx = num(cs.lineHeight);
-    const contentHeightPx =
-      Math.round((ta.clientHeight - paddingTopPx - paddingBottomPx) * 100) / 100;
+    const borderBoxHeightPx = round(ta.getBoundingClientRect().height);
+    const contentHeightPx = round(
+      borderBoxHeightPx - paddingTopPx - paddingBottomPx - borderTopPx - borderBottomPx,
+    );
     return {
       rows: ta.rows,
       fontSizePx: num(cs.fontSize),
       lineHeightPx,
       paddingTopPx,
       paddingBottomPx,
-      borderTopPx: num(cs.borderTopWidth),
-      borderBottomPx: num(cs.borderBottomWidth),
+      borderTopPx,
+      borderBottomPx,
+      borderBoxHeightPx,
       clientHeightPx: ta.clientHeight,
       contentHeightPx,
-      textLines: Math.round((contentHeightPx / lineHeightPx) * 100) / 100,
+      textLines: round(contentHeightPx / lineHeightPx),
     };
   });
 }

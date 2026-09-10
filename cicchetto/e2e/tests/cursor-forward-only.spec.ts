@@ -38,6 +38,7 @@ import type { Page } from "@playwright/test";
 import {
   loginAs,
   pageScrollbackBy,
+  scrollbackDistanceFromBottom,
   scrollbackLines,
   selectChannel,
 } from "../fixtures/cicchettoPage";
@@ -150,6 +151,41 @@ async function scrollToBottom(page: Page): Promise<void> {
   // #1336: this one was watched by NOBODY — deleting it left all six tests
   // green. Through the shared door a wheel that moves nothing is a named
   // failure instead of a silent pass.
+  //
+  // Issue 2031 — this helper's name states a POSTCONDITION ("be at the
+  // bottom"), and until now it asserted a SIDE EFFECT instead ("something
+  // moved"). Those agreed only for as long as the pane stopped ~7px short of
+  // its own maximum: the tail write aligned the last row's bottom with the
+  // scrollport EDGE and left `.scrollback`'s own bottom padding unscrolled, so
+  // there was always a little run left for the wheel to consume. Issue 2031
+  // finished that write at `scrollHeight - clientHeight`, the run went to
+  // ZERO, and `scrollByGesture` — correctly, by its own contract — rejected a
+  // gesture the pane cannot honour. Measured: `remaining` 7 → 0, and the spec
+  // moved from 5/5 green to 5/5 red across that one change.
+  //
+  // 🔴 This is NOT a widened tolerance, and reading it as one in six months
+  // would be the wrong lesson. Nothing was relaxed: no timeout grew, no
+  // threshold moved, no assertion was deleted, and `scrollByGesture` is
+  // untouched — its rejection is a real guard for every other caller, and
+  // softening it there would blind all of them to buy comfort for one. What
+  // changed is WHICH claim this helper makes. Already being at the bottom
+  // satisfies "scroll to bottom" completely; demanding a displacement on top
+  // of that asserts the mechanism rather than the outcome, and an assertion
+  // about a mechanism goes stale the moment the mechanism is improved. It
+  // just did.
+  //
+  // The guard #1336 bought is kept where it still bites: whenever there IS run
+  // left, the gesture goes through the same rejecting door as before, so a
+  // wheel that fails to be delivered is still a named failure and not a silent
+  // pass. Only the already-satisfied case skips it — and it skips it because
+  // there is nothing left to deliver, not because we stopped looking.
+  //
+  // The sentinel points the same way as the branch it feeds: an unmounted pane
+  // reads as "run left", so it takes the gesture path and fails there with
+  // that path's own diagnosis, instead of being silently treated as done.
+  const remaining = (await scrollbackDistanceFromBottom(page)) ?? Number.POSITIVE_INFINITY;
+  if (remaining <= 0) return;
+
   await pageScrollbackBy(page, 5000, GESTURE_TIMEOUT_MS);
 }
 

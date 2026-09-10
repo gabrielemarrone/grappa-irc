@@ -29,7 +29,6 @@
 // Harness mirrors issue580 (DB-seeded 200-row #spec-wN; tiny 800×300 viewport so
 // the buffer overflows and scroll geometry is measurable).
 
-import type { Page } from "@playwright/test";
 import {
   composeSend,
   loginAs,
@@ -43,6 +42,12 @@ import {
   restoreReadCursorToTail,
   setReadCursorToId,
 } from "../fixtures/grappaApi";
+import {
+  delayedWrites,
+  distanceOf,
+  dumpScrollProbe,
+  installScrollProbe,
+} from "../fixtures/scrollWriteProbe";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
@@ -68,114 +73,9 @@ const SAMPLE_WINDOW_MS = 2500;
 // false-RED on a slow run. The defect IS the ~0.5s gap between two writes.
 const SETTLE_GRACE_MS = 300;
 
-// The delayed double-scroll: any container scroll write that lands more than the
-// grace window AFTER the send's first (legitimate) tail-follow write.
-function delayedWrites(writes: readonly WriteEvent[]): WriteEvent[] {
-  if (writes.length === 0) return [];
-  const first = writes[0] as WriteEvent;
-  return writes.filter((w) => w.t - first.t > SETTLE_GRACE_MS);
-}
-
-type Sample = { t: number; top: number; height: number; client: number };
-type WriteEvent = { t: number; kind: string; detail: string; before: number };
-
-// Install an in-page sampler + a scroll-write spy on the scrollback container,
-// BEFORE the send. The sampler records the geometry on every native `scroll`
-// event AND on a rAF tick (to catch a programmatic write that lands between
-// scroll events), for SAMPLE_WINDOW_MS. The spy wraps `scrollIntoView` + the
-// `scrollTop` setter (page-context only — no production behaviour changes).
-async function installScrollProbe(page: Page, windowMs: number): Promise<void> {
-  await page.evaluate((windowMsArg) => {
-    const el = document.querySelector('[data-testid="scrollback"]') as HTMLDivElement | null;
-    if (!el) throw new Error("scrollback container not found for probe");
-    type Sample = { t: number; top: number; height: number; client: number };
-    type WriteEvent = { t: number; kind: string; detail: string; before: number };
-    const w = window as unknown as { __i625samples: Sample[]; __i625writes: WriteEvent[] };
-    w.__i625samples = [];
-    w.__i625writes = [];
-    const t0 = performance.now();
-    const now = () => performance.now() - t0;
-
-    const desc = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
-    const getTop = () => (desc?.get ? (desc.get.call(el) as number) : el.scrollTop);
-
-    if (desc?.get && desc?.set) {
-      Object.defineProperty(el, "scrollTop", {
-        configurable: true,
-        get() {
-          return desc.get?.call(this);
-        },
-        set(v: number) {
-          w.__i625writes.push({
-            t: Math.round(now()),
-            kind: "scrollTop=",
-            detail: String(Math.round(v)),
-            before: Math.round(getTop()),
-          });
-          desc.set?.call(this, v);
-        },
-      });
-    }
-
-    const rawSIV = Element.prototype.scrollIntoView;
-    Element.prototype.scrollIntoView = function (arg?: boolean | ScrollIntoViewOptions) {
-      if (this === el || el.contains(this as Node)) {
-        w.__i625writes.push({
-          t: Math.round(now()),
-          kind: "scrollIntoView",
-          detail: JSON.stringify(arg ?? null),
-          before: Math.round(getTop()),
-        });
-      }
-      return rawSIV.call(this, arg as ScrollIntoViewOptions);
-    };
-
-    const sample = () => {
-      w.__i625samples.push({
-        t: Math.round(now()),
-        top: Math.round(getTop()),
-        height: el.scrollHeight,
-        client: el.clientHeight,
-      });
-    };
-    sample();
-    el.addEventListener("scroll", sample, { passive: true });
-    const loop = () => {
-      sample();
-      if (now() < windowMsArg) requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  }, windowMs);
-}
-
-// On failure this dump is the whole story: `writes` names every container scroll
-// write + its timestamp (the delayed double-scroll shows as a second entry ~0.5s
-// in), `topChanges` is the compressed scrollTop timeline.
-async function dumpEvidence(
-  page: Page,
-  tag: string,
-): Promise<{ samples: Sample[]; writes: WriteEvent[] }> {
-  const samples = await page.evaluate(
-    () => (window as unknown as { __i625samples: Sample[] }).__i625samples,
-  );
-  const writes = await page.evaluate(
-    () => (window as unknown as { __i625writes: WriteEvent[] }).__i625writes,
-  );
-  const dist = (s: Sample) => Math.round(s.height - s.top - s.client);
-  const compact: Array<{ t: number; top: number; d: number }> = [];
-  let prevTop = Number.NaN;
-  for (const s of samples) {
-    if (s.top !== prevTop) {
-      compact.push({ t: s.t, top: s.top, d: dist(s) });
-      prevTop = s.top;
-    }
-  }
-  console.log(`[#625 ${tag}] writes=${JSON.stringify(writes)}`);
-  console.log(`[#625 ${tag}] topChanges=${JSON.stringify(compact)}`);
-  return { samples, writes };
-}
-
-const distOf = (s: Sample) => s.height - s.top - s.client;
+// The sampler + scroll-write spy moved to `fixtures/scrollWriteProbe.ts` when
+// issue 2031 needed the same instrument — one recorder, so the two specs
+// cannot drift into disagreeing about what counts as a write.
 
 test.describe("issue #625 — a single send must not jump the pane up before settling", () => {
   test.use({ viewport: { width: 800, height: 300 } });
@@ -204,7 +104,7 @@ test.describe("issue #625 — a single send must not jump the pane up before set
     await expect(sentLine).toHaveCount(1, { timeout: 10_000 });
     await page.waitForTimeout(SAMPLE_WINDOW_MS + 200);
 
-    const { samples, writes } = await dumpEvidence(page, "at-tail");
+    const { samples, writes } = await dumpScrollProbe(page, "at-tail");
     expect(samples.length).toBeGreaterThan(10);
 
     // #625 CORE — no DELAYED second scroll write. A single send performs ONE
@@ -214,14 +114,14 @@ test.describe("issue #625 — a single send must not jump the pane up before set
       writes.length,
       `expected the send's tail-follow write; writes=${JSON.stringify(writes)}`,
     ).toBeGreaterThanOrEqual(1);
-    const late = delayedWrites(writes);
+    const late = delayedWrites(writes, SETTLE_GRACE_MS);
     expect(
       late,
       `delayed scroll write(s) after the send's tail-follow: ${JSON.stringify(writes)}`,
     ).toEqual([]);
 
     // Visible-symptom guard: following a send, the pane never travels UP.
-    const maxDist = Math.max(...samples.map(distOf));
+    const maxDist = Math.max(...samples.map(distanceOf));
     expect(maxDist).toBeLessThanOrEqual(SCROLL_BOTTOM_THRESHOLD_PX);
     await expect(sentLine).toBeInViewport();
   });
@@ -261,7 +161,7 @@ test.describe("issue #625 — a single send must not jump the pane up before set
     await expect(sentLine).toHaveCount(1, { timeout: 10_000 });
     await page.waitForTimeout(SAMPLE_WINDOW_MS + 200);
 
-    const { samples, writes } = await dumpEvidence(page, "from-history");
+    const { samples, writes } = await dumpScrollProbe(page, "from-history");
     expect(samples.length).toBeGreaterThan(10);
 
     // #625 CORE — same invariant as the at-tail case: a single send must not fire
@@ -271,7 +171,7 @@ test.describe("issue #625 — a single send must not jump the pane up before set
       writes.length,
       `expected the send's tail-follow write; writes=${JSON.stringify(writes)}`,
     ).toBeGreaterThanOrEqual(1);
-    const late = delayedWrites(writes);
+    const late = delayedWrites(writes, SETTLE_GRACE_MS);
     expect(
       late,
       `delayed scroll write(s) after the send's tail-follow: ${JSON.stringify(writes)}`,
@@ -279,10 +179,10 @@ test.describe("issue #625 — a single send must not jump the pane up before set
 
     // #608: a send follows the tail unconditionally → the pane reaches the bottom.
     // Once there, it STAYS (a delayed writer would drag it back UP).
-    const firstAtTail = samples.findIndex((s) => distOf(s) <= SCROLL_BOTTOM_THRESHOLD_PX);
+    const firstAtTail = samples.findIndex((s) => distanceOf(s) <= SCROLL_BOTTOM_THRESHOLD_PX);
     expect(firstAtTail).toBeGreaterThanOrEqual(0);
     const afterSettle = samples.slice(firstAtTail);
-    const maxAfterSettle = Math.max(...afterSettle.map(distOf));
+    const maxAfterSettle = Math.max(...afterSettle.map(distanceOf));
     expect(maxAfterSettle).toBeLessThanOrEqual(SCROLL_BOTTOM_THRESHOLD_PX);
     await expect(sentLine).toBeInViewport();
   });

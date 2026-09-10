@@ -8,26 +8,49 @@ defmodule Grappa.MixProject do
   # the SAME file into a module attribute, so the number an operator reads can
   # never drift from the one stamped into the package metadata.
   #
-  # A `VERSION`-only bump is nonetheless a COLD deploy — measured on m42
-  # 2026-08-10, correcting what #652 claimed here. Its reasoning was sound in
-  # the abstract (a bump no longer edits `mix.exs`, so `Grappa.Deploy.Preflight`
-  # stops classifying it COLD through `mix_deps?`), but it is defeated by the
-  # coupling the line below introduces: that read stamps the OTP application
-  # vsn, so under `mix release` — how production ships — the bump moves the
-  # artifact to `lib/grappa-<new>/ebin`, while the RUNNING node keeps resolving
-  # `:code.lib_dir(:grappa)` to its boot directory `lib/grappa-<old>/ebin`.
-  # That is the directory `Grappa.HotReload.reload_modified/0` walks; nothing in
-  # it changed, so `/admin/reload` answers `{"failed":[],"reloaded":[]}` and the
-  # node serves the old number with the new code already on disk. Plan a restart
-  # for any release bump. Preflight still calls such a bump HOT — that
-  # misclassification is a behaviour defect and belongs to an issue of its own,
-  # not to a comment.
+  # #652's payoff — a bump that hot-reloads — was defeated for a year by ONE
+  # coupling: this same string used to be passed as the project's `version:`,
+  # i.e. the OTP application vsn, which is the ONLY thing that puts a number
+  # into a release's code path (`lib/grappa-<vsn>/ebin`). Issue 2057 cut that
+  # coupling; see `@otp_vsn` below. `@version` stays the honest number and is
+  # still read from `VERSION` at BUILD time.
   @version File.read!(Path.join(__DIR__, "VERSION")) |> String.trim()
+
+  # The OTP application vsn — FROZEN, and deliberately NOT `@version`
+  # (issue 2057). It is not a version carrier; it is a path component, and the
+  # only consumer that cares is the code path a running node resolves.
+  #
+  # MEASURED on a real `mix release` with a live node, three arms, one bench:
+  #
+  #   * tracking `VERSION` (what this used to do): bumping 1.5.5 → 1.5.6 wrote
+  #     the fresh beams to `lib/grappa-1.5.6/ebin` while the live node kept
+  #     resolving `:code.lib_dir(:grappa)` to `lib/grappa-1.5.5` — its BOOT
+  #     directory. `POST /admin/reload` answered `409 stale_code_path`
+  #     (`booted 1.5.5`, `built 1.5.6`) and `/api/config` stayed on 1.5.5.
+  #   * frozen (this): one lib dir, ever. The same bump reloaded
+  #     `Elixir.Grappa.Version` and `/api/config` reported 1.5.6 with no
+  #     restart — and no stale sibling directory accumulated on disk.
+  #
+  # 🔴 THE RELEASE VSN MUST INHERIT THIS FREEZE. Do NOT give the release a
+  # `version:` of its own below: `Grappa.HotReload.audit_code_path/1` compares
+  # the app vsn in the booted code path against the RELEASE vsn in
+  # `releases/start_erl.data`, so a frozen app vsn beside a tracking release
+  # vsn makes those two diverge FOREVER — measured as a permanent
+  # `409 {"booted":"0.0.0","built":"1.5.6"}`, i.e. this cure inverted into a
+  # total silent refusal of every hot deploy. Pinned by
+  # `test/grappa/version_single_source_test.exs`.
+  #
+  # The price, and it is only cosmetic: paths and the release tarball on the
+  # box carry this constant instead of the real number. The number an operator
+  # reads — `/api/config`, `CTCP VERSION`, the `.deb`/AUR metadata — is
+  # `Grappa.Version`, which is still baked from `VERSION`.
+  @otp_vsn "0.0.0"
 
   def project do
     [
       app: @app,
-      version: @version,
+      # The FROZEN vsn, not @version — see @otp_vsn (issue 2057).
+      version: @otp_vsn,
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       compilers: [:boundary] ++ Mix.compilers(),
@@ -204,13 +227,16 @@ defmodule Grappa.MixProject do
 
       {:skip, :no_git} ->
         # Log-honesty: a fast path states what it OBSERVED, never a silent no-op.
-        # Report the bare version from `release.version` (the %Mix.Release{}
-        # field) — NOT `Grappa.Version.base/0`, which returns "" unless `:grappa`
-        # is loaded into the mix VM, and would emit an empty version on this very
+        # Report `@version` — the VERSION-file string, which is precisely what
+        # `Grappa.Version.current/0` returns for a no-git build. NOT
+        # `release.version`: since issue 2057 that is the frozen `@otp_vsn` and
+        # would print `0.0.0`, a number no artifact ever reports. And not
+        # `Grappa.Version.base/0`, which returns "" unless `:grappa` is loaded
+        # into the mix VM and would emit an empty version on this very
         # honesty-logging path (the AUR-tarball substrate exercises it).
         Mix.shell().info(
           "version guard (#542): no .git at build — artifact reports the bare " <>
-            "#{release.version} (package/tarball); no HEAD to verify against"
+            "#{@version} (package/tarball); no HEAD to verify against"
         )
 
         release

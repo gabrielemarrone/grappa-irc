@@ -8,7 +8,10 @@ defmodule Grappa.VersionSingleSourceTest do
 
     * `mix.exs` `@version` + `lib/grappa/version.ex` `@base_version` — both
       read the SAME `VERSION` file at COMPILE time (no hardcoded literal to
-      drift; the beam-baked constant is what a hot deploy reloads);
+      drift; the beam-baked constant is what a hot deploy reloads). NOT the
+      OTP application vsn, which since issue 2057 is a frozen constant on
+      purpose — it is a code-PATH component (`lib/grappa-<vsn>/ebin`), not a
+      version carrier, and the two assertions below pin that split;
     * the `.deb`/nfpm version — `infra/packaging/build.sh` exports
       `GRAPPA_VERSION` from `infra/packaging/version.sh` (which reads
       `VERSION`), and `nfpm.yaml` interpolates `${GRAPPA_VERSION}`;
@@ -53,24 +56,68 @@ defmodule Grappa.VersionSingleSourceTest do
   # release workflow read it — a build↔source cross-check, not a runtime read.
   @canonical_version "VERSION" |> File.read!() |> String.trim()
 
+  # The frozen OTP application vsn (issue 2057). A LITERAL, deliberately
+  # duplicated from `mix.exs` rather than derived from it: deriving would make
+  # the assertion tautological and blind to the one regression that matters —
+  # someone putting `version: @version` back and re-coupling the release code
+  # path to the VERSION file. This constant never moves; that is its job.
+  @frozen_otp_vsn "0.0.0"
+
   describe "the single canonical declaration (repo-root VERSION file)" do
     test "is a well-formed semver" do
       assert @canonical_version =~ ~r/^\d+\.\d+\.\d+/
     end
 
-    test "is what OTP compiled into the .app resource (origin wired to runtime)" do
-      # Application.spec/2 returns the vsn OTP baked into the .app from mix.exs
-      # @version at build — which #652 has mix.exs read from VERSION. If they
-      # disagree the running node's .app would report a version the source
-      # never declared. (Note base/0 no longer routes through .app — #652 — but
-      # the .app vsn must still be stamped from the same VERSION at build.)
-      assert to_string(Application.spec(:grappa, :vsn)) == @canonical_version
+    test "is DECOUPLED from the OTP app vsn, which is frozen (issue 2057)" do
+      # This assertion used to be its own opposite: `Application.spec(:grappa,
+      # :vsn) == @canonical_version`, pinning the .app vsn to the VERSION file
+      # so "the running node's .app would report a version the source never
+      # declared" could not happen. That coupling is now deliberately BROKEN,
+      # and the pin is kept — inverted — rather than deleted, because the
+      # decoupling is the load-bearing property and an accidental re-coupling
+      # is silent (vjt's ruling, relayed 2026-09-10).
+      #
+      # WHY, measured on a real `mix release` + a live node (issue 2057):
+      # the app vsn is the ONLY thing that puts a number into the release's
+      # code path, `lib/grappa-<vsn>/ebin`. While it tracked VERSION, a bump
+      # moved the fresh beams to `lib/grappa-<new>` while the running node
+      # kept resolving `:code.lib_dir(:grappa)` to its BOOT directory — so
+      # `POST /admin/reload` answered 409 stale_code_path and `/api/config`
+      # stayed on the old number. Frozen, the path never moves, the beams land
+      # where the node is already looking, and the bump hot-reloads.
+      #
+      # The reported version does NOT regress: `Grappa.Version.base/0` is the
+      # compile-time constant baked from this same VERSION file, so the number
+      # an operator reads still has exactly one declaration.
+      assert to_string(Application.spec(:grappa, :vsn)) == @frozen_otp_vsn
+    end
+
+    test "the RELEASE vsn inherits the freeze — never its own version: key (issue 2057)" do
+      # The constraint that makes the freeze work, and the one way to undo it
+      # silently. `Grappa.HotReload.audit_code_path/1` compares the app vsn it
+      # reads off the booted code path (`lib/grappa-<app vsn>`) against the
+      # RELEASE vsn in `releases/start_erl.data`. They agree today only because
+      # a release with no `version:` of its own inherits the app's.
+      #
+      # MEASURED on the bench, not reasoned: freezing the app vsn while leaving
+      # `releases: [grappa: [version: @version]]` produced
+      # `409 {"booted":"0.0.0","built":"1.5.6"}` — and since the frozen side
+      # never moves while the other tracks VERSION, that 409 is PERMANENT. The
+      # cure would have become a total, silent refusal of every hot deploy.
+      release_opts = Keyword.fetch!(Mix.Project.config()[:releases], :grappa)
+
+      refute Keyword.has_key?(release_opts, :version),
+             "the grappa release must inherit the frozen app vsn; giving it a " <>
+               "version: of its own makes audit_code_path/1 refuse every hot deploy"
     end
 
     test "mix.exs @version DERIVES from VERSION — never a re-hardcoded literal (#652)" do
       # The core #652 guarantee: mix.exs stopped being the hand-edited carrier.
-      # If someone re-inlines `@version \"X.Y.Z\"` the bump silently forces COLD
-      # again (Preflight mix_deps?) — catch that regression at the bump commit.
+      # If someone re-inlines `@version \"X.Y.Z\"` the bump starts editing
+      # mix.exs again, which Preflight classifies COLD (mix_deps?) — catch that
+      # regression at the bump commit. Note this is about the BUMP CARRIER and
+      # is untouched by issue 2057, which froze a DIFFERENT attribute
+      # (`@otp_vsn`, the OTP app vsn) while leaving `@version` deriving.
       mix = File.read!("mix.exs")
       refute mix =~ ~r/@version\s+"\d/
       assert mix =~ "File.read!(Path.join(__DIR__, \"VERSION\"))"

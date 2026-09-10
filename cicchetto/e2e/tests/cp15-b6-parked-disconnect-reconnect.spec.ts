@@ -81,7 +81,23 @@ test.afterEach(async () => {
   await settleNetworkAutojoin(vjt.token, NETWORK_SLUG, SEED_CHANNEL, specNick());
 });
 
-test("CP19 T32 — /disconnect parks network + redirects to Home; Reconnect ungreys + autojoin restores channel", async ({
+// The title says LEAVES/RETURNS, not "ungreys": under issue 1985 the section
+// disappears rather than greying, and the old title asserted in prose what the
+// body no longer asserts in code. A test title is read as documentation by
+// everyone who never opens the body.
+//
+// It also carries NO regex metacharacter, and that is deliberate. `--grep` is
+// a REGEX, so the previous title could not select itself: it contained
+// `network + redirects`, where `+` quantifies the preceding SPACE, so the
+// pattern demanded two spaces the title does not have. Measured with the JS
+// RegExp engine Playwright uses — `new RegExp(oldTitle).test(oldTitle)` is
+// FALSE, while it is TRUE for this one. A handle that cannot match its own
+// test collects zero tests, and zero tests reports as green.
+//
+// The short, safe handle is `--grep "CP19 T32"`: it is unique among e2e titles
+// (the other CP19 T32 mentions are cic source comments and vitest describes,
+// which Playwright never collects).
+test("CP19 T32 — /disconnect parks network and redirects to Home; the sidebar section leaves and returns un-greyed on Reconnect", async ({
   page,
 }) => {
   const vjt = specUser();

@@ -52264,3 +52264,93 @@ icon badge and the `document.title` mirror; the in-app sidebar counters were
 not audited. `installNotificationDismiss` being non-idempotent is fine — the
 sibling `installPushTargetListener` is equally so, `main.tsx` calls each once,
 and the sweep is idempotent regardless.
+<!-- entry #2064 -->
+
+---
+
+## 2026-09-10 — issue 2064: three more blind windows, and the harness this log asked for is the wrong shape
+
+The entry above closed by naming four test files that attach to
+`[:grappa, :repo, :query]` with no filter at all, and by saying that "the shape
+they share argues for one test-support harness rather than four one-line
+patches." Three of those four are cured here — one line per attach site, no
+harness. This entry records why that sentence is withdrawn, and one thing both
+it and the issue got wrong about the mechanism.
+
+### The mechanism is the GLOBAL attach, not the shared sandbox
+
+The 2060 entry and issue 2064's body both attribute the leak to `async: false`
+putting the Ecto sandbox in SHARED mode, so a stranger's query runs on the
+test's own connection. That is true of two of the three files, and it is not
+the mechanism. `WindowCountsTest` is `async: true` — it owns its connection and
+no stranger can borrow it — and its counter is contaminated all the same,
+because `:telemetry.attach/4` is VM-global: the handler fires for every emitter
+in the node, whatever connection, whatever sandbox owner, whatever test the
+query belongs to. Shared mode decides who may USE the connection; it decides
+nothing about who is HEARD. Under `async: true` the strangers are just the
+other async tests running concurrently.
+
+That distinction is what a later reader needs. "Make the file `async: false`"
+is not a cure for this class, and an `async: true` file is not exempt from it.
+
+### Measured, two-sided
+
+The bench: one ambient stranger injected inside each helper, before the subject
+runs — a bare `spawn`ed process (so no `$callers`, the shape of a sweeper or a
+`Session.Server`), allowed on the sandbox, running
+`Repo.transaction(fn -> Repo.query!("SELECT 1") end)`. Built, measured, and
+removed; it is in no commit.
+
+| state | failures |
+|---|---|
+| before any change, no stranger | 0 / 232 tests |
+| blind counter + stranger | **8** — `WindowCountsTest` 2, `ScrollbackTest` 5, `NickMigrationTest` 1 |
+| `self() == test_pid` + stranger | 0 |
+| `self() == test_pid`, stranger removed | 0 / 232 tests |
+
+So each file still carries a live positive control inside its own asserts: the
+predicate keeps exactly the work the pinned numbers describe, and blinding it
+again turns eight of them red.
+
+Issue 2064's table reports `ScrollbackTest` at 6, not 5. Six tests reach that
+file's two helpers; the sixth is the `rename_dm_peer` plan test, which picks
+its statement out of the captured list by CONTENT (`Enum.find` on an
+`UPDATE ... "dm_with" =`) rather than by position, so an added stranger cannot
+displace it. Whether the earlier bench differed in shape or in injection point
+is unknown; 5 is what this instrument measures and it is not offered as a
+refutation of 6.
+
+### Why one line each, and not the harness
+
+Four attach sites, not three — `ScrollbackTest` has a plural twin
+(`capture_queries/1`) beside `capture_one_query/1`. What the four share is the
+PREDICATE, one expression. What they do not share is everything else: the
+payload is a bare tick, a `{sql, params}` pair, or a lowercased statement; the
+drain is a counter, an ordered list, or a reversed list; the handler id is a
+`{__MODULE__, ref}` tuple in two files and an interpolated string in the third.
+A harness would have to be parameterised on payload and on drain, which is the
+entire body — it would share the twelve lines that differ in order to share the
+one that does not. Lightweight over heavyweight (CLAUDE.md design discipline
+(4)): the mechanism would be heavier than the problem, so the mechanism would
+BE the problem. The measured cure is four guarded handler bodies.
+
+### What is not claimed
+
+`capture_queries/1` is cured for CONSISTENCY, not on a measured red — its one
+caller is content-addressed, as above. Leaving one blind attach beside a cured
+one in the same file would leave two patterns for the next caller to copy, and
+the next caller may well index by position.
+
+`NickMigrationTest`'s second oracle (`refute transaction_statements(...) == []`,
+the complement that stops the fix degrading into "never transact") asserts
+PRESENCE, so a stranger's savepoint can only mask a regression there, never
+manufacture one. The blind-counter red on its sibling proves the stranger's
+savepoint does enter the list; that the masking direction is therefore reachable
+is an inference from that measurement, not a separate measurement. It was not
+probed, deliberately: `Grappa.NickMigration`'s own moduledoc already records
+that no test can kill a mutant deleting `immediate_transaction/1` today, for a
+reason independent of this one, and the strength of that oracle is that
+module's subject rather than this issue's.
+
+`GrappaWeb.Admin.SubjectLabelsTest`, the fourth file, is untouched here — it is
+issue 2065.

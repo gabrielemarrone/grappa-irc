@@ -370,7 +370,7 @@ defmodule Grappa.Protocol do
   # alongside `@protocol_version`; the spec doubles as the bump tripwire,
   # and now that the bump is routine the tripwire is what keeps it from
   # being done half-way.
-  @spec version() :: 15
+  @spec version() :: 16
   def version, do: @protocol_version
 
   @doc """

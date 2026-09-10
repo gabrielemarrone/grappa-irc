@@ -51105,8 +51105,29 @@ so it was never inside the digest's span; and `mix grappa.gen_wire_types
 CLAUDE.md already names (it compares each artefact with its own SOURCE, so
 a route the generator does not cover is "in sync" by construction).
 
-The bump therefore remains a deliberate manual act, and `protocol_test.exs`
-is the only automatic guard on the pair. `min_protocol_version` stays at 1:
+The bump therefore remains a deliberate manual act — and this round names
+which guard actually caught it being done HALF-WAY, because it was not the
+one v15's own entry nominated. Three things could have fired:
+
+* `wire_pin --check` — fired, but only after the number had already moved,
+  and only to ask to be re-pinned. See above.
+* `protocol_test.exs` (#1973) — GREEN. It pins cic's
+  `CLIENT_PROTOCOL_VERSION` against the server's, and both had been moved to
+  16, so it had nothing to say. v15's entry called it "the ONLY automatic
+  guard standing on this change"; on this change it stood and saw nothing.
+* the `@spec version() :: 15` LITERAL — RED, at
+  `lib/grappa/protocol.ex:373`, `invalid_contract`, "success typing () :: 16
+  but the spec is () :: 15". That is the one that caught it.
+
+The literal was chosen for a Dialyzer-idiom reason (a constant-returning
+function's spec matches its success typing under `:underspecs`) and its
+comment already claimed the tripwire role as a secondary benefit. It is now
+the PRIMARY automatic guard on the pair, by measurement, which is worth
+knowing mostly because it is a strange place for a protocol invariant to
+live: it fires in the dialyzer stage, minutes after the suite is green, and
+it says nothing about the wire.
+
+`min_protocol_version` stays at 1:
 `countMessagesAfter` falls back to `{messages: count, events: 0}` when the
 pair is absent, which is exactly the pre-#2037 number in the pre-#2037
 place, so a new bundle degrades against an old server instead of breaking.

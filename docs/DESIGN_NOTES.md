@@ -52102,3 +52102,99 @@ produces that source and the ambient sweepers are its scheduled caller, but
 their cadence is 24h under `config/test.exs`, so naming one would be a guess.
 The fix does not depend on the answer: the window is closed to every emitter
 that is not this test, whoever it was.
+<!-- entry #2034 -->
+
+---
+
+## 2026-09-10 — #2034: a notification is dismissed by READING the conversation, not only by tapping it
+
+The tap half shipped with the deep-link work: `notificationclick` calls
+`event.notification.close()`. The other half never existed —
+`getNotifications()` had zero occurrences in the whole cicchetto tree, so once
+a banner was on screen nothing ever took it back. Reading a conversation in
+the app left its banners in the shade, and a later tap yanked the reader to a
+window they had caught up with minutes ago.
+
+`lib/notificationDismiss.ts` is the missing half: on every moment a
+conversation can come into view, enumerate what the registration is showing
+and close the notifications naming the focused window. No new state, no new
+server field, no bookkeeping to drift.
+
+### Matching on the URL, not on the `tag` — and it is a correctness argument
+
+The obvious shape is the one the issue proposed: `getNotifications({ tag })`
+for the active conversation's tag. It does not work, and the reason is the
+key/display split rather than taste.
+
+`getNotifications({ tag })` filters by EXACT string, so the client has to
+SPELL the tag — a second copy of `Grappa.Push.Payload`'s
+`"<slug>:<channel_or_dm_peer>"` format living in cic. For channels the copy
+would be right by luck (both sides fold). For a DM it is wrong by
+construction: the server tags with `sender` RAW (`libera:Alice`), because a
+nick's case is presentation and the payload keeps it, while the selection
+store holds the CANONICAL window nick (`alice`). A filter built from the
+selection asks for `libera:alice`, matches nothing, and closes nothing —
+silently, in exactly the case DMs make most common.
+
+So the match runs the other way: each open notification is resolved through
+its own `data.url` — the deep link it would follow if tapped — by the
+`parsePushTargetUrl` that the tap path already uses. That makes the identity
+question one question with one answer, asked in two directions.
+
+`pushTargetSelection/1` is the extraction that makes "one answer" literal.
+`routePushTarget` walks the mapping forwards (a tapped notification names the
+window to focus); the sweep walks it backwards (an open notification is asked
+whether it names the window already focused). Both go through the same
+`canonicalQueryNick` step, so the tap and the dismissal cannot disagree about
+which window a notification belongs to. Channels need no step there —
+`setSelectedChannel` folds the channel KEY itself (#1396) — which is precisely
+why the DM arm is the one carrying a test.
+
+**Presence banners fall out for free, and that is the intended reading.**
+`build_presence/3` deep-links to the same `?network=&channel=` shape, so
+opening a peer's query also clears their online/offline banner. A tag filter
+would have had to be taught this; matching on the window means the rule is
+stated once — close what the reader is looking at — and both banner kinds obey
+it.
+
+### Two triggers, and one API choice
+
+The reactive arm is `isDocumentVisible()` crossed with `selectedChannel()`:
+that pair IS "the conversation is in view", covering both the tab coming back
+and the reader switching windows while it is already in front of them.
+`pageshow` is the second trigger for the reason `resumeProbe.ts` and
+`DiagFloat.tsx` already carry it — an iOS PWA frequently thaws without
+reporting a visibility transition, so the reactive arm never re-runs. The
+sweep is idempotent, so the overlap costs nothing.
+
+`getRegistration()`, not `serviceWorker.ready` (which `push.ts` uses).
+`ready` NEVER settles when no service worker is registered, and this runs on
+every focus flip and every window switch rather than once at opt-in — a
+browser with SW disabled would accumulate one dangling promise per sweep for
+the life of the session. `getRegistration()` resolves to `undefined` and the
+sweep ends.
+
+The sweep does not enumerate at all while the document is hidden. Not an
+optimisation: a hidden tab is exactly where a notification is still doing its
+job, so "visible" is a precondition of the whole operation rather than a
+filter applied to its results.
+
+**No e2e, and the ceiling is the harness rather than the effort.**
+`self.registration.showNotification(...)` rejects under headless Playwright
+with "No notification permission has been granted for this origin" even after
+`context.grantPermissions(["notifications"])` — the finding `e2e/fixtures/
+pushTap.ts` already documents for the TAP path, which is why that path is
+driven through the cold deep-link and a replayed `navigate` message instead of
+a real `NotificationEvent`. A dismissal test needs a notification that EXISTS,
+so it hits the same wall one step earlier: with nothing shown,
+`getNotifications()` returns an empty list and the sweep would pass while
+closing nothing. vitest is therefore the ceiling here, and the spec pays for it
+by asserting the DM canonicalisation directly.
+
+_Not covered: a notification that arrives WHILE its conversation is open and
+visible. `shouldSuppressPush()` already gates that toast at the service
+worker, so the case is handled one layer up; wiring the sweep into the push
+handler as well would add a trigger for a state that should not occur. A
+notification with no usable `data.url` is left alone rather than closed on a
+guess — unrecognised is never fatal, and leaving a banner up is the harmless
+direction of that error._

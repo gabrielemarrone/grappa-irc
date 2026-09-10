@@ -1,5 +1,6 @@
 import { type ChannelKey, decodeChannelKey } from "./channelKey";
-import { channelsBySlug } from "./networks";
+import { isNetworkParked } from "./networkParked";
+import { channelsBySlug, networkBySlug } from "./networks";
 import { queryWindowsByNetwork } from "./queryWindows";
 import { isMobile } from "./theme";
 import { type WindowState, windowStateByChannel } from "./windowState";
@@ -115,5 +116,40 @@ export function pseudoChannelsForNetwork(slug: string, networkId: number): Pseud
 // two cannot disagree.
 export function navPseudoChannelsForNetwork(slug: string, networkId: number): PseudoRow[] {
   if (isMobile()) return [];
+  // issue 1985 — a parked network draws no pseudo-row either, because it
+  // draws no row at all. See `navDrawsNetwork` below.
+  if (!navDrawsNetwork(slug)) return [];
   return pseudoChannelsForNetwork(slug, networkId);
+}
+
+// issue 1985 — does the nav of THIS form factor draw ANY row for this network?
+//
+// #402 answered "which ROWS does the nav draw" and the archive subtracts
+// exactly that. The parked ruling asks the question one level up: the desktop
+// Sidebar drops a parked network at its ONE `<For>`, and the header, the
+// channels, the queries and the pseudo-rows all render INSIDE that loop, so
+// the whole network stops being drawn — not a subset of its rows. A filter
+// that keeps subtracting them then leaves one window with ZERO surfaces,
+// which is #402's bug with a bigger blast radius.
+//
+// It lives HERE, next to `navPseudoChannelsForNetwork`, because this module's
+// job is precisely reconciling "which nav exists" with "what it draws", and
+// the archive already consumes that reconciliation. A copy of the rule in
+// `archive.ts` would be a second statement of the parked policy — the thing
+// `lib/networkParked.ts` was extracted to prevent.
+//
+// MOBILE IS TRUE, and it is measured rather than assumed: `BottomBar.tsx`
+// iterates the RAW `networks()` store and renders each network's channels and
+// queries with no state filter of its own (`:138`, `:174`, `:215`), so on a
+// phone a parked network's rows are still on screen and the archive must
+// still subtract them. The sidebar filter this issue adds is desktop-only.
+// (The pseudo-row leg is separately empty on mobile since #902 — that is the
+// early return above, a different question with the same answer here.)
+//
+// `failed` and `failing` draw normally: a failed network keeps its greyed row
+// so the operator must see it, and a failing one is retrying on its own
+// (#1675). The asymmetry is the product decision — `lib/networkParked.ts`.
+export function navDrawsNetwork(slug: string): boolean {
+  if (isMobile()) return true;
+  return !isNetworkParked(networkBySlug(slug));
 }

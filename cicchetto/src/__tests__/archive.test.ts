@@ -22,6 +22,10 @@ vi.mock("../lib/networks", () => ({
   // through this map, so the mock has to carry it.
   networkIdBySlug: () => undefined,
   channelsBySlug: () => ({}),
+  // issue 1985 — `navDrawsNetwork` resolves the network here to ask whether
+  // it is parked. Unresolved is not parked, so the default keeps every case
+  // below on the pre-1985 subtraction; the parked case mocks it explicitly.
+  networkBySlug: () => undefined,
 }));
 
 vi.mock("../lib/queryWindows", () => ({
@@ -188,6 +192,10 @@ describe("archive.visibleArchiveForNetwork", () => {
 
   it("filters out archive channels currently in channelsBySlug for the slug", async () => {
     vi.doMock("../lib/networks", () => ({
+      // issue 1985 — a network the store cannot resolve is not parked, so
+      // `navDrawsNetwork` says the nav draws it and the subtraction below is
+      // the pre-1985 one. These cases are all about that subtraction.
+      networkBySlug: () => undefined,
       channelsBySlug: () => ({
         freenode: [{ name: "#sniffo", joined: true, source: "joined" }],
       }),
@@ -215,6 +223,10 @@ describe("archive.visibleArchiveForNetwork", () => {
 
   it("filters out archive queries currently in queryWindowsByNetwork for the network", async () => {
     vi.doMock("../lib/networks", () => ({
+      // issue 1985 — a network the store cannot resolve is not parked, so
+      // `navDrawsNetwork` says the nav draws it and the subtraction below is
+      // the pre-1985 one. These cases are all about that subtraction.
+      networkBySlug: () => undefined,
       channelsBySlug: () => ({ freenode: [] }),
     }));
     vi.doMock("../lib/queryWindows", () => ({
@@ -247,6 +259,10 @@ describe("archive.visibleArchiveForNetwork", () => {
   // under ASCII casemapping (`normalizeNick`, A-Z only) so the active window releases it.
   it("filters out an archived query whose casing folds to an active window (#372)", async () => {
     vi.doMock("../lib/networks", () => ({
+      // issue 1985 — a network the store cannot resolve is not parked, so
+      // `navDrawsNetwork` says the nav draws it and the subtraction below is
+      // the pre-1985 one. These cases are all about that subtraction.
+      networkBySlug: () => undefined,
       channelsBySlug: () => ({ freenode: [] }),
     }));
     vi.doMock("../lib/queryWindows", () => ({
@@ -282,6 +298,10 @@ describe("archive.visibleArchiveForNetwork", () => {
   // windowState key → this filter releases → archive shows the row.
   it("filters out archive entries whose target is in windowStateByChannel for the slug", async () => {
     vi.doMock("../lib/networks", () => ({
+      // issue 1985 — a network the store cannot resolve is not parked, so
+      // `navDrawsNetwork` says the nav draws it and the subtraction below is
+      // the pre-1985 one. These cases are all about that subtraction.
+      networkBySlug: () => undefined,
       channelsBySlug: () => ({ freenode: [] }),
     }));
     vi.doMock("../lib/queryWindows", () => ({
@@ -324,6 +344,10 @@ describe("archive.visibleArchiveForNetwork", () => {
   // renders 0 for the whole assert window).
   it("does NOT hide an archived channel whose windowState is a stale :joined (re-PART transient)", async () => {
     vi.doMock("../lib/networks", () => ({
+      // issue 1985 — a network the store cannot resolve is not parked, so
+      // `navDrawsNetwork` says the nav draws it and the subtraction below is
+      // the pre-1985 one. These cases are all about that subtraction.
+      networkBySlug: () => undefined,
       // channels_changed already dropped #bofh from the live set.
       channelsBySlug: () => ({ freenode: [] }),
     }));
@@ -356,6 +380,10 @@ describe("archive.visibleArchiveForNetwork", () => {
   // by slug via decodeChannelKey.
   it("does NOT filter when the windowStateByChannel key belongs to a different slug", async () => {
     vi.doMock("../lib/networks", () => ({
+      // issue 1985 — a network the store cannot resolve is not parked, so
+      // `navDrawsNetwork` says the nav draws it and the subtraction below is
+      // the pre-1985 one. These cases are all about that subtraction.
+      networkBySlug: () => undefined,
       channelsBySlug: () => ({ freenode: [] }),
     }));
     vi.doMock("../lib/queryWindows", () => ({
@@ -381,6 +409,78 @@ describe("archive.visibleArchiveForNetwork", () => {
   it("returns empty array when the slug has never been loaded", async () => {
     const archive = await import("../lib/archive");
     expect(archive.visibleArchiveForNetwork("unloaded", 99)).toEqual([]);
+  });
+
+  // issue 1985 — a PARKED network draws no sidebar row of ANY kind (the ONE
+  // `<For>` in `Sidebar.tsx` drops the whole network), so this filter must
+  // subtract nothing for it: the archive is the only surface its windows have
+  // left, and that is what vjt's ruling ("the history is reachable from the
+  // archive") rests on.
+  //
+  // The channel leg is NOT hypothetical and it is not the pseudo-row leg.
+  // `GET /networks/:slug/channels` returns the union of the credential's
+  // AUTOJOIN list and the live session's channels (`ChannelsController.index`
+  // → `Networks.merge_channel_sources/2`); a parked network has no session, so
+  // the union is exactly the autojoin list, with `joined: false`. That list
+  // lands in `channelsBySlug` and this filter subtracts it. Before the sidebar
+  // filter those rows were drawn (greyed) — after it, subtracting them leaves
+  // one window and ZERO surfaces.
+  it("subtracts NOTHING for a parked network — its autojoin channels keep their archive row", async () => {
+    vi.doMock("../lib/networks", () => ({
+      networkIdBySlug: () => undefined,
+      // What the REST channel list returns for a parked network: the autojoin
+      // set, never joined because there is no session to join it.
+      channelsBySlug: () => ({ freenode: [{ name: "#autojoin", joined: false }] }),
+      networkBySlug: (slug: string) =>
+        slug === "freenode" ? { kind: "user", id: 1, slug, connection_state: "parked" } : undefined,
+    }));
+    vi.doMock("../lib/queryWindows", () => ({ queryWindowsByNetwork: () => ({}) }));
+    vi.doMock("../lib/windowState", () => ({
+      windowStateByChannel: () => ({ "freenode #kicked-from": "kicked" }),
+    }));
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.listArchive).mockResolvedValue([
+      { target: "#autojoin", kind: "channel", last_activity: 300 },
+      { target: "#kicked-from", kind: "channel", last_activity: 200 },
+    ]);
+
+    const archive = await import("../lib/archive");
+    await archive.loadArchive("freenode");
+
+    expect(archive.visibleArchiveForNetwork("freenode", 1)).toEqual([
+      { target: "#autojoin", kind: "channel", last_activity: 300 },
+      { target: "#kicked-from", kind: "channel", last_activity: 200 },
+    ]);
+  });
+
+  // The control that keeps the release narrow: a FAILED network keeps its
+  // greyed sidebar row, so its live rows are still drawn and must still be
+  // subtracted. If this one ever turns, the parked release has been widened
+  // into "any non-connected state" — the generalisation networkParked.ts
+  // exists to refuse.
+  it("still subtracts a FAILED network's live channels (its greyed row is drawn)", async () => {
+    vi.doMock("../lib/networks", () => ({
+      networkIdBySlug: () => undefined,
+      channelsBySlug: () => ({ freenode: [{ name: "#autojoin", joined: false }] }),
+      networkBySlug: (slug: string) =>
+        slug === "freenode" ? { kind: "user", id: 1, slug, connection_state: "failed" } : undefined,
+    }));
+    vi.doMock("../lib/queryWindows", () => ({ queryWindowsByNetwork: () => ({}) }));
+    vi.doMock("../lib/windowState", () => ({ windowStateByChannel: () => ({}) }));
+    localStorage.setItem("grappa-token", "tok");
+    const api = await import("../lib/api");
+    vi.mocked(api.listArchive).mockResolvedValue([
+      { target: "#autojoin", kind: "channel", last_activity: 300 },
+      { target: "#old-chan", kind: "channel", last_activity: 100 },
+    ]);
+
+    const archive = await import("../lib/archive");
+    await archive.loadArchive("freenode");
+
+    expect(archive.visibleArchiveForNetwork("freenode", 1)).toEqual([
+      { target: "#old-chan", kind: "channel", last_activity: 100 },
+    ]);
   });
 });
 

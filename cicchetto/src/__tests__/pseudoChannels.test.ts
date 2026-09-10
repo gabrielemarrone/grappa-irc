@@ -23,6 +23,11 @@ const state = vi.hoisted(() => ({
   cbs: undefined as Record<string, { name: string; joined: boolean }[]> | undefined,
   qw: {} as Record<number, { targetNick: string }[]>,
   mobile: false,
+  // issue 1985 — the network's own state, read through the REAL
+  // `isNetworkParked`: this suite mocks `lib/networks` (a resource
+  // singleton) but never the predicate, so the rule under test is the
+  // shipped one and not a mirror of itself.
+  connectionState: "connected" as string,
 }));
 
 vi.mock("../lib/windowState", () => ({ windowStateByChannel: () => state.ws }));
@@ -31,6 +36,10 @@ vi.mock("../lib/networks", () => ({
   // through this map, so the mock has to carry it.
   networkIdBySlug: () => undefined,
   channelsBySlug: () => state.cbs,
+  networkBySlug: (slug: string) =>
+    slug === "freenode"
+      ? { kind: "user", id: 1, slug, connection_state: state.connectionState }
+      : undefined,
 }));
 vi.mock("../lib/queryWindows", () => ({ queryWindowsByNetwork: () => state.qw }));
 // The form factor is an environment boundary (matchMedia); mocking the
@@ -45,6 +54,7 @@ beforeEach(() => {
   state.cbs = {};
   state.qw = {};
   state.mobile = false;
+  state.connectionState = "connected";
 });
 
 describe("pseudoChannelsForNetwork", () => {
@@ -156,5 +166,37 @@ describe("navPseudoChannelsForNetwork", () => {
     state.ws = { [channelKey("freenode", "#invited")]: "invited" };
     state.mobile = true;
     expect(navPseudoChannelsForNetwork("freenode", 1)).toEqual([]);
+  });
+
+  // issue 1985 — the same #402 rule against the new surface map. A parked
+  // network is dropped at the ONE `<For>` in `Sidebar.tsx`, so the desktop nav
+  // draws none of its rows — pseudo-rows included, since they render INSIDE
+  // that loop. The archive subtracts what this function returns, so leaving
+  // the projection intact here would subtract rows nothing draws: one window,
+  // ZERO surfaces, which is exactly the bug #402 was filed for.
+  it("draws nothing for a parked network — the Sidebar no longer renders it at all", () => {
+    everyDrawnState();
+    state.mobile = false;
+    state.connectionState = "parked";
+    expect(navPseudoChannelsForNetwork("freenode", 1)).toEqual([]);
+  });
+
+  // The asymmetry is the product decision (CLAUDE.md #1675 / networkParked.ts):
+  // a FAILED network keeps its greyed row in place, so its pseudo-rows are
+  // still drawn and must still be subtracted. A "any non-connected state"
+  // generalisation would silently turn this one.
+  it("still draws a FAILED network's rows — that network keeps its greyed row", () => {
+    everyDrawnState();
+    state.mobile = false;
+    state.connectionState = "failed";
+    expect(navPseudoChannelsForNetwork("freenode", 1)).toHaveLength(4);
+  });
+
+  // Same for `failing` (#1675): it is retrying on its own and has a way back.
+  it("still draws a FAILING network's rows", () => {
+    everyDrawnState();
+    state.mobile = false;
+    state.connectionState = "failing";
+    expect(navPseudoChannelsForNetwork("freenode", 1)).toHaveLength(4);
   });
 });

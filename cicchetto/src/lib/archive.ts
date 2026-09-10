@@ -5,7 +5,7 @@ import { identityScopedStore } from "./identityScopedStore";
 import { casemappingForNetwork } from "./isupport";
 import { channelsBySlug } from "./networks";
 import { normalizeNick } from "./nickEquals";
-import { navPseudoChannelsForNetwork } from "./pseudoChannels";
+import { navDrawsNetwork, navPseudoChannelsForNetwork } from "./pseudoChannels";
 import { queryWindowsByNetwork } from "./queryWindows";
 
 // Per-network archive store. Source-of-truth for cic's per-network
@@ -153,6 +153,23 @@ export const setArchiveModalOpen = exports_.setArchiveModalOpen;
 export function visibleArchiveForNetwork(slug: string, networkId: number): ArchiveEntry[] {
   const entries = archivedBySlug()[slug] ?? [];
   if (entries.length === 0) return entries;
+  // issue 1985 — the premise stated above, applied whole: subtract what the
+  // nav draws. A parked network is dropped at the ONE `<For>` in the desktop
+  // Sidebar, so the nav draws NONE of its rows and the correct subtraction is
+  // the empty set — for its live channels too, not just its pseudo-rows.
+  //
+  // Measured, because the channel leg reads like it could not happen:
+  // `GET /networks/:slug/channels` unions the credential's AUTOJOIN list with
+  // the live session's channels (`ChannelsController.index` →
+  // `Networks.merge_channel_sources/2`), and a parked network has no session —
+  // so `channelsBySlug` still carries every autojoin channel, at
+  // `joined: false`. Subtracting those while no sidebar row draws them hid
+  // exactly the history vjt's ruling says the archive is the door to.
+  //
+  // The predicate is `navDrawsNetwork` and not a local `isNetworkParked`
+  // call: the form-factor half (mobile still draws these rows) belongs with
+  // the rest of the nav reconciliation, not copied in here.
+  if (!navDrawsNetwork(slug)) return entries;
   // #372: fold every comparison key with `normalizeNick` — the single client
   // mirror of the server fold. A service that replied as `DebugServ` archives
   // under that casing while the open window is `debugserv`; a raw `Set.has`

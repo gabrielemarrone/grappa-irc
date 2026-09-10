@@ -2,6 +2,8 @@ import { batch, createSignal } from "solid-js";
 import {
   sendMessage as apiSendMessage,
   countMessagesAfter,
+  type GapProbe,
+  isContentKind,
   listMessages,
   listMessagesAfter,
   type MessageRelay,
@@ -212,6 +214,17 @@ type CappedRing = {
   // Unread rows (id > cursor) held BEFORE the drop — the banner's count the
   // first time the bound bites. Afterwards the caller accumulates.
   unreadHeld: number;
+  // #2037 — the same two figures restricted to `@content_kinds`. The banner's
+  // number is the MESSAGES bucket now, so accumulating raw row counts into it
+  // would mix units: 200 evicted JOINs would inflate a figure the sidebar's
+  // bold pill reports without them.
+  //
+  // The ARMING condition stays on the raw `unreadDropped`, deliberately. What
+  // arms far-behind is "a row at/after the cursor left the store", which is
+  // true of a JOIN too — the divider can no longer be placed either way. Only
+  // the DISPLAYED quantity is content-only.
+  contentDropped: number;
+  contentHeld: number;
   cursor: number | null;
 };
 
@@ -235,6 +248,10 @@ export const capScrollbackRing = (key: ChannelKey, rows: ScrollbackMessage[]): C
   // one row early (see the two invariants restated below).
   const firstUnread = cursor === null ? -1 : rows.findIndex((m) => m.id > cursor);
   const unreadCount = firstUnread === -1 ? 0 : rows.length - firstUnread;
+  // #2037 — the content-only twins, over the SAME slice the raw counts use so
+  // the two can never describe different regions.
+  const unreadRows = firstUnread === -1 ? [] : rows.slice(firstUnread);
+  const contentCount = unreadRows.filter((m) => isContentKind(m.kind)).length;
 
   // #1229 — the protected region has a ceiling of its own, applied BEFORE the
   // ring cap because it can bite while the total is still under it (900 unread
@@ -291,6 +308,8 @@ export const capScrollbackRing = (key: ChannelKey, rows: ScrollbackMessage[]): C
       rows: rows.slice(rows.length - UNREAD_RETENTION_CAP),
       unreadDropped: overflowUnread,
       unreadHeld: unreadCount,
+      contentDropped: contentCount - keptContentCount(rows, UNREAD_RETENTION_CAP),
+      contentHeld: contentCount,
       cursor,
     };
   }
@@ -306,9 +325,17 @@ export const capScrollbackRing = (key: ChannelKey, rows: ScrollbackMessage[]): C
     rows: dropCount > 0 ? rows.slice(dropCount) : rows,
     unreadDropped: 0,
     unreadHeld: unreadCount,
+    contentDropped: 0,
+    contentHeld: contentCount,
     cursor,
   };
 };
+
+// #2037 — content rows surviving inside the kept tail slice. Subtracting this
+// from the held count gives what the bite actually took, in the same unit the
+// banner reports.
+const keptContentCount = (rows: ScrollbackMessage[], keep: number): number =>
+  rows.slice(Math.max(0, rows.length - keep)).filter((m) => isContentKind(m.kind)).length;
 
 // #788 — how THE identity rule applies to this module. The predicate itself,
 // and why a continuation that outlived its identity must do nothing further
@@ -440,8 +467,17 @@ const exports = identityScopedStore((onIdentityChange) => {
   // `anchorAtTail`), cleared when the operator jumps back into that region or
   // the window is purged.
   //
-  //   * `missed` — the server's true row count after the anchor, at the
-  //     moment of the decision. What the jump affordance shows.
+  //   * `missed` — the MESSAGES the operator has not read after the anchor
+  //     (`@content_kinds`), at the moment of the decision. What the jump
+  //     affordance shows. #2037 narrowed it from the raw row count: the raw
+  //     figure is still what decides `isFarBehind`, but it is no longer
+  //     rendered, because the bar was reporting a quantity nothing else on
+  //     screen shared. This is now the SAME number the sidebar's bold pill
+  //     carries — and literally so: `selection.ts` reads THIS field for a
+  //     far-behind key rather than the seed, so the two cannot drift.
+  //   * `events` — its sibling bucket. Not rendered by the bar; carried so
+  //     the sidebar's faint pill has one origin with the bold one (#2037 B
+  //     puts it behind an opt-in).
   //   * `resumeFrom` — the anchor itself: the newest row the pane held before
   //     it gave up on contiguity (the read cursor on a cold open, the last
   //     backfilled row on a reconnect). Where the jump lands.
@@ -453,7 +489,7 @@ const exports = identityScopedStore((onIdentityChange) => {
   // in-pane unread divider (whose count would otherwise describe the loaded
   // rows rather than the unread region).
   const [farBehindByChannel, setFarBehindByChannel] = createSignal<
-    Record<ChannelKey, { missed: number; resumeFrom: number }>
+    Record<ChannelKey, { missed: number; events: number; resumeFrom: number }>
   >({});
 
   // #947 — "the pane's unread region is TRUNCATED, and here is what the server
@@ -467,9 +503,13 @@ const exports = identityScopedStore((onIdentityChange) => {
   //
   //   * `count` — the same server measurement the jump affordance advertised
   //     (`far.missed`). Deliberately the SAME number and not a second one:
-  //     it counts rows the divider's predicate would exclude (own-presence,
-  //     operator echoes), so it can run slightly high, and the alternative is
-  //     showing the operator a third figure for one question.
+  //     the alternative is showing the operator a third figure for one
+  //     question, which is the whole of #2037.
+  //     #2037 also narrowed what that number IS. It used to be the raw row
+  //     count, which ran high against the divider's predicate (own-presence,
+  //     operator echoes) and was tolerated for it; it is now the MESSAGES
+  //     bucket, own-authored already excluded server-side, so the two agree
+  //     on the same population instead of merely being one figure.
   //   * `at` — the cursor it was measured after. The record is spent only
   //     while the frozen divider is still anchored there, which is what makes
   //     it self-invalidating rather than a cache somebody has to remember to
@@ -615,6 +655,8 @@ const exports = identityScopedStore((onIdentityChange) => {
     // no longer place.
     let unreadDropped = 0;
     let unreadHeld = 0;
+    let contentDropped = 0;
+    let contentHeld = 0;
     let prunedCursor = 0;
     // #1229 — the rows and the far-behind flag are ONE state transition and must
     // reach consumers in ONE flush. Published as two writes, Solid runs every
@@ -650,6 +692,8 @@ const exports = identityScopedStore((onIdentityChange) => {
         evicted = capped.rows.length < next.length;
         unreadDropped = capped.unreadDropped;
         unreadHeld = capped.unreadHeld;
+        contentDropped = capped.contentDropped;
+        contentHeld = capped.contentHeld;
         prunedCursor = capped.cursor ?? 0;
         return { ...prev, [key]: capped.rows };
       });
@@ -669,7 +713,15 @@ const exports = identityScopedStore((onIdentityChange) => {
           return {
             ...prev,
             [key]: {
-              missed: current === undefined ? unreadHeld : current.missed + unreadDropped,
+              // #2037 — accumulates in the CONTENT unit, the same one the
+              // probe writes and the pill reads. Arming still keys on the raw
+              // `unreadDropped` above: a JOIN leaving the store unplaces the
+              // divider exactly as a message does.
+              missed: current === undefined ? contentHeld : current.missed + contentDropped,
+              events:
+                current === undefined
+                  ? unreadHeld - contentHeld
+                  : current.events + (unreadDropped - contentDropped),
               resumeFrom: prunedCursor,
             },
           };
@@ -771,7 +823,7 @@ const exports = identityScopedStore((onIdentityChange) => {
     slug: string,
     name: string,
     anchor: number,
-  ): Promise<number | null> => {
+  ): Promise<GapProbe | null> => {
     try {
       return await countMessagesAfter(t, slug, name, anchor);
     } catch (err) {
@@ -806,6 +858,7 @@ const exports = identityScopedStore((onIdentityChange) => {
     slug: string,
     name: string,
     missed: number,
+    events: number,
     resumeFrom: number,
   ): Promise<void> => {
     const key = channelKey(slug, name);
@@ -819,7 +872,7 @@ const exports = identityScopedStore((onIdentityChange) => {
     });
     for (const msg of rows) recordSeen(key, msg);
     loadMoreExhausted.delete(key);
-    setFarBehindByChannel((prev) => ({ ...prev, [key]: { missed, resumeFrom } }));
+    setFarBehindByChannel((prev) => ({ ...prev, [key]: { missed, events, resumeFrom } }));
   };
 
   // #693 — the DECISION is measured at the anchor the resume was about to use
@@ -846,16 +899,19 @@ const exports = identityScopedStore((onIdentityChange) => {
     slug: string,
     name: string,
     anchor: number,
-    missedAtAnchor: number,
-  ): Promise<{ missed: number; resumeFrom: number }> => {
+    probeAtAnchor: GapProbe,
+  ): Promise<{ missed: number; events: number; resumeFrom: number }> => {
+    const atAnchor = {
+      missed: probeAtAnchor.messages,
+      events: probeAtAnchor.events,
+      resumeFrom: anchor,
+    };
     const cursor = getReadCursor(slug, name);
-    if (cursor === null || cursor >= anchor) {
-      return { missed: missedAtAnchor, resumeFrom: anchor };
-    }
-    const missed = await probeGap(t, slug, name, cursor);
-    return missed === null
-      ? { missed: missedAtAnchor, resumeFrom: anchor }
-      : { missed, resumeFrom: cursor };
+    if (cursor === null || cursor >= anchor) return atAnchor;
+    const probe = await probeGap(t, slug, name, cursor);
+    return probe === null
+      ? atAnchor
+      : { missed: probe.messages, events: probe.events, resumeFrom: cursor };
   };
 
   const clearFarBehind = (key: ChannelKey): void => {
@@ -1052,10 +1108,13 @@ const exports = identityScopedStore((onIdentityChange) => {
         // The probe is ONE extra small GET per cursor-present channel-open,
         // behind the load-once gate, on a human click; the pane is empty here
         // so `anchorAtTail` has nothing to discard.
-        const gap = await probeGap(t, slug, name, cursor);
+        const probe = await probeGap(t, slug, name, cursor);
         if (identityMoved(t)) return;
-        if (gap !== null && isFarBehind(gap)) {
-          await anchorAtTail(t, slug, name, gap, cursor);
+        // #2037 — the THRESHOLD reads `probe.gap` (raw rows, the #693
+        // question: is contiguous paging achievable) and the DISPLAY reads
+        // `probe.messages`. Two questions, two fields, one round trip.
+        if (probe !== null && isFarBehind(probe.gap)) {
+          await anchorAtTail(t, slug, name, probe.messages, probe.events, cursor);
         } else {
           const [afterPage, beforePage] = await Promise.all([
             listMessagesAfter(t, slug, name, cursor, PAGE_LIMIT),
@@ -1473,12 +1532,12 @@ const exports = identityScopedStore((onIdentityChange) => {
         // ordinary short-page reconnect, which is nearly all of them.
         const last = page[page.length - 1];
         const anchor = last ? last.id : cursor;
-        const gap = await probeGap(t, slug, name, anchor);
+        const probe = await probeGap(t, slug, name, anchor);
         if (identityMoved(t)) return;
-        if (gap !== null && isFarBehind(gap)) {
-          const target = await resolveJumpTarget(t, slug, name, anchor, gap);
+        if (probe !== null && isFarBehind(probe.gap)) {
+          const target = await resolveJumpTarget(t, slug, name, anchor, probe);
           if (identityMoved(t)) return;
-          await anchorAtTail(t, slug, name, target.missed, target.resumeFrom);
+          await anchorAtTail(t, slug, name, target.missed, target.events, target.resumeFrom);
         }
       }
     } catch (err) {

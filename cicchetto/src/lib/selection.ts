@@ -440,10 +440,29 @@ const exports = identityScopedStore((onIdentityChange) => {
       result[key] = { messages: seed.messages, events: seed.events };
     }
 
+    const farBehind = farBehindByChannel();
+
+    // #2037 — a far-behind window reads its counts from the far-behind entry,
+    // not from the seed. Both are `count_after_split/6` at the read cursor, so
+    // this is not a change of definition; what it buys is that the bar and the
+    // pill become the SAME VARIABLE rather than two values that happen to
+    // agree. #2037 measured what "happen to agree" is worth: the bar was
+    // rendering a raw row count against a split badge and nothing in the tree
+    // could notice.
+    //
+    // It is also the fresher of the two. The seed is written by `/me` and by
+    // the join reply and by nothing else — the per-message `window_counts`
+    // push carries `messages`/`events` but cic ignores them (#239, they are
+    // client-derived for the presence filter), and a far-behind key skips
+    // client derivation by design. So the seed for such a window is frozen at
+    // login; the probe was taken when the pane opened.
+    for (const [rawKey, far] of Object.entries(farBehind)) {
+      result[rawKey as ChannelKey] = { messages: far.missed, events: far.events };
+    }
+
     // Locally-hydrated channels — count rows past the cursor by kind.
     // Override any seed entry: local truth wins because the seed is
     // a sync-time snapshot that may be stale by the time we render.
-    const farBehind = farBehindByChannel();
     for (const [rawKey, rows] of Object.entries(sb)) {
       const key = rawKey as ChannelKey;
       const decoded = decodeChannelKey(key);

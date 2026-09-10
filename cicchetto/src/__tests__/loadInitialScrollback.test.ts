@@ -19,7 +19,14 @@
 // skip-empty-page.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ScrollbackMessage } from "../lib/api";
+import type { GapProbe, ScrollbackMessage } from "../lib/api";
+
+// #2037 — the gap probe returns three numbers now: `gap` (raw rows, the
+// threshold's input) and the `{messages, events}` display split. These specs
+// were written about the gap, so the helper reports a window whose unread is
+// all content — the messages count then equals the gap and every assertion
+// below keeps meaning exactly what it meant.
+const probe = (gap: number, events = 0) => ({ gap, messages: gap - events, events });
 
 // Mock socket so importing scrollback's transitive graph doesn't open a
 // real WebSocket against jsdom's about:blank base URL. Mirrors
@@ -54,7 +61,7 @@ vi.mock("../lib/auth", () => ({
 // exists) returns a server-shaped ASC page.
 const listMessagesSpy = vi.fn<(...a: unknown[]) => Promise<ScrollbackMessage[]>>();
 const listMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<ScrollbackMessage[]>>();
-const countMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<number>>();
+const countMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<GapProbe>>();
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
   return {
@@ -100,7 +107,7 @@ describe("loadInitialScrollback cursor baseline", () => {
     listMessagesAfterSpy.mockResolvedValue([]);
     countMessagesAfterSpy.mockReset();
     // Default: a small gap, i.e. the pre-#693 contiguous resume.
-    countMessagesAfterSpy.mockResolvedValue(0);
+    countMessagesAfterSpy.mockResolvedValue(probe(0));
     mockTokenValue = "test-bearer";
   });
 
@@ -177,7 +184,7 @@ describe("#693 far-behind resume", () => {
     listMessagesAfterSpy.mockReset();
     listMessagesAfterSpy.mockResolvedValue([]);
     countMessagesAfterSpy.mockReset();
-    countMessagesAfterSpy.mockResolvedValue(0);
+    countMessagesAfterSpy.mockResolvedValue(probe(0));
     mockTokenValue = "test-bearer";
   });
 
@@ -187,7 +194,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     applyJoinReply("net", "#flood", 100);
     // 3000 rows accumulated while the operator was away; the tail is 3100.
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100), row(3099), row(3098)]);
 
     await loadInitialScrollback("net", "#flood");
@@ -205,13 +212,14 @@ describe("#693 far-behind resume", () => {
     const { applyJoinReply } = await import("../lib/readCursor");
     const { channelKey } = await import("../lib/channelKey");
     applyJoinReply("net", "#missed", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100)]);
 
     await loadInitialScrollback("net", "#missed");
 
     expect(farBehindByChannel()[channelKey("net", "#missed")]).toEqual({
       missed: 3000,
+      events: 0,
       resumeFrom: 100,
     });
   });
@@ -221,7 +229,7 @@ describe("#693 far-behind resume", () => {
     const { applyJoinReply } = await import("../lib/readCursor");
     const { channelKey } = await import("../lib/channelKey");
     applyJoinReply("net", "#small", 100);
-    countMessagesAfterSpy.mockResolvedValue(12);
+    countMessagesAfterSpy.mockResolvedValue(probe(12));
     listMessagesAfterSpy.mockResolvedValue([row(101), row(102)]);
     listMessagesSpy.mockResolvedValue([row(100), row(99)]);
 
@@ -259,7 +267,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     const key = channelKey("net", "#jump");
     applyJoinReply("net", "#jump", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100), row(3099)]);
     await loadInitialScrollback("net", "#jump");
 
@@ -295,7 +303,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     const key = channelKey("net", "#truncated");
     applyJoinReply("net", "#truncated", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100)]);
     await loadInitialScrollback("net", "#truncated");
 
@@ -318,7 +326,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     const key = channelKey("net", "#drained");
     applyJoinReply("net", "#drained", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100)]);
     await loadInitialScrollback("net", "#drained");
 
@@ -341,7 +349,7 @@ describe("#693 far-behind resume", () => {
     const fullPage = Array.from({ length: 200 }, (_, i) => row(501 + i));
     listMessagesAfterSpy.mockResolvedValue(fullPage);
     // ...and the probe says 2000 rows still sit past the last one ingested.
-    countMessagesAfterSpy.mockResolvedValue(2000);
+    countMessagesAfterSpy.mockResolvedValue(probe(2000));
     listMessagesSpy.mockResolvedValue([row(2900), row(2899)]);
 
     await refreshScrollback("net", "#resume");
@@ -351,7 +359,7 @@ describe("#693 far-behind resume", () => {
     expect(tailOf(scrollbackByChannel()[key])).toBe(2900);
     // ...while the jump TARGET is the operator's read position (500) — see the
     // re-probe case below.
-    expect(farBehindByChannel()[key]).toEqual({ missed: 2000, resumeFrom: 500 });
+    expect(farBehindByChannel()[key]).toEqual({ missed: 2000, events: 0, resumeFrom: 500 });
   });
 
   it("reconnect: a full backfill page that drains the gap keeps its rows", async () => {
@@ -366,7 +374,7 @@ describe("#693 far-behind resume", () => {
     listMessagesAfterSpy.mockResolvedValue(fullPage);
     // Only 10 rows behind after that page — one more scroll closes it, so the
     // pane must NOT be thrown away.
-    countMessagesAfterSpy.mockResolvedValue(10);
+    countMessagesAfterSpy.mockResolvedValue(probe(10));
 
     await refreshScrollback("net", "#drained");
 
@@ -400,7 +408,7 @@ describe("#693 far-behind resume", () => {
     listMessagesAfterSpy.mockResolvedValue(Array.from({ length: 200 }, (_, i) => row(501 + i)));
     // First probe (at the anchor 700) says 2000; the re-probe at the cursor
     // says 2200 — the same region plus the 200 rows just ingested.
-    countMessagesAfterSpy.mockResolvedValueOnce(2000).mockResolvedValueOnce(2200);
+    countMessagesAfterSpy.mockResolvedValueOnce(probe(2000)).mockResolvedValueOnce(probe(2200));
     listMessagesSpy.mockResolvedValue([row(2900)]);
 
     await refreshScrollback("net", "#target");
@@ -409,6 +417,7 @@ describe("#693 far-behind resume", () => {
     expect(countMessagesAfterSpy).toHaveBeenNthCalledWith(2, "test-bearer", "net", "#target", 500);
     expect(farBehindByChannel()[channelKey("net", "#target")]).toEqual({
       missed: 2200,
+      events: 0,
       resumeFrom: 500,
     });
   });
@@ -425,7 +434,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     const key = channelKey("net", "#live");
     applyJoinReply("net", "#live", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockImplementation(async () => {
       // The WS delivers row 3101 while the tail page is in flight.
       appendToScrollback(key, row(3101));
@@ -450,7 +459,7 @@ describe("#693 far-behind resume", () => {
     const key = channelKey("net", "#race");
     applyJoinReply("net", "#race", 100);
     // The cold load sees a small gap and takes the anchored branch...
-    countMessagesAfterSpy.mockResolvedValue(10);
+    countMessagesAfterSpy.mockResolvedValue(probe(10));
     let releaseAnchored: (rows: ScrollbackMessage[]) => void = () => {};
     listMessagesAfterSpy.mockImplementation(
       () =>
@@ -465,7 +474,7 @@ describe("#693 far-behind resume", () => {
     const { farBehindByChannel } = await import("../lib/scrollback");
     expect(farBehindByChannel()[key]).toBeUndefined();
     listMessagesSpy.mockResolvedValue([row(3100), row(3099)]);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesAfterSpy.mockResolvedValueOnce(Array.from({ length: 200 }, (_, i) => row(101 + i)));
     await refreshScrollback("net", "#race");
     expect(farBehindByChannel()[key]).toBeDefined();
@@ -484,7 +493,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     const key = channelKey("net", "#flaky");
     applyJoinReply("net", "#flaky", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100)]);
     await loadInitialScrollback("net", "#flaky");
 
@@ -504,7 +513,7 @@ describe("#693 far-behind resume", () => {
     const { applyJoinReply } = await import("../lib/readCursor");
     const { channelKey } = await import("../lib/channelKey");
     applyJoinReply("net", "oldpeer", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100)]);
     await loadInitialScrollback("net", "oldpeer");
 
@@ -512,6 +521,7 @@ describe("#693 far-behind resume", () => {
 
     expect(farBehindByChannel()[channelKey("net", "newpeer")]).toEqual({
       missed: 3000,
+      events: 0,
       resumeFrom: 100,
     });
     expect(farBehindByChannel()[channelKey("net", "oldpeer")]).toBeUndefined();
@@ -525,7 +535,7 @@ describe("#693 far-behind resume", () => {
     const { channelKey } = await import("../lib/channelKey");
     const key = channelKey("net", "#dismiss");
     applyJoinReply("net", "#dismiss", 100);
-    countMessagesAfterSpy.mockResolvedValue(3000);
+    countMessagesAfterSpy.mockResolvedValue(probe(3000));
     listMessagesSpy.mockResolvedValue([row(3100), row(3099)]);
     await loadInitialScrollback("net", "#dismiss");
 

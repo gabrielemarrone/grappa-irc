@@ -439,7 +439,7 @@ defmodule GrappaWeb.MessagesControllerTest do
 
       conn = get(conn, "/networks/azzurra/channels/%23sniffo/messages/count?after=0")
 
-      assert json_response(conn, 200) == %{"count" => 5}
+      assert json_response(conn, 200) == %{"count" => 5, "messages" => 5, "events" => 0}
     end
 
     test "the count is NOT capped at the page ceiling — a 201-row gap reads 201",
@@ -459,7 +459,7 @@ defmodule GrappaWeb.MessagesControllerTest do
 
       conn = get(conn, "/networks/azzurra/channels/%23sniffo/messages/count?after=0")
 
-      assert json_response(conn, 200) == %{"count" => 201}
+      assert json_response(conn, 200) == %{"count" => 201, "messages" => 201, "events" => 0}
     end
 
     test "?after=<tail id> returns 0", %{conn: conn, user: user, network: network} do
@@ -469,7 +469,7 @@ defmodule GrappaWeb.MessagesControllerTest do
 
       conn = get(conn, "/networks/azzurra/channels/%23sniffo/messages/count?after=#{tail}")
 
-      assert json_response(conn, 200) == %{"count" => 0}
+      assert json_response(conn, 200) == %{"count" => 0, "messages" => 0, "events" => 0}
     end
 
     test "counts only VISIBLE rows when the channel pref hides presence (#458)",
@@ -482,7 +482,40 @@ defmodule GrappaWeb.MessagesControllerTest do
 
       conn = get(conn, "/networks/azzurra/channels/%23sniffo/messages/count?after=0")
 
-      assert json_response(conn, 200) == %{"count" => 1}
+      assert json_response(conn, 200) == %{"count" => 1, "messages" => 1, "events" => 0}
+    end
+
+    # #2037 A — the response now carries THREE numbers because the route
+    # answers TWO questions. `count` is the threshold's feed (raw rows a
+    # fetch would return, own-authored included, #693) and is UNCHANGED.
+    # `messages` / `events` are the DISPLAY split, the same quantity
+    # `bulk_unread_split/3` seeds the sidebar pills with, so the bar and the
+    # badge stop being two opinions on one number.
+    test "the split carries the non-content rows under `events` when presence SHOWS (#2037)",
+         %{conn: conn, user: user, network: network} do
+      :ok = put_presence_pref(user, "azzurra #sniffo", "show")
+      seed_mixed(user, network)
+
+      conn = get(conn, "/networks/azzurra/channels/%23sniffo/messages/count?after=0")
+
+      assert json_response(conn, 200) == %{"count" => 3, "messages" => 1, "events" => 2}
+    end
+
+    # The split follows the SAME presence posture `count` does — one
+    # `resolve_hide_presence/3` call feeds both, so a pinned-hidden channel
+    # cannot report a bar and a badge resolved on different postures. That
+    # divergence is the mechanism measured in #2037 and it is closed here by
+    # construction: there is one resolution per request.
+    test "the split follows the same presence posture as `count` (#2037)",
+         %{conn: conn, user: user, network: network} do
+      :ok = put_presence_pref(user, "azzurra #sniffo", "hide")
+      seed_mixed(user, network)
+
+      conn = get(conn, "/networks/azzurra/channels/%23sniffo/messages/count?after=0")
+
+      body = json_response(conn, 200)
+      assert body == %{"count" => 1, "messages" => 1, "events" => 0}
+      assert body["count"] == body["messages"] + body["events"]
     end
 
     test "a missing ?after returns 400", %{conn: conn, user: user, network: network} do
@@ -525,7 +558,7 @@ defmodule GrappaWeb.MessagesControllerTest do
 
       conn = get(conn, "/networks/azzurra/channels/%23altro/messages/count?after=0")
 
-      assert json_response(conn, 200) == %{"count" => 5}
+      assert json_response(conn, 200) == %{"count" => 5, "messages" => 5, "events" => 0}
     end
 
     test "without Bearer returns 401" do

@@ -237,7 +237,8 @@ defmodule Grappa.UserSettings do
           colored_nicklist: boolean(),
           presence_filter: %{String.t() => String.t()},
           show_bottom_bar: boolean(),
-          strip_formatting: boolean()
+          strip_formatting: boolean(),
+          show_event_badge: boolean()
         }
 
   @notification_prefs_key "notification_prefs"
@@ -1585,7 +1586,8 @@ defmodule Grappa.UserSettings do
       colored_nicklist: false,
       presence_filter: %{},
       show_bottom_bar: true,
-      strip_formatting: false
+      strip_formatting: false,
+      show_event_badge: false
     }
   end
 
@@ -1643,6 +1645,15 @@ defmodule Grappa.UserSettings do
 
     * `time_format` ∈ #{inspect(@display_time_formats)}.
     * `colored_nicklist` is a boolean.
+    * `show_event_badge` (#2037 B) is a boolean, default FALSE — the ONE
+      display pref whose default takes something away. vjt's #2037 ruling
+      puts `!messaggi` behind an opt-in, so the sidebar's faint events pill
+      stops rendering unless asked for. Note what "events" spans: every kind
+      outside `@content_kinds`, which includes `topic`, `kick` and
+      `server_event` — the three deliberately OUTSIDE
+      `Message.suppressed_presence_kinds/0` (#458). A kick therefore stops
+      contributing to a badge by default; if one must stay loud it belongs in
+      the mention/severity channel (#267), not back in the message bucket.
     * `show_bottom_bar` (#1766) and `strip_formatting` (#2029) are booleans
       IF PRESENT; an absent key takes the default. The two keys added since
       the shape first shipped are exactly the two that tolerate absence, and
@@ -2279,7 +2290,8 @@ defmodule Grappa.UserSettings do
       colored_nicklist: read_display_bool(stored, :colored_nicklist, false),
       presence_filter: read_presence_filter(stored),
       show_bottom_bar: read_display_bool(stored, :show_bottom_bar, true),
-      strip_formatting: read_display_bool(stored, :strip_formatting, false)
+      strip_formatting: read_display_bool(stored, :strip_formatting, false),
+      show_event_badge: read_display_bool(stored, :show_event_badge, false)
     }
   end
 
@@ -2316,14 +2328,16 @@ defmodule Grappa.UserSettings do
          {:ok, cn} <- fetch_display_bool(prefs, :colored_nicklist),
          {:ok, pf} <- fetch_presence_filter(prefs),
          {:ok, sbb} <- fetch_optional_display_bool(prefs, :show_bottom_bar, true),
-         {:ok, sf} <- fetch_optional_display_bool(prefs, :strip_formatting, false) do
+         {:ok, sf} <- fetch_optional_display_bool(prefs, :strip_formatting, false),
+         {:ok, seb} <- fetch_optional_display_bool(prefs, :show_event_badge, false) do
       {:ok,
        %{
          "time_format" => tf,
          "colored_nicklist" => cn,
          "presence_filter" => pf,
          "show_bottom_bar" => sbb,
-         "strip_formatting" => sf
+         "strip_formatting" => sf,
+         "show_event_badge" => seb
        }}
     else
       {:error, message} -> {:error, display_prefs_changeset_error(message, subject)}

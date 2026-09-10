@@ -1349,3 +1349,56 @@ export async function setUploadConfirmEnabled(token: string, enabled: boolean): 
     );
   }
 }
+
+/**
+ * #2037 B — set the `show_event_badge` display pref for a subject, out of
+ * band.
+ *
+ * The pref ships OFF, so every spec whose SUBJECT is the sidebar's events
+ * pill has to opt in first, and four of them predate this pref: #265 (the
+ * event-only window bumps the events badge), #239 and r6 (the badge does NOT
+ * appear) and #532 (no event badge on an archived row). The last three are
+ * the reason this is not optional — a `toHaveCount(0)` under a pref that
+ * suppresses the element is VACUOUSLY true, so leaving them alone would have
+ * kept three specs green while they tested nothing.
+ *
+ * Called BEFORE `loginAs`, deliberately: `displayPrefs.ts` applies the
+ * server's map on the post-login refresh, so a pref written after the boot
+ * fetch would need a reload to take.
+ *
+ * No restore is needed and none is offered. Each test runs on its own
+ * throwaway subject (`provisionSpecSubject`, named off the title path and
+ * DELETEd at teardown), so the pref dies with the user and cannot reach
+ * another spec. A spec that wants it off again inside one body should say so
+ * with a second call.
+ *
+ * `PUT /me/settings/display-prefs` is a FULL-MAP replace with no PATCH form
+ * (`UserSettingsController.update_display_prefs/2`), so this reads the
+ * current map first and overrides one key. Sending only the one key would
+ * silently reset the other five to the server's defaults — the same trap
+ * `displayPrefs.ts` documents for `buildWireMap`.
+ */
+export async function setShowEventBadge(token: string, on: boolean): Promise<void> {
+  const url = `${GRAPPA_BASE_URL}/me/settings/display-prefs`;
+  const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
+
+  const current = await fetch(url, { headers });
+  if (!current.ok) {
+    throw new Error(
+      `setShowEventBadge(${on}): GET display-prefs → ${current.status} ${await current.text()}`,
+    );
+  }
+  const body = (await current.json()) as { display_prefs?: Record<string, unknown> };
+  const prefs = { ...(body.display_prefs ?? {}), show_event_badge: on };
+
+  const written = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ display_prefs: prefs }),
+  });
+  if (!written.ok) {
+    throw new Error(
+      `setShowEventBadge(${on}): PUT display-prefs → ${written.status} ${await written.text()}`,
+    );
+  }
+}

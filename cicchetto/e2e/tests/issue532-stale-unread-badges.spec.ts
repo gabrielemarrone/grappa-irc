@@ -49,6 +49,7 @@ import {
   joinChannel,
   partChannel,
   restoreReadCursorToTail,
+  setShowEventBadge,
 } from "../fixtures/grappaApi";
 import { IrcPeer } from "../fixtures/ircClient";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
@@ -78,6 +79,13 @@ test("#532 A — a self-PART leaves NO stale event badge on the archived channel
   page,
 }) => {
   const vjt = specUser();
+  // #2037 B put the sidebar's events pill behind `show_event_badge`, OFF by
+  // default, so this spec opts in BEFORE login — `displayPrefs.ts` applies the
+  // server's map on the post-login refresh. Without it the "no event badge on
+  // the archived row" assertion is VACUOUSLY true — the pref hides the element
+  // whether or not the own `:part` was counted, which is what A is about.
+  await setShowEventBadge(vjt.token, true);
+
   await loginAs(page, vjt);
 
   // Put the cursor at the current tail so the ONLY row after it is the own

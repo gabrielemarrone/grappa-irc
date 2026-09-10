@@ -51109,3 +51109,448 @@ shape is untouched, only which entries qualify for it. It is NO LONGER cic
 bundle only: `ArchiveController` changed, so the deploy is cic bundle PLUS the
 server. One module body, no `VERSION` bump and no migration, so the server
 half is hot-reloadable; the preflight decides._
+<!-- entry #2037a -->
+
+---
+
+## 2026-09-10 — #2037: three unread numbers, and the four ways they cannot be one window
+
+The report is one operator returning after ~21h: the far-behind bar says
+`1807 unread`, the sidebar pills say `187` and `216`, and `187 + 216 = 403`.
+The issue body attributes the direction to own-authored rows plus the
+content/events split, states plainly that those do not account for the
+`1404` residual, and nominates the ANCHOR. This entry records what the
+residual is NOT, which is all that got settled.
+
+### The anchor cannot contribute in the observed direction
+
+Measured on the client, where the anchor lives
+(`cicchetto/src/__tests__/unread2037AnchorProbe.test.ts`). The cold-open path
+probes ONCE, at the read cursor — the same integer
+`ReadCursor.bulk_unread_split/3` anchors the badge seed at, so that path has
+no anchor term at all. The reconnect path is the only one holding two
+anchors, and it renders the CURSOR-anchored number. The one branch that
+renders the other is the re-probe failure the issue names, and it renders the
+SMALLER number, because the fallback anchor sits further FORWARD and
+`count_after/6` is monotone non-increasing in `m.id > ?`.
+
+So the anchor term is bounded ABOVE by zero. **Anyone who closes this by
+re-anchoring the probe moves the bar DOWN by at most one page and leaves the
+1404 exactly where it is.** The positive control is what makes that claim
+worth anything: it asserts two DISTINCT anchors actually reached the wire
+before the sign is read, without which the same assertion passes a harness
+that only ever probed once.
+
+### The two presence resolvers are two doors, and they can disagree
+
+The body says *"Both paths DO share the presence-hidden filter, so that is
+not a divergence source."* They share the RULE (`PresenceFilter.hidden?/2`)
+and nothing else. The bar reaches it through `Resolver.hidden?/4` →
+`Session.list_members/3`; the seed through `Resolver.hidden_channels/3` →
+`Session.list_member_counts/2`. Two calls, at two instants.
+
+Measured through the real `Grappa.Session` facade against a `Session.Server`
+stand-in registered under the real registry key: with no session both SHOW,
+with consistent over-threshold answers both HIDE, and with the two calls
+answered independently the bar SHOWS while the seed HIDES — the sign the
+issue needs. The cost of that one disagreement on a 78-row fixture is 69
+rows, i.e. own-authored UNION suppressed-presence (they overlap on the
+operator's own presence rows, so the residual is the union and the assertion
+says so exactly rather than `> 0`).
+
+Reachability is a READING, not a measurement: both `handle_call` clauses read
+the same `state.seeded_channels` and `state.members`, so a real server cannot
+answer asymmetrically within one instant. The divergence needs two instants,
+or a call failure at one door — `member_count_for_unset/4`'s catch-all folds
+`:uninitialized`, `{:error, :timeout}` and `{:error, :no_session}` to one
+`nil`, and decision D reads nil as SHOW. For a history FETCH that is correct.
+For a COUNT it converts "I could not reach the session" into "count every
+JOIN/PART", and freezes it into the far-behind state.
+
+### And that mechanism is not what happened, by measurement
+
+Write, for one window at one anchor, `C` = non-own content, `E_s` = non-own
+suppressed presence, `E_c` = non-own carve-out (`topic`/`kick`/`server_event`,
+outside `suppressed_presence_kinds/0` per #458), `O` = own-authored,
+`O_s` = own presence. Then `bar(SHOW) = C + E_s + E_c + O`,
+`bar(HIDE) = C + E_c + (O − O_s)`, `pills(SHOW) = C | E_s + E_c`,
+`pills(HIDE) = C | E_c`. Against 187 / 216 / 1807 all four assignments fail:
+the two SHOW-seed ones require ~1404 own-authored rows in 21h, and the two
+HIDE-seed ones additionally require `E_c = 216`.
+
+`E_c = 216` is the one that is measurable off-line, and it was measured
+against the on-host prod snapshot (13320 rows, opened `immutable=1`). On
+channel-shaped windows the entire carve-out population is 13 `topic` rows and
+4 `kick` rows; `server_event` never lands in a channel window at all. The
+largest carve-out in any single channel window, ever, is 9. The incident
+needs 216 in one window in 21 hours — 24× the observed maximum, 30× on the
+ratio against content. The suppressed-presence half of the same snapshot is
+by contrast entirely ordinary (`suppressed/content` ranges 0.078 to 5.43, and
+the assignment needs 7.5).
+
+So the reading that "216 is exactly what is left over once presence is
+hidden" is dead, and it was mine. Two numbers agreeing was the whole of that
+argument; the control that discriminates between agreement and coincidence
+says no.
+
+### What is left
+
+At least one premise of the report is false, and the anchor is not it. The
+economical candidate is that the two pills are not one window's pair, or not
+the bar's window — which the same snapshot makes circumstantial rather than
+speculative: every one of the five furthest-behind cursors in it is a
+`$server` window (1584, 1531, 1370, 1052, 113 rows behind), the furthest
+channel window is 68 behind, and `$server` is 99.9% content, so its own pill
+pair reads ~N messages and ~0 events. A 1807-row far-behind bar looks like a
+`$server` window, and a `$server` window does not produce 187/216.
+
+_Not asserted: that the resolver divergence caused the incident (measured
+that it CAN happen and what it costs; measured that the arithmetic it needs
+does not hold). That a real `Session.Server` cannot produce the asymmetry in
+one instant — that is read off two clauses, not measured, and measuring it
+needs a live session. That the May snapshot is representative of the incident
+channel; it establishes a floor on how implausible 216 carve-out rows are,
+not a distribution. That the residual is explained — it is not._
+<!-- entry #2037b -->
+
+---
+
+## 2026-09-10 — #2037b: one predicate, two buckets, and a bar that is now the badge
+
+#2037a measured the three reported numbers and closed the anchor: the bar's
+term is bounded above by zero, so re-anchoring the probe moves the bar DOWN
+by at most one page and leaves the 1404-row residual exactly where it is.
+This entry records what was BUILT on top of that, under three rulings from
+vjt on the issue (2026-09-10, 08:54 / 08:56 / 09:00): use one logic for the
+counting; messages are what land in both the badge and the far-behind bar;
+the threshold stays as it is today.
+
+### The partition, named once
+
+There is ONE split and it already existed:
+
+    messages := kind IN     Grappa.Scrollback.Message.@content_kinds
+    events   := kind NOT IN @content_kinds
+
+`Scrollback.count_after_split/6` (per window) and
+`ReadCursor.bulk_unread_split/3` (the bulk `/me` seed) were both already
+computing exactly this. #2037 introduced no new predicate; it stopped a
+FOURTH surface — the far-behind bar — from using a different one. The split
+gained a name this round, `Grappa.Scrollback.count_split()`, because it is
+now a wire shape rather than only an internal return.
+
+The threshold is deliberately NOT in the partition. `count_after/6` keeps its
+predicate (raw rows, own-authored included) and its one caller, the
+`probeGap` → `isFarBehind` decision. Feeding a messages-only number into the
+threshold would have a channel with 3000 hidden JOINs and 40 messages report
+a 40-row gap and then take a contiguous-paging path it cannot serve. That is
+the 09:00 ruling and it is a correctness argument, not an omission.
+
+### The property: the bar and the badge are ONE VARIABLE
+
+The acceptance criterion was that the two numbers cannot drift apart again.
+Two values that happen to agree do not satisfy it; one value read twice does.
+So `far().missed` IS the messages count, `perChannelUnread` reads the
+far-behind entry for a far-behind key instead of the seed, and the bar
+renders the same field. Nothing compares them, because there is nothing to
+compare.
+
+Serving the seed at render time was the one-line alternative and was rejected
+for a MEASURED reason, not a stylistic one: `far.missed` also feeds
+`measuredUnread`, which places the in-pane divider. Narrowing only the
+sidebar would have left the divider on the raw number, so the operator taps
+"187 unread" and lands on "1807 unread messages". A definition that reaches
+one of its two consumers is the defect this issue is about, reproduced one
+layer down.
+
+The probe is also the fresher of the two inputs, which is a side effect worth
+recording because it is easy to mistake for a fix. The seed is written by
+`/me` and by the join reply and by nothing else: the per-message
+`window_counts` push carries the pair, but cic ignores it on purpose
+(`subscribe.ts`, #239 — messages/events stay client-derived for the presence
+filter) and a far-behind key skips client derivation by design. So a
+far-behind window's seed is frozen at login while the probe is taken when the
+pane opens. That narrows the stale-seed path for exactly the windows where it
+went stale. It is NOT a fix aimed at the residual and is not claimed as one.
+
+The prune path (#1229) had to follow or the tree would carry two definitions
+again: it arms far-behind from LOCAL eviction and was accumulating raw row
+counts into the same field. It now accumulates the content unit. The ARMING
+stays on the raw count, deliberately — what arms far-behind is "a row at or
+after the cursor left the store", which a JOIN does as surely as a message,
+and the divider cannot be placed either way. Only the displayed quantity
+narrowed.
+
+### One resolution per request
+
+Both halves of the split come from ONE `resolve_hide_presence/3` call in
+`MessagesController.count/2`. That closes by construction the divergence
+#2037a measured between the two `PresenceFilter.Resolver` doors: within a
+request there is one resolution and both counters get it. It does NOT close
+the divergence between `/me` and a later probe, which is a different pair of
+instants and has its own issue.
+
+### The `kick` consequence, said out loud
+
+`show_event_badge` is the sixth #449 display pref and the first whose DEFAULT
+takes something away. It is server-backed on #1766's criterion: a per-DEVICE
+toggle is right when the complaint is about a VIEWPORT and wrong when it is
+about the ACCOUNT, and "is my sidebar cluttered with join/part counts" is
+identical on the phone and the desktop.
+
+What it hides is WIDER than join/part, and the ruling asks for that to be
+stated rather than discovered. The events bucket is `kind not in
+@content_kinds`, so `topic`, `kick` and `server_event` follow it — the three
+kinds that sit OUTSIDE `Message.suppressed_presence_kinds/0` on purpose
+(#458), because the PANE still renders them on a denoised channel. Rendering
+in the pane and earning a badge are different questions and this pref answers
+only the second. **A KICK therefore stops contributing to a badge by
+default.** That is a deliberate behaviour change.
+
+Putting `kick` back into the message bucket would smuggle a non-message into
+the very number the bar now shares with the bold pill and undo the other
+half. A kick that must stay loud belongs in the mention/severity channel
+(#267), which is a different axis from "how many unread rows".
+
+### A default that takes something away makes existing specs VACUOUS
+
+Worth its own heading because it is the part that nearly shipped wrong, and
+it is a general consequence of the FIRST opt-out-shaped default rather than
+anything specific to this pref.
+
+Four e2e specs read the sidebar's events pill, and under the new default
+`sidebarEventsBadge(...)` resolves to nothing at all. One of them asserts the
+pill is VISIBLE (#265) and failed loudly, which is the easy case. The other
+three assert `toHaveCount(0)`:
+
+* #239 — the presence-filtered JOIN did NOT bump the events badge
+* r6 — the operator's own ACTION earns no events badge
+* #532 A — no event badge on the archived row after a self-PART
+
+All three would have stayed GREEN while testing nothing, because the pref
+suppresses the element whether or not the thing under test happened. The full
+suite says so directly: four reds, and the three vacuous ones were not among
+them. So each now calls `setShowEventBadge(token, true)` before `loginAs` —
+before, because `displayPrefs.ts` applies the server's map on the post-login
+refresh.
+
+The general rule, for the next pref whose default removes a surface: grep for
+every assertion on that surface and split them by SIGN. The positive ones
+fail and find themselves; the negative ones pass and have to be found.
+
+No restore is needed and none was added. Every e2e test runs on its own
+throwaway subject (`provisionSpecSubject`, named off the title path and
+DELETEd at teardown), so a pref set inside one body cannot reach another
+spec — an earlier version of the #2037 spec carried an `afterEach` justified
+by a cross-spec poisoning that cannot happen, and the justification was
+wrong before the machinery was unnecessary.
+
+### The unit is not yet ONE unit — `far.missed` still has two producers
+
+Recorded because A closed most of this gap and the remainder is easy to
+mistake for closed. `far.missed` is written by two paths: the server PROBE
+(`count_after_split/6`, which excludes own-authored rows per #576/#532 A) and
+the client PRUNE (`capScrollbackRing`, which filters `isContentKind` and has
+no own-nick arm at all). Before A they counted different things entirely;
+after A they agree on everything except own-authored content.
+
+That is better and it is also a worse FAILURE MODE: two numbers differing by
+a lot are visibly two numbers, and two numbers differing by three are
+indistinguishable from one until somebody counts. The same window at the same
+cursor reports a different figure depending on whether it went far behind by
+local eviction or by a gap probe. Filed as its own issue rather than fixed
+here — it is a second behaviour change on a path that already carries one,
+and none of the three rulings asked for it.
+
+Two mechanics that are easy to get wrong and were not: the count is ZEROED
+rather than the element hidden, because `events()` feeds `title` and
+`aria-label` as well as the text and an element hidden by a `<Show>` whose
+accessible name still says "216 unread events" is the wrong half of the
+change; and `applyServerPrefs` uses `??` and not `||`, which matters more for
+this key than for its predecessors because `false` is the default — `||`
+would make the badge impossible to turn back OFF from a second device once
+any device had turned it on.
+
+### Protocol 16, and the third `wire_pin` blindness
+
+`@protocol_version` goes 15 → 16 for the two new fields on the count
+response. `mix grappa.wire_pin --check` did not force it, for the THIRD
+release running — and this time the gate printed the proof of its own
+blindness rather than leaving it to be argued. It failed on this branch, but
+on the VERSION field alone, and its own output is the measurement:
+
+```
+shape digest   pinned sha256:f3c18a4c…4bf3c0
+               now    sha256:f3c18a4c…4bf3c0
+protocol       pinned 15
+                now   16
+```
+
+The digest is byte-for-byte identical ACROSS a two-field addition to the
+wire. So the gate did not catch the shape change and then ask for a bump; it
+noticed that a human had already moved the number and asked to be re-pinned.
+
+Reversing the order is the discriminating control, and it was RUN rather than
+reasoned about: with both new fields still in `messages_json.ex`, put
+`@protocol_version` back to 15 and re-pin at 15, and the gate answers
+
+```
+priv/wire/shape.pin: wire shape and protocol 15 agree.     rc=0
+```
+
+That is green on exactly the violation the gate exists for — a wire-shape
+change carried in under a still number. (Measured on this branch, then
+reverted; `lib/grappa/protocol.ex` and the pin are byte-identical to their
+committed state afterwards.)
+
+Two more measurements pin down why, and both are one command:
+`grep count_split cicchetto/src/lib/wireTypes.ts cicchetto/src/lib/wireSchema.ts`
+finds nothing — the count response is absent from BOTH generated artefacts,
+so it was never inside the digest's span; and `mix grappa.gen_wire_types
+--check` answers `in sync.` on the same tree, which is the failure mode
+CLAUDE.md already names (it compares each artefact with its own SOURCE, so
+a route the generator does not cover is "in sync" by construction).
+
+The bump therefore remains a deliberate manual act — and this round names
+which guard actually caught it being done HALF-WAY, because it was not the
+one v15's own entry nominated. Three things could have fired:
+
+* `wire_pin --check` — fired, but only after the number had already moved,
+  and only to ask to be re-pinned. See above.
+* `protocol_test.exs` (#1973) — GREEN. It pins cic's
+  `CLIENT_PROTOCOL_VERSION` against the server's, and both had been moved to
+  16, so it had nothing to say. v15's entry called it "the ONLY automatic
+  guard standing on this change"; on this change it stood and saw nothing.
+* the `@spec version() :: 15` LITERAL — RED, at
+  `lib/grappa/protocol.ex:373`, `invalid_contract`, "success typing () :: 16
+  but the spec is () :: 15". That is the one that caught it.
+
+The literal was chosen for a Dialyzer-idiom reason (a constant-returning
+function's spec matches its success typing under `:underspecs`) and its
+comment already claimed the tripwire role as a secondary benefit. It is now
+the PRIMARY automatic guard on the pair, by measurement, which is worth
+knowing mostly because it is a strange place for a protocol invariant to
+live: it fires in the dialyzer stage, minutes after the suite is green, and
+it says nothing about the wire.
+
+`min_protocol_version` stays at 1:
+`countMessagesAfter` falls back to `{messages: count, events: 0}` when the
+pair is absent, which is exactly the pre-#2037 number in the pre-#2037
+place, so a new bundle degrades against an old server instead of breaking.
+
+_Not asserted: that any of this explains the 1404-row residual. It does not
+and does not try. The four (bar posture, seed posture) assignments from
+#2037a remain excluded by measurement, so a premise of the MODEL has to give
+rather than a premise of the reading, and the reading that the two pills are
+not that window's pair is EXCLUDED by vjt — he settled on 2026-09-10 that it
+is one and the same window ("si stessa window", his words on IRC, reported
+into the session; I do not read IRC). The quantity was unified. The mystery
+was not closed._
+<!-- entry #2037c -->
+
+---
+
+## 2026-09-10 — #2037c: the wire pin was blind to every hand-written JSON view, and a list was never going to fix it
+
+`mix grappa.wire_pin --check` is the gate behind the #1393d ruling: a wire
+shape that moves without `Grappa.Protocol.version/0` moving is RED. It failed
+to see #2037's own wire change. It caught the commit only on the VERSION
+field, printing a byte-identical digest across a two-field ADDITION — the
+gate's own output was the proof of its blindness.
+
+### Measured on demand, this session, not inherited
+
+A field named `mutant_probe` was added to `GrappaWeb.MessagesJSON.count/1` —
+`@spec` and body together — on the untouched branch:
+
+| tree | command | rc | verdict |
+|---|---|---|---|
+| pre-cure + the new field | `wire_pin --check` | **0** | `wire shape and protocol 16 agree.` |
+| the same tree | `gen_wire_types --check` | 0 | `in sync.` on BOTH artefacts |
+| the same tree | grep the artefacts | — | `mutant_probe` **0×** in each |
+
+with a positive control on the grep (223 / 190 hits for a token that is in
+them) and a negative control (0). So the addition was invisible to the drift
+gate, invisible to the tripwire, and absent from both generated files.
+
+The second row is the live instance of what CLAUDE.md already claims in the
+abstract — the generator compares the artefact with its own SOURCE and answers
+`in sync.` in exactly the case to catch. It had been recorded from a Wire
+typespec; here it is measured on a hand-written `*_json.ex`, where the source
+it compares against never mentioned the field at all.
+
+### Why the obvious cure is not one
+
+This is a RECURRENCE. #1679 met the same class — `/boot` invisible to the
+tripwire — and cured it by adding `GrappaWeb.BootJSON` to `gen_wire_types`'s
+hand-kept `@extra_modules` and writing a comment telling the next author to
+remember. The note did not hold, and it could not: an inclusion list is
+**fail-OPEN**, so forgetting it costs nothing and says nothing. Measured
+today, two views that were never added — `PushSubscriptionJSON` (3 declared
+types) and `UserSettingsJSON` (9) — have been outside the digest the whole
+time.
+
+Widening that list still would not have caught #2037, and this is the part
+that decided the design: of the twelve `GrappaWeb.*JSON` views, **eight
+declare no named `@type` at all**, `MessagesJSON` among them. The codegen
+renders named types, so listing those modules buys exactly zero. All twelve
+DO carry `@spec`s — 29 of them.
+
+### What shipped
+
+`wire_pin` grew a third digest component: the `@spec`s of the EXPORTED
+functions of every `GrappaWeb.*JSON` module, read from BEAM chunks, over a
+module set derived from the build output (`Elixir.GrappaWeb.*JSON.beam` under
+the compile path) rather than typed by hand. Fail-CLOSED twice — a new view is
+covered the moment it compiles, and a discovery that finds nothing RAISES
+rather than contributing an empty string to a digest that would go on
+agreeing.
+
+The module name comes from the beam FILENAME, which IS the module. Not from
+camelizing a source path: `gen_wire_types` records that guess turning
+`controllers/me_json.ex` into `GrappaWeb.Controllers.MeJson`, a module that
+does not exist, dropped SILENTLY — zero coverage while looking widened.
+
+Reading BEAM chunks rather than source is what keeps it from firing on
+comments and reformatting, the property the two-artefact digest already had
+and had to keep.
+
+### Deliberately NOT routed through the codegen
+
+Adding the twelve views to `@extra_modules` and letting `gen_wire_types` emit
+them would drag their shapes into `wireTypes.ts` **and `wireSchema.ts`** — and
+the schema one is RUNTIME validation in cic. Widening a runtime validator is a
+client change with its own blast radius; this is a gate change. They do not
+belong in one commit, and the gate does not need the client to move for the
+server-side hole to close.
+
+### Cost paid once, and the route was the documented one
+
+Widening what the digest COVERS is not a wire-shape change and the gate cannot
+tell — it saw a moved digest and a still number, which is the violation, and
+`--update` refused. That is the moduledoc's own scenario, and its prescribed
+route was taken: DELETE `priv/wire/shape.pin` and re-create it, visible in
+review, rather than adding a `--force` flag that would be the hole the refusal
+exists to close. Re-created at protocol **16** — unchanged, because the WIRE
+did not move, only the gate's view of it. The pin's header states its coverage
+on purpose, so it was rewritten in the same commit; a header describing a
+coverage that no longer exists is the same lie, moved.
+
+### Proof the cure is a gate and not decoration
+
+The identical `mutant_probe` addition, re-applied after the cure:
+`wire_pin --check` rc **1**, digest `sha256:cdc283e8…` → `sha256:e9de1fa8…`.
+Reverted: rc 0. A gate that has never failed on the case it must catch is
+decoration, and that is literally the defect being cured here — repeating it
+in the cure was not an option.
+
+### Two limits, stated so they are not rediscovered
+
+A view whose BODY grows a key while its `@spec` stands still is still
+invisible to this component. Dialyzer is the leg that catches that one, and
+that is an ARGUMENT — it was not measured in this session, and it is written
+down as an argument rather than dressed as a measurement.
+
+A spec that references a remote type is digested as the reference TEXT, so a
+change inside `Grappa.Scrollback.count_split()` moves nothing unless that type
+reaches the digest by another route.

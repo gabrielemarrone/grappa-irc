@@ -155,7 +155,17 @@ let _socket: Socket | null = null;
 // any payload the codegen does not cover. `MIN_SERVER_PROTOCOL_VERSION` stays
 // at 9, correctly: the new key is absent-tolerant in both directions, so this
 // bundle still serves a v9 server — the two axes behaving as designed.
-export const CLIENT_PROTOCOL_VERSION = 15;
+//
+// 15 → 16 (#2037): the third, and the third time `wire_pin --check` was blind
+// for the same reason — `GrappaWeb.MessagesJSON` is not a codegen source
+// either. The gap-probe response grew `messages` + `events` beside `count`, so
+// the far-behind bar renders the same quantity the sidebar's bold pill does
+// instead of a raw row count nothing else on screen shared.
+// `MIN_SERVER_PROTOCOL_VERSION` stays at 9: `countMessagesAfter` falls back to
+// `{messages: count, events: 0}` when the pair is absent, which is exactly the
+// pre-#2037 number in the pre-#2037 place, so this bundle still serves an
+// older server.
+export const CLIENT_PROTOCOL_VERSION = 16;
 
 // #193 — force the correct WS scheme from the page origin, absolutely.
 //

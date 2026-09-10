@@ -104,11 +104,14 @@ vi.mock("../lib/archive", () => ({
 }));
 
 import BottomBar from "../BottomBar";
+import { setShowEventBadge } from "../lib/eventBadge";
 import * as scrollCmd from "../lib/scrollToBottomCommand";
 import * as selMod from "../lib/selection";
 import * as windowCloseMod from "../lib/windowClose";
 
 beforeEach(() => {
+  // #2037 B — the events pill is opt-in now; this spec asserts it renders.
+  setShowEventBadge(true);
   vi.clearAllMocks();
   // #243 — default "not the active window" so existing click tests never
   // trip the scroll-to-bottom branch.

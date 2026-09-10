@@ -30,6 +30,7 @@ import {
   sidebarWindow,
   waitForDmListenerReady,
 } from "../fixtures/cicchettoPage";
+import { setShowEventBadge } from "../fixtures/grappaApi";
 import { IrcPeer } from "../fixtures/ircClient";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specLiveNick, specNick, specUser, test } from "../fixtures/test";
@@ -85,6 +86,16 @@ test("desktop: #265 next-active count includes the message (DM) window, excludes
 }) => {
   const vjt = specUser();
   const peerNick = "act265-d";
+
+  // #2037 B put the sidebar's events pill behind `show_event_badge`, OFF by
+  // default. Opted in BEFORE login — `displayPrefs.ts` applies the server's
+  // map on the post-login refresh — because the seeder below asserts the
+  // #spec-wN EVENT badge is visible, and under the default it would wait for
+  // an element the pref suppresses and time out. #265's own subject (which
+  // windows the next-active cycle counts) is unaffected by the pref; only its
+  // seeding barrier reads the pill.
+  await setShowEventBadge(vjt.token, true);
+
   await loginAs(page, vjt);
 
   const peer = await seedEventOnlyAndMessageWindows(page, peerNick);
@@ -117,6 +128,16 @@ test("@webkit @touch mobile: #265 bottom-bar next-active count excludes the even
 }) => {
   const vjt = specUser();
   const peerNick = "act265-m";
+
+  // #2037 B put the sidebar's events pill behind `show_event_badge`, OFF by
+  // default. Opted in BEFORE login — `displayPrefs.ts` applies the server's
+  // map on the post-login refresh — because the seeder below asserts the
+  // #spec-wN EVENT badge is visible, and under the default it would wait for
+  // an element the pref suppresses and time out. #265's own subject (which
+  // windows the next-active cycle counts) is unaffected by the pref; only its
+  // seeding barrier reads the pill.
+  await setShowEventBadge(vjt.token, true);
+
   await loginAs(page, vjt);
 
   const peer = await seedEventOnlyAndMessageWindows(page, peerNick);

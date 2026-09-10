@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // other's behaviour asserted nowhere. Both variants are driven here.
 
 const mockFarBehind = vi.hoisted(() => ({
-  value: {} as Record<string, { missed: number; resumeFrom: number } | undefined>,
+  value: {} as Record<string, { missed: number; events: number; resumeFrom: number } | undefined>,
 }));
 const mockMessages = vi.hoisted(() => ({ value: {} as Record<string, number> }));
 const mockEvents = vi.hoisted(() => ({ value: {} as Record<string, number> }));
@@ -51,6 +51,7 @@ vi.mock("../lib/notificationPrefs", () => ({
 
 import { channelKey } from "../lib/channelKey";
 import { conversationMuteKey } from "../lib/conversationMute";
+import { setShowEventBadge } from "../lib/eventBadge";
 import WindowBadges, { badgeLabel, FAR_BEHIND_CLASS, MUTED_CLASS } from "../WindowBadges";
 
 const BEHIND = channelKey("freenode", "#italia");
@@ -63,11 +64,16 @@ beforeEach(() => {
   mockEvents.value = { [BEHIND]: 40, [NORMAL]: 2 };
   mockMentions.value = {};
   setMutedTargets({});
+  // #2037 B — the events pill is now OPT-IN (default OFF). These specs are
+  // ABOUT that pill (its far-behind modifier, its muted modifier), so they opt
+  // in rather than lose the coverage. The default itself is pinned separately
+  // below, which is where a regression to opt-OUT would be caught.
+  setShowEventBadge(true);
 });
 
 describe("#888 far-behind badge treatment", () => {
   it("marks BOTH unread badges of a far-behind window", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     const { container } = render(() => <WindowBadges channelKey={BEHIND} variant="sidebar" />);
 
     const msg = container.querySelector(".sidebar-msg-unread");
@@ -82,7 +88,7 @@ describe("#888 far-behind badge treatment", () => {
   });
 
   it("says what the number means, on hover and to a screen reader", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     render(() => <WindowBadges channelKey={BEHIND} variant="sidebar" />);
 
     // Production's own wording, called the way production calls it — a
@@ -96,7 +102,7 @@ describe("#888 far-behind badge treatment", () => {
   });
 
   it("leaves a merely-unread window alone", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     const { container } = render(() => <WindowBadges channelKey={NORMAL} variant="sidebar" />);
 
     const msg = container.querySelector(".sidebar-msg-unread");
@@ -110,7 +116,7 @@ describe("#888 far-behind badge treatment", () => {
   });
 
   it("clears the treatment as soon as the far-behind record clears", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     const { container, unmount } = render(() => (
       <WindowBadges channelKey={BEHIND} variant="sidebar" />
     ));
@@ -129,7 +135,7 @@ describe("#888 far-behind badge treatment", () => {
   });
 
   it("applies the same treatment on the mobile bottom-bar variant", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     const { container } = render(() => <WindowBadges channelKey={BEHIND} variant="bottom-bar" />);
 
     const msg = container.querySelector(".bottom-bar-msg-unread");
@@ -142,7 +148,7 @@ describe("#888 far-behind badge treatment", () => {
   });
 
   it("does not touch the mention badge (server-authoritative, not cursor-frozen)", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     mockMentions.value = { [BEHIND]: 4 };
     const { container } = render(() => <WindowBadges channelKey={BEHIND} variant="sidebar" />);
 
@@ -227,7 +233,7 @@ describe("#1077 muted badge treatment", () => {
   });
 
   it("composes with the far-behind treatment rather than replacing it", () => {
-    mockFarBehind.value = { [BEHIND]: { missed: 1832, resumeFrom: 10 } };
+    mockFarBehind.value = { [BEHIND]: { missed: 1832, events: 40, resumeFrom: 10 } };
     setMutedTargets({ [conversationMuteKey("freenode", "#italia")]: { until: null } });
     const { container } = render(() => <WindowBadges channelKey={BEHIND} variant="sidebar" />);
     const msg = container.querySelector(".sidebar-msg-unread");

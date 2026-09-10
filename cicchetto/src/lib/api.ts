@@ -2447,19 +2447,42 @@ export async function listMessagesAfter(
 // anchored pages on a cold load, the page just ingested on a reconnect. An
 // older server has no such route, and a client that hard-failed on that would
 // be worse than one that degrades.
+//
+// #2037 — the response now carries THREE numbers and this verb returns all
+// three, because the probe answers two questions and they must not be
+// conflated again:
+//
+//   * `gap` (the server's `count`) is the THRESHOLD input — raw rows a page
+//     would return, own-authored included. `isFarBehind(gap)` asks whether
+//     contiguous paging is achievable, which is a question about rows on the
+//     wire; the #2037 ruling puts it out of scope and it is unchanged.
+//   * `messages` / `events` are the DISPLAY split, the same partition the
+//     sidebar pills carry. The bar renders `messages`.
+//
+// Absent-tolerant, and deliberately: a server predating #2037 sends `count`
+// alone, and the pair then falls back to `{messages: count, events: 0}` —
+// i.e. exactly the pre-#2037 number in the pre-#2037 place. That degrades a
+// new bundle against an old server instead of breaking it, which is why
+// `min_protocol_version` does not move.
+export type GapProbe = { gap: number; messages: number; events: number };
+
 export async function countMessagesAfter(
   token: string,
   networkSlug: string,
   channelName: string,
   afterId: number,
-): Promise<number> {
+): Promise<GapProbe> {
   const res = await fetch(
     `/networks/${encodeURIComponent(networkSlug)}/channels/${encodeURIComponent(channelName)}/messages/count?after=${afterId}`,
     { headers: buildHeaders(token) },
   );
   if (!res.ok) throw await readError(res);
-  const body = (await res.json()) as { count: number };
-  return body.count;
+  const body = (await res.json()) as { count: number; messages?: number; events?: number };
+  return {
+    gap: body.count,
+    messages: typeof body.messages === "number" ? body.messages : body.count,
+    events: typeof body.events === "number" ? body.events : 0,
+  };
 }
 
 // Mirror of `GrappaWeb.MessagesController.create/2`. Server hardcodes

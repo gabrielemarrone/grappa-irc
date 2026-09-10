@@ -249,7 +249,7 @@ describe("#1288 — the batched ingest keeps every per-row invariant", () => {
     vi.mocked(api.listMessagesAfter).mockResolvedValue(page);
     // A full page also triggers the #693 gap probe; answer "nothing more" so
     // the ingest is the only thing under test.
-    vi.mocked(api.countMessagesAfter).mockResolvedValue(0);
+    vi.mocked(api.countMessagesAfter).mockResolvedValue({ gap: 0, messages: 0, events: 0 });
     await scrollback.refreshScrollback(SLUG, CHAN);
 
     const rows = scrollback.scrollbackByChannel()[KEY] ?? [];
@@ -272,7 +272,7 @@ describe("#1288 — the batched ingest keeps every per-row invariant", () => {
     const page = Array.from({ length: 200 }, (_, i) => plainRow(cap + 1 + i));
     mockGetResumeCursor.mockReturnValue(cap);
     vi.mocked(api.listMessagesAfter).mockResolvedValue(page);
-    vi.mocked(api.countMessagesAfter).mockResolvedValue(0);
+    vi.mocked(api.countMessagesAfter).mockResolvedValue({ gap: 0, messages: 0, events: 0 });
     await scrollback.refreshScrollback(SLUG, CHAN);
 
     const ids = (scrollback.scrollbackByChannel()[KEY] ?? []).map((m) => m.id);
@@ -295,7 +295,7 @@ describe("#1288 — the batched ingest keeps every per-row invariant", () => {
     const page = Array.from({ length: 200 }, (_, i) => plainRow(cap + 1 + i));
     mockGetResumeCursor.mockReturnValue(cap);
     vi.mocked(api.listMessagesAfter).mockResolvedValue(page);
-    vi.mocked(api.countMessagesAfter).mockResolvedValue(0);
+    vi.mocked(api.countMessagesAfter).mockResolvedValue({ gap: 0, messages: 0, events: 0 });
     await scrollback.refreshScrollback(SLUG, CHAN);
 
     const rows = scrollback.scrollbackByChannel()[KEY] ?? [];
@@ -321,7 +321,7 @@ describe("#1288 — the batched ingest keeps every per-row invariant", () => {
     const page = Array.from({ length: 200 }, (_, i) => plainRow(cap + 1 + i));
     mockGetResumeCursor.mockReturnValue(cap);
     vi.mocked(api.listMessagesAfter).mockResolvedValue(page);
-    vi.mocked(api.countMessagesAfter).mockResolvedValue(0);
+    vi.mocked(api.countMessagesAfter).mockResolvedValue({ gap: 0, messages: 0, events: 0 });
     await scrollback.refreshScrollback(SLUG, CHAN);
     expect(scrollback.scrollbackByChannel()[KEY]?.some((m) => m.id === 1)).toBe(false);
 

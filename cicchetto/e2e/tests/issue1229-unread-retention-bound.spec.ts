@@ -94,7 +94,15 @@
 // PRIVMSG bites it again — and `scrollback.ts`'s accumulation on the second
 // bite (`current.missed + unreadDropped`, deliberate: after the first bite the
 // store only ever holds one page, so a recount would report the bound forever
-// while the operator is thousands behind) reports `UNREAD_BOUND + 1`.
+// while the operator is thousands behind) reports `UNREAD_BOUND + 1` RAW ROWS.
+//
+// #2037 A changed what the banner DISPLAYS of that: the number is the MESSAGES
+// bucket now, so the JOINs past the cursor come out of it and this fixture
+// reads 199 rather than 201. The ARMING is untouched and still raw — what arms
+// far-behind is "a row at/after the cursor left the store", which a JOIN does
+// as surely as a message. Only the displayed quantity narrowed, and the
+// assertion below derives the expected value rather than carrying a second
+// magic number.
 //
 // That number is an artefact of the setup, not the behaviour under test. The
 // peer therefore joins BEFORE anything is measured, so its row is part of the
@@ -215,6 +223,28 @@ test.describe("#1229 — the unread retention bound", () => {
       // not, this count would be one too high.
       expect(rows.filter((r) => r.id > cursorRow.id).length).toBe(UNREAD_BEFORE);
 
+      // #2037 A — the banner's number is the MESSAGES bucket now, not the raw
+      // row count, so the expectation below is derived from the fixture rather
+      // than being `UNREAD_BOUND + 1`. See the comment at that assertion.
+      //
+      // The two kinds are NAMED rather than the content predicate mirrored:
+      // this fixture puts exactly PRIVMSGs and JOINs past the cursor (the
+      // peer's JOIN, and vjt's own autojoin self-JOIN — which lands AFTER the
+      // seeded block, because the reset purges and seeds BEFORE it respawns
+      // the session). The `every` below is what keeps that exact: a third kind
+      // appearing fails here instead of quietly skewing the count.
+      //
+      // `capScrollbackRing`'s content twin filters `isContentKind` with NO
+      // own-nick arm, so on this path the self-JOIN drops out as a KIND and
+      // not as an own row — which is why counting joins is the whole of it.
+      const past = rows.filter((r) => r.id > cursorRow.id);
+      expect(
+        past.every((r) => r.kind === "privmsg" || r.kind === "join"),
+        "#1229 fixture grew a third row kind — the derivation below is no longer exact",
+      ).toBe(true);
+      const presencePast = past.filter((r) => r.kind === "join").length;
+      expect(presencePast, "no presence rows past the cursor — see the comment").toBeGreaterThan(0);
+
       await setReadCursorToId(vjt.token, NETWORK_SLUG, CHANNEL, cursorRow.id);
 
       await loginAs(page, vjt);
@@ -265,7 +295,17 @@ test.describe("#1229 — the unread retention bound", () => {
       await expect(bar).toBeVisible({ timeout: OUTCOME_TIMEOUT_MS });
       // The count is how far behind the operator actually is, taken BEFORE the
       // bite and so including the row that crossed — not the page still held.
-      await expect(bar).toContainText(String(UNREAD_BOUND + 1));
+      //
+      // #2037 A moved the UNIT of that number, not its meaning: the banner now
+      // reports the MESSAGES bucket, the same partition the sidebar's bold
+      // pill carries, because a bar counting raw rows against a split badge is
+      // what #2037 was reported for. So the JOINs past the cursor come out
+      // (`presencePast`), the crossing PRIVMSG stays in, and this fixture's
+      // 201 raw rows read as 199. Derived rather than re-hardcoded: the
+      // contrast this assertion exists for is still "the accumulated distance,
+      // NOT the page still held", and the derivation keeps it anchored to
+      // `UNREAD_BOUND + 1` instead of quietly becoming a new magic number.
+      await expect(bar).toContainText(String(UNREAD_BOUND + 1 - presencePast));
       await expect(marker).toHaveCount(0);
 
       // (4) a PREFIX drop: both the oldest unread AND the read context above

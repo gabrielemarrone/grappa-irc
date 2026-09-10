@@ -41,7 +41,7 @@ import {
   sidebarEventsBadge,
   sidebarMessageBadge,
 } from "../fixtures/cicchettoPage";
-import { restoreReadCursorToTail } from "../fixtures/grappaApi";
+import { restoreReadCursorToTail, setShowEventBadge } from "../fixtures/grappaApi";
 import { IrcPeer } from "../fixtures/ircClient";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
@@ -62,6 +62,14 @@ test("#239 — hidden control message does NOT bump the unread badge; reading cl
   page,
 }) => {
   const vjt = specUser();
+  // #2037 B put the sidebar's events pill behind `show_event_badge`, OFF by
+  // default, so this spec opts in BEFORE login — `displayPrefs.ts` applies the
+  // server's map on the post-login refresh. Without it this spec's
+  // `toHaveCount(0)` on the events pill is VACUOUSLY true — the pref hides the
+  // element whether or not the hidden JOIN was counted, which is the whole
+  // question #239 asks.
+  await setShowEventBadge(vjt.token, true);
+
   await loginAs(page, vjt);
 
   // Focus #spec-wN first so its per-channel WS topic is subscribed (the badge

@@ -140,6 +140,76 @@ defmodule Mix.Tasks.Grappa.WirePinTest do
     end
   end
 
+  # #2037 — the third component. The two generated artefacts are not the whole
+  # wire: the hand-written `GrappaWeb.*JSON` views ship response shapes the
+  # codegen never sees, and a field added to one of them left this gate GREEN.
+  # Measured live before the cure, on this branch: `mutant_probe` added to
+  # `MessagesJSON.count/1` (spec AND body) kept `--check` at rc 0 and
+  # `gen_wire_types --check` at `in sync.`, with the field appearing 0 times in
+  # either artefact. After the cure the same addition moves the digest.
+  describe "the hand-written web views are in the digest too" do
+    test "the digested text carries what a view DECLARES, not only the codegen" do
+      text = WirePin.shape_text()
+      views = WirePin.json_view_spec_text()
+
+      # Load-bearing, not decorative: the old two-artefact composition must
+      # not already contain it, or this component is buying nothing.
+      old_composition = GenWireTypes.generate() <> "\n" <> GenWireTypes.generate_schema()
+
+      assert String.contains?(text, views)
+      refute String.contains?(old_composition, views)
+    end
+
+    test "the #2037 count response is inside the digested text" do
+      views = WirePin.json_view_spec_text()
+
+      # The exact shape whose ADDITION this gate failed to see. Named rather
+      # than probed generically: if a refactor moves this response out of a
+      # spec the digest reads, the coverage is gone and this says so.
+      assert views =~ "GrappaWeb.MessagesJSON"
+      assert views =~ "messages: non_neg_integer()"
+      assert views =~ "events: non_neg_integer()"
+    end
+
+    test "discovery is DERIVED from the build output and finds every view" do
+      mods = WirePin.json_view_modules()
+
+      # Positive control: a set this small going empty is the failure mode
+      # the component raises on, and an assertion of ">= 1" would not notice
+      # eleven of twelve disappearing.
+      assert length(mods) >= 12
+      assert GrappaWeb.MessagesJSON in mods
+      assert GrappaWeb.UserSettingsJSON in mods
+      assert GrappaWeb.PushSubscriptionJSON in mods
+
+      # Sorted, so the digest cannot move on filesystem ordering alone.
+      assert mods == Enum.sort(mods)
+
+      # Nothing that is not a view. The glob is the whole membership rule and
+      # a widened one would quietly digest unrelated modules.
+      for mod <- mods do
+        name = inspect(mod)
+        assert String.starts_with?(name, "GrappaWeb.")
+        assert String.ends_with?(name, "JSON")
+      end
+    end
+
+    test "a private helper's spec is NOT digested, while its exported sibling is" do
+      views = WirePin.json_view_spec_text()
+
+      # `PushSubscriptionJSON` is the module that makes this testable rather
+      # than argued: it `@spec`s BOTH `device/1` (exported, a wire shape) and
+      # `summary/1` (`defp`, an internal helper). One pair, one module, so a
+      # filter that passed everything and a filter that passed nothing are
+      # both caught here.
+      assert {:device, 1} in GrappaWeb.PushSubscriptionJSON.__info__(:functions)
+      refute {:summary, 1} in GrappaWeb.PushSubscriptionJSON.__info__(:functions)
+
+      assert views =~ "@spec device("
+      refute views =~ "@spec summary("
+    end
+  end
+
   describe "no network, and it is enforced rather than promised" do
     # The orchestrator's second binding requirement: a gate that reaches for
     # `origin/main` or a tag breaks CI the moment CI is offline. The pin is in

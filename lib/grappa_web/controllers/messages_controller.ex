@@ -188,9 +188,14 @@ defmodule GrappaWeb.MessagesController do
 
   @doc """
   `GET /networks/:network_id/channels/:channel_id/messages/count?after=<id>`
-  — the #693 gap probe. Returns `{"count": N}`: how many rows this subject
-  would be handed by `index/2`'s `?after=<id>` page if that page had no
-  ceiling.
+  — the #693 gap probe. Returns `{"count": N, "messages": M, "events": E}`.
+
+  `count` is how many rows this subject would be handed by `index/2`'s
+  `?after=<id>` page if that page had no ceiling — the THRESHOLD's feed,
+  unchanged. `messages` + `events` are the #2037 DISPLAY split: the same
+  `@content_kinds` partition the sidebar pills carry, so the far-behind bar
+  renders `messages` instead of a third opinion on a quantity that already
+  has one.
 
   Exists because a full page is not a measurement. cic's resume paths
   fetch `?after=<anchor>&limit=#{@max_http_limit}`; a full page proves
@@ -224,17 +229,34 @@ defmodule GrappaWeb.MessagesController do
           {:error, :no_session} -> nil
         end
 
+      # #2037 — resolved ONCE and threaded into BOTH doors. The two counts
+      # used to be reached from different surfaces (this route for the bar,
+      # `/me`'s `bulk_unread_split/3` for the pills), each resolving the
+      # presence posture through its own `PresenceFilter.Resolver` door at
+      # its own instant. Measured: one disagreement between those doors puts
+      # the whole suppressed-presence population between the two numbers.
+      # Within one request that cannot happen — there is one resolution and
+      # both doors get it.
+      hide_presence = resolve_hide_presence(subject, network, channel)
+
       count =
-        Scrollback.count_after(
+        Scrollback.count_after(subject, network.id, channel, after_id, own_nick, hide_presence)
+
+      # The DISPLAY split. `count` stays the threshold's raw feed (#693, and
+      # out of scope per the #2037 ruling); `messages` is what the far-behind
+      # bar renders, and it is the same partition the sidebar's bold pill
+      # already shows.
+      split =
+        Scrollback.count_after_split(
           subject,
           network.id,
           channel,
           after_id,
           own_nick,
-          resolve_hide_presence(subject, network, channel)
+          hide_presence
         )
 
-      render(conn, :count, count: count)
+      render(conn, :count, count: count, split: split)
     end
   end
 

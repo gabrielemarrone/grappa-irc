@@ -48,6 +48,19 @@ import { isActiveSelection, selectedChannel } from "./selection";
  * "not visible" is exactly the state in which the notification is still
  * doing its job.
  *
+ * Visibility is checked TWICE, and the second check is the load-bearing one
+ * (review, 2026-09-10). `getRegistration()` and `getNotifications()` are IPC
+ * round-trips to the service worker, not microtasks, so the window between
+ * asking and acting is real: a reader who switches to `#sniffo` and then
+ * locks the phone can have a push for `#sniffo` land and be SHOWN inside
+ * that window — the suppression gate is leaky in exactly this direction
+ * (`shouldSuppressPush`'s own note on iOS `clients.matchAll`, plus the
+ * deliver-leaning server default of #182). The list then comes back holding
+ * a brand-new banner, the selection has not changed, and a single-check
+ * sweep closes a notification the reader never saw. That inverts this
+ * module's whole posture, so the precondition is re-established immediately
+ * before it is acted on rather than only when it was first asked.
+ *
  * `getRegistration()` rather than `serviceWorker.ready` (which `push.ts`
  * uses): `ready` NEVER settles when no service worker is registered, and
  * this runs on every focus flip and every window switch, so a browser with
@@ -63,6 +76,10 @@ export async function dismissNotificationsForActiveWindow(): Promise<number> {
   if (registration === undefined) return 0;
 
   const open = await registration.getNotifications();
+  // See the moduledoc above: the document may have gone away across the two
+  // awaits, and anything shown in that window is unread by construction.
+  if (!isDocumentVisible()) return 0;
+
   let closed = 0;
   for (const notification of open) {
     if (!namesActiveWindow(notification)) continue;

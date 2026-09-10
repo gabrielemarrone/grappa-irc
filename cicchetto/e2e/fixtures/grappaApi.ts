@@ -1349,3 +1349,46 @@ export async function setUploadConfirmEnabled(token: string, enabled: boolean): 
     );
   }
 }
+
+/**
+ * #2037 B — force the `show_event_badge` display pref for a subject, out of
+ * band.
+ *
+ * The pref ships OFF and it is SERVER-BACKED (#449/#1766), which is why this
+ * helper exists rather than a click: a spec that turns it on through the
+ * drawer and then dies mid-way leaves the whole account with the sidebar's
+ * events pill suppressed, and every other badge spec that runs after it in
+ * the same worker inherits that. Restoring through the API is the only
+ * restore that survives a failed test body, so it belongs in an
+ * `afterEach`/`finally` and not in the gesture under test.
+ *
+ * `PUT /me/settings/display-prefs` is a FULL-MAP replace with no PATCH form
+ * (`UserSettingsController.update_display_prefs/2`), so this reads the
+ * current map first and overrides one key. Sending only the one key would
+ * silently reset the other five to the server's defaults — the same trap
+ * `displayPrefs.ts` documents for `buildWireMap`.
+ */
+export async function setShowEventBadge(token: string, on: boolean): Promise<void> {
+  const url = `${GRAPPA_BASE_URL}/me/settings/display-prefs`;
+  const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
+
+  const current = await fetch(url, { headers });
+  if (!current.ok) {
+    throw new Error(
+      `setShowEventBadge(${on}): GET display-prefs → ${current.status} ${await current.text()}`,
+    );
+  }
+  const body = (await current.json()) as { display_prefs?: Record<string, unknown> };
+  const prefs = { ...(body.display_prefs ?? {}), show_event_badge: on };
+
+  const written = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ display_prefs: prefs }),
+  });
+  if (!written.ok) {
+    throw new Error(
+      `setShowEventBadge(${on}): PUT display-prefs → ${written.status} ${await written.text()}`,
+    );
+  }
+}

@@ -26,8 +26,9 @@ defmodule GrappaWeb.ArchiveControllerTest do
 
   import Grappa.AuthFixtures
 
+  alias Grappa.IRCServer
   alias Grappa.PubSub.Topic
-  alias Grappa.Scrollback
+  alias Grappa.{QueryWindows, Scrollback}
 
   # #1404 — read the SAME config keys `GrappaWeb.ArchiveController` reads,
   # rather than an accessor on the controller: an accessor returning a
@@ -46,10 +47,11 @@ defmodule GrappaWeb.ArchiveControllerTest do
 
   defp seed_archive_rows(user, net) do
     # Two channels (#a, #b) + one DM target (vjt-peer) + $server.
-    # No live session running for any test → active_keyset will be
-    # empty per Session.list_channels/2 returning {:error, :no_session},
-    # so all four targets land in the query result and only $server is
-    # filtered out by list_archive.
+    # No live session in MOST tests → active_keyset is empty per
+    # Session.list_channels/2 returning {:error, :no_session}, so all four
+    # targets land in the query result and only $server is filtered out by
+    # list_archive. The one exception is the live-session control added for
+    # issue 1985, which spawns a session against a fake ircd on purpose.
     {:ok, _} =
       Scrollback.persist_event(%{
         user_id: user.id,
@@ -126,6 +128,63 @@ defmodule GrappaWeb.ArchiveControllerTest do
                  %{"target" => "#a", "kind" => "channel", "last_activity" => 100}
                ]
              }
+    end
+
+    # issue 1985 — an OPEN query window must NOT keep its DM out of the
+    # archive when there is no live session.
+    #
+    # The keyset composed the live session's channels with a DB read of the
+    # open query windows, and only the channel half went quiet without a
+    # session. So a parked network's DM was excluded from the archive while
+    # cic's sidebar (which drops a parked network entirely, issue 1985) drew
+    # no row for it either: one window, ZERO surfaces, and no client-side
+    # filter can restore a row the server never sent.
+    #
+    # The promise this restores is the controller's own, in its moduledoc:
+    # "an absent session simply means an empty `active_keyset`, which is the
+    # correct semantic (everything with rows qualifies for the archive when
+    # no session is live)". The channel arm honoured it; the query arm did
+    # not. The exclusion is right while a session IS live — that is the
+    # sibling test below.
+    test "an open query window does NOT hide its DM when no session is live",
+         %{conn: conn, vjt: vjt} do
+      net = net_with_credential(vjt)
+      :ok = seed_archive_rows(vjt, net)
+
+      {:ok, _} = QueryWindows.open({:user, vjt.id}, net.id, "vjt-peer", vjt.name)
+
+      conn = get(conn, "/networks/#{net.slug}/archive")
+
+      targets = Enum.map(json_response(conn, 200)["archive"], & &1["target"])
+      assert "vjt-peer" in targets
+    end
+
+    # The control for the test above, and the one that keeps the fix from
+    # becoming "the archive never subtracts queries". With a LIVE session an
+    # open query window is a window the operator can already be in, so it
+    # must still be excluded — this is the only test in the file that runs a
+    # session, which is why it pays for the fake ircd.
+    test "an open query window DOES hide its DM while a session is live",
+         %{conn: conn, vjt: vjt} do
+      {server, port} = IRCServer.start_server(IRCServer.welcome_handler(":irc", "grappa-test"))
+      slug = "az-#{System.unique_integer([:positive])}"
+      {net, _} = network_with_server(port: port, slug: slug)
+      _ = credential_fixture(vjt, net, %{nick: "grappa-test"})
+      :ok = seed_archive_rows(vjt, net)
+
+      {:ok, _} = QueryWindows.open({:user, vjt.id}, net.id, "vjt-peer", vjt.name)
+
+      _pid = start_session_for(vjt, net)
+      :ok = IRCServer.await_handshake(server, 1_000)
+
+      conn = get(conn, "/networks/#{slug}/archive")
+
+      targets = Enum.map(json_response(conn, 200)["archive"], & &1["target"])
+      refute "vjt-peer" in targets
+      # The channels are still archived — the session joined nothing, so the
+      # exclusion above is the query window's doing and not a live channel's.
+      assert "#a" in targets
+      assert "#b" in targets
     end
 
     test "returns empty archive when network has no scrollback rows",

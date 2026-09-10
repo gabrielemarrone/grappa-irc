@@ -220,21 +220,36 @@ defmodule GrappaWeb.ArchiveController do
   # Active keyset = currently-joined channels (live Session state) +
   # currently-open query windows (persisted, subject-scoped per V1's
   # XOR FK shape — both users and visitors get a row).
+  #
+  # NO LIVE SESSION MEANS AN EMPTY KEYSET, QUERY WINDOWS INCLUDED (issue
+  # 1985). This module's own doc has always promised it — *"an absent session
+  # simply means an empty `active_keyset`, which is the correct semantic
+  # (everything with rows qualifies for the archive when no session is
+  # live)"* — but only the channel arm delivered it: `Session.list_channels/2`
+  # goes quiet on `:no_session` while `open_query_targets/2` is a DB read that
+  # answers the same whether a session exists or not. So a parked network's
+  # DMs were withheld from the archive by this function.
+  #
+  # Harmless while cic drew a greyed row for a parked network. Not harmless
+  # since issue 1985 dropped parked networks from the sidebar: the DM then
+  # had no sidebar row AND no archive row — one window, ZERO surfaces — and
+  # no client-side filter can restore an entry the server never sent. The
+  # asymmetry was the bug; the channel arm was right.
+  #
+  # Written as one `case` over the session lookup rather than an empty-list
+  # fallback plus a separate query read, so the two arms cannot drift apart
+  # again: there is now exactly one place that says what an absent session
+  # means here.
   @spec build_active_keyset(
           {:user, User.t()} | {:visitor, Visitor.t()},
           Grappa.Scrollback.subject(),
           integer()
         ) :: MapSet.t(String.t())
   defp build_active_keyset(subject, session_subject, network_id) do
-    channels =
-      case Session.list_channels(session_subject, network_id) do
-        {:ok, list} -> list
-        {:error, :no_session} -> []
-      end
-
-    queries = open_query_targets(subject, network_id)
-
-    MapSet.new(channels ++ queries)
+    case Session.list_channels(session_subject, network_id) do
+      {:ok, channels} -> MapSet.new(channels ++ open_query_targets(subject, network_id))
+      {:error, :no_session} -> MapSet.new()
+    end
   end
 
   @spec open_query_targets({:user, User.t()} | {:visitor, Visitor.t()}, integer()) ::

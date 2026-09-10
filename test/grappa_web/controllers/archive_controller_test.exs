@@ -181,7 +181,7 @@ defmodule GrappaWeb.ArchiveControllerTest do
 
       {:ok, _} = QueryWindows.open({:user, vjt.id}, net.id, "vjt-peer", vjt.name)
 
-      _pid = start_session_for(vjt, net)
+      _ = start_session_for(vjt, net)
       # Handshake awaited so the socket is up before the read — the session is
       # live either way, but a half-open connect is not a state worth racing.
       :ok = IRCServer.await_handshake(server, 1_000)

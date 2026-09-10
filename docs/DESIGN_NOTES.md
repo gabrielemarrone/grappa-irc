@@ -51976,3 +51976,129 @@ Nothing consumes them — measured across `infra/`, `scripts/`, `.github/` and
 `Dockerfile*`, every one of which names the unversioned
 `_build/prod/rel/grappa`. The number an operator reads is `Grappa.Version`,
 still baked from `VERSION`, still declared exactly once.
+<!-- entry #2060 -->
+
+---
+
+## 2026-09-10 — issue 2060: the oracle counted the whole VM, and then multiplied a sample
+
+`GrappaWeb.JoinSeedCostTest` went red eleven times between 2026-08-30 and
+2026-09-10 on branches that could not have caused it. Two defects, one in the
+instrument and one in the oracle. They are separable, they compound, and only
+one of them is the one the issue named.
+
+### The quoted red is not the assertion the issue diagnoses
+
+The issue's diagnosis is the multiplicative assertion `eight.total ==
+one.total * 8` — a relation between two measurements whose base is itself
+sampled. That assertion exists and that reading of it is correct. But the
+failure the issue quotes is a different arm: `join_seed_cost_test.exs:240` is
+`assert length(one) == 2` inside *the SAME account through the /me door costs
+2*, a FLAT PIN of one measurement with no base and no multiple in it.
+
+That matters because it falsifies, on the issue's own evidence, the first of
+the two cures the issue proposes. "Pin what `W=1` must cost" is precisely what
+that arm already did, and it went red anyway. The base was not wobbling
+because it was sampled and then multiplied; it was wobbling because the
+measurement admitted work nobody in this file performed.
+
+### What the counter was actually counting
+
+`measure/1` attached a `[:grappa, :repo, :query]` handler with no filter at
+all, deliberately: the moduledoc argued that a `self()` filter reads zero here
+(true — `Phoenix.ChannelTest.subscribe_and_join/3` runs `join/3` in a spawned
+CHANNEL process) and that `async: false` buys the unfiltered count back
+because no sibling test is running to contaminate the mailbox.
+
+The second half is true and insufficient. Sibling tests are not the only
+emitters. The application supervisor runs three ambient sweepers and a
+`Session.Server` per bound network in every env including test, and
+`GrappaWeb.ChannelCase` puts the sandbox in SHARED mode for `async: false`,
+which is exactly what lets an unrelated process's query execute on the
+current test's connection.
+
+Measured, on this branch:
+
+  * `WindowCounts.bulk_snapshot/4` costs exactly two queries and their sources
+    are `["read_cursors", nil]`. So the CI red's
+    `["read_cursors", nil, "visitors", "visitors"]` is that pair plus two
+    foreign reads — the door was never involved.
+  * Driving `Visitors.list_expired/0` twice from a plain `spawn` inside the
+    window reproduces the CI list source-for-source. That is now a committed
+    control test.
+  * On a live join, all seven door queries are emitted by the CHANNEL process
+    carrying `$callers: [test_pid]`; the `Session.Server`'s own
+    `Networks.mark_registered/1` write carries `$callers: nil` and the
+    application supervisor as its ancestry.
+
+#893 met the same class from the writing side and pushed the sweeper cadence
+past any suite runtime (`config/test.exs`). That removes the ticks and leaves
+every other ambient emitter, so it mitigates one instance rather than the
+class.
+
+### The cure: attribute by cause, then pin absolutely
+
+`forward_query/4` now keeps an event only when the emitter is the test process
+or carries it in `$callers` — the same provenance chain Ecto's own Sandbox
+reads for automatic allowance. Nothing here names an interloper, so a new
+ambient emitter needs no edit; and the fixture's registration write drops out
+by CAUSE rather than being cancelled inside a delta, which is why the live
+tally is now 7 where it was 7+1 and why `per_join_tally/3` is gone with its
+reason.
+
+With the measurement deterministic, the oracle stops being a ratio. Both storm
+arms pin every W against a declared per-join tally and against no other
+measurement, so a red names the read that changed and the W it changed at.
+Widening the tolerance and swapping in an inequality were both declined for
+the reason the issue gives: they trade a noisy oracle for a blind one.
+
+Attribution can fail in two opposite directions and each has a control test:
+the existing arm goes red if the counter ever reads zero, and a new one goes
+red if it ever reads someone else's work.
+
+### The mutation bench
+
+Both properties are measured rather than argued, in a private worktree:
+
+  * ambient emitter hammering `list_expired/0` for the whole file (697 foreign
+    reads inside one `W=8` window): attribution off → 7/7 red; attribution on
+    → 0/7.
+  * one extra `UserSettings.get_highlight_patterns/1` inserted into the real
+    `join_reply/2`, attribution on: red at `W=1`, naming `user_settings` 3
+    against a declared 2.
+
+So the instrument is neither credulous nor blind, and neither claim rests on
+the other's absence.
+
+### A retraction, and the class it widens
+
+Predicted, then measured false: that the `async: true` query counters
+elsewhere in the suite are protected, because an ambient process holds no
+sandbox checkout and its query would be refused before it could emit. The
+refusal happens (`DBConnection.OwnershipError`) — and Ecto emits the
+`[:grappa, :repo, :query]` event anyway, `source: "visitors"` and all. So
+ownership mode is not a shield. `async: false` merely also lets the foreign
+query SUCCEED.
+
+The exposed set is therefore every unfiltered counter, not just the shared-mode
+ones. Fifteen test files attach to the repo query event; `BootCostTest` and
+`RefreshPlanCostTest` filter on `self()` and are exact, because their work runs
+in the test process. Four do not filter at all and pin something on the result:
+`WindowCountsTest.count_repo_queries/1` (the `/me` constant-2 pin) and
+`GrappaWeb.Admin.SubjectLabelsTest`'s verbatim copy of it, `ScrollbackTest`'s
+`capture_one_query/1` — whose `[captured] = drain_queries(...)` breaks on ONE
+foreign query rather than on enough of them to move a number — and
+`NickMigrationTest`'s transaction-statement assertion. All four call their
+subject in the test process, so `self() == test_pid` is the exact predicate
+there. That is deliberately NOT done here: it is four files outside this
+issue's subject, and the shape they share argues for one test-support harness
+rather than four one-line patches.
+
+### What is not claimed
+
+Which process emitted the two `visitors` reads in CI run `34509867323` is
+unknown and is not asserted. `Visitors.list_expired/0` is the verb that
+produces that source and the ambient sweepers are its scheduled caller, but
+their cadence is 24h under `config/test.exs`, so naming one would be a guess.
+The fix does not depend on the answer: the window is closed to every emitter
+that is not this test, whoever it was.

@@ -5501,6 +5501,87 @@ defmodule Grappa.Session.EventRouterTest do
     end
   end
 
+  # issue 2056 — the SASL login's ONLY identity signal is 900 RPL_LOGGEDIN.
+  #
+  # CAPTURED, not deduced. `@sasl_900` below is a verbatim line off a stock
+  # solanum (upstream main @ 30f74b2c) fronted by Atheme 7.3.0-rc2, taken by a
+  # client that ACKed `account-notify` and logged in with SASL PLAIN. Across
+  # that whole arm — socket open, through 001, a ten-second tail, and a JOIN —
+  # the wire carried ZERO `ACCOUNT` lines. The instrument was not blind: a
+  # `NickServ LOGOUT` on the SAME socket produced `ACCOUNT *`, and a
+  # `NickServ IDENTIFY` on a second one produced `ACCOUNT capacct`. So on a
+  # SASL login there is no `ACCOUNT` to seed the account axis and no WHOIS to
+  # answer with a 330 — this numeric is the whole of it, and it carries the
+  # account name (solanum `include/messages.h:245`, emitted by
+  # `modules/m_signon.c:218` from the pre-registration SVSLOGIN path).
+  @sasl_900 "@time=2026-09-10T16:16:05.727Z :solanum.capnet.test 900 w2sasl " <>
+              "w2sasl!w2sasl@172.31.99.1 capacct :You are now logged in as capacct"
+
+  describe "issue 2056 — 900 RPL_LOGGEDIN as the SASL identity confirmation" do
+    test "the captured solanum 900 emits :acquired and records the account" do
+      state = account_notify_state(%{nick: "w2sasl", umodes: [], services_flavor: :atheme})
+      {:ok, m} = Parser.parse(@sasl_900)
+
+      {:cont, next, effects} = EventRouter.route(m, state)
+
+      assert {:session_identity_changed, :acquired} in effects
+      assert next.account == "capacct"
+    end
+
+    test "a 900 addressed to `*` still seeds — the numeric is about this link" do
+      # solanum fills the target with `*` while the client has no nick yet
+      # (`m_signon.c:218`, `EmptyString(target_p->name) ? "*"`), and SASL
+      # completes pre-registration. Gating this numeric on nick equality the
+      # way the 330 clause does would therefore drop the login on any client
+      # that finishes SASL before NICK.
+      state = account_notify_state(%{nick: "w2sasl", umodes: [], services_flavor: :atheme})
+
+      m =
+        msg(
+          {:numeric, 900},
+          ["*", "w2sasl!w2sasl@172.31.99.1", "capacct", "You are now logged in as capacct"],
+          {:server, "solanum.capnet.test"}
+        )
+
+      {:cont, next, effects} = EventRouter.route(m, state)
+
+      assert {:session_identity_changed, :acquired} in effects
+      assert next.account == "capacct"
+    end
+
+    test "without account-notify the account is recorded but is not proof" do
+      # vjt's ruling of 2026-08-11 is untouched by this: an account counts
+      # only where the ircd promised to retract it. Same posture as the self
+      # 330 — folded onto the state, not part of the verdict.
+      state = base_state(%{nick: "w2sasl", umodes: [], services_flavor: :azzurra})
+      {:ok, m} = Parser.parse(@sasl_900)
+
+      {:cont, next, effects} = EventRouter.route(m, state)
+
+      refute Enum.any?(effects, &match?({:session_identity_changed, _}, &1))
+      assert next.account == "capacct"
+    end
+
+    test "a 900 does not fold into an in-flight WHOIS card" do
+      # The 330 clause folds because 330 IS a WHOIS reply. 900 is not: it
+      # describes this connection's login, and folding it would write an
+      # account into whatever WHOIS happened to be open at the time.
+      state =
+        account_notify_state(%{
+          nick: "w2sasl",
+          umodes: [],
+          services_flavor: :atheme,
+          whois_pending: %{"w2sasl" => %WhoisAccum{target_display: "w2sasl"}}
+        })
+
+      {:ok, m} = Parser.parse(@sasl_900)
+
+      {:cont, next, _} = EventRouter.route(m, state)
+
+      assert next.whois_pending == state.whois_pending
+    end
+  end
+
   describe "#388 — 221 RPL_UMODEIS is an identity source too" do
     test "a snapshot revealing the registered umode emits :acquired" do
       # Pre-#388 ONLY the self-MODE echo emitted a transition, so a session

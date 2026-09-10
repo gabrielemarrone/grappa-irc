@@ -898,6 +898,56 @@ defmodule Grappa.Session.EventRouter do
     end
   end
 
+  # issue 2056 — 900 RPL_LOGGEDIN: the SASL login's ONLY identity signal.
+  #
+  #     :server 900 <nick|*> <nick>!<user>@<host> <account> :You are now
+  #     logged in as <account>
+  #
+  # (solanum `include/messages.h:245`; the account is the third param, and
+  # solanum passes it twice — middle AND trailing — so this reads the
+  # STRUCTURED one, never the English template.)
+  #
+  # Why this clause has to exist, MEASURED against a stock solanum @
+  # 30f74b2c fronted by Atheme 7.3.0-rc2: on a SASL login the wire carries
+  # NO self `ACCOUNT`. The IRCv3 relay above is emitted only by
+  # `modules/m_services.c:148` (`me_su`, services logging in an ALREADY
+  # REGISTERED client), while SASL goes through `me_svslogin`
+  # (`modules/m_signon.c:122`), which sends this numeric and then, on the
+  # `IsUnknown(target_p)` pre-registration branch, merely stashes the
+  # account — no ACCOUNT to anyone, and no `account_change` consumer emits
+  # one either. Nothing issues a self-WHOIS at connect, so no 330 arrives
+  # to seed the axis either. On solanum there is no registered umode at
+  # all, so before this clause `identified?/1` stayed false after a
+  # SUCCESSFUL SASL login until the operator happened to WHOIS themselves.
+  # The capture that establishes this carried its own positive controls: a
+  # `NickServ LOGOUT` on the same socket produced `ACCOUNT *` and a
+  # `NickServ IDENTIFY` on another produced `ACCOUNT <acct>`.
+  #
+  # Deliberately NOT gated on the leading param matching our nick, unlike
+  # the 330 clause: SASL completes pre-registration, and solanum fills that
+  # param with `*` while the client has no nick yet (`m_signon.c:218`,
+  # `EmptyString(target_p->name) ? "*"`). The numeric is `sendto_one` to
+  # THIS link about THIS link; there is no third party it could describe.
+  #
+  # Set-only, like the 330: 900 has no logged-out form, so absence must
+  # never be read as a logout. (solanum does emit `901 RPL_LOGGEDOUT` for
+  # the reverse, and where `account-notify` is ACKed the retraction already
+  # arrives as `ACCOUNT *` — the axis this seeds is retracted by the clause
+  # above, which is exactly what makes it proof under vjt's 2026-08-11
+  # ruling.) It does NOT fold into `whois_pending`: 330 folds because 330
+  # IS a WHOIS reply, whereas this describes the connection, and folding it
+  # would write an account into whatever WHOIS happened to be open.
+  defp do_route(
+         %Message{command: {:numeric, 900}, params: [_, _, account | _]},
+         state
+       )
+       when is_binary(account) do
+    next_state = Map.put(state, :account, IdentityState.normalize_account(account))
+    effects = identity_effects(state, next_state)
+
+    {:cont, next_state, identity_secret_effects(next_state, effects) ++ effects}
+  end
+
   # MODE on a 2+-param target. The leading param is either the session's
   # OWN nick (user-MODE-on-self, Task 15) or a channel — discriminated by
   # ASCII nick-equality (#121/#525), NOT an exact-match dispatch guard, so a

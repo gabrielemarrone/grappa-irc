@@ -444,6 +444,58 @@ defmodule Grappa.Session.ServerTest do
       :ok = GenServer.stop(pid, :normal, 1_000)
     end
 
+    test "reports registered: true from a SASL 900, before 001 (issue 2056)" do
+      # The solanum/Libera case, end to end through the real intake path:
+      # `IRC.Client` forwards every parsed line to the session BEFORE the
+      # auth FSM steps, and the numeric clause delegates to `EventRouter`
+      # after window routing — so a 900 that lands mid-registration reaches
+      # the identity axis. This is the door the operator sees (`registered:`
+      # on the rail card), and the EventRouter unit test cannot reach it: a
+      # deny-list entry or an early return anywhere between the socket and
+      # the router would leave that test green and this one red.
+      #
+      # The ORDER is the captured one (stock solanum @ 30f74b2c + Atheme
+      # 7.3.0-rc2): the CAP ACK first, then the login numeric, then the
+      # welcome. It matters — the account axis counts only where
+      # `account-notify` is ACKed (vjt's ruling, 2026-08-11), so an ACK
+      # arriving after the 900 would move the verdict with no transition to
+      # broadcast. On that ircd there is no registered umode to fall back
+      # on, and no self `ACCOUNT` arrives on a SASL login at all.
+      handler = fn state, line ->
+        if String.starts_with?(line, "USER ") do
+          {:reply,
+           ":irc.test.org CAP grappa-test ACK :account-notify\r\n" <>
+             ":irc.test.org 900 grappa-test grappa-test!u@h capacct " <>
+             ":You are now logged in as capacct\r\n" <>
+             ":irc 001 grappa-test :Welcome\r\n", state}
+        else
+          {:reply, nil, state}
+        end
+      end
+
+      {server, port} = IRCServer.start_server(handler)
+      {user, network, _} = setup_user_and_network(port)
+      :ok = Phoenix.PubSub.subscribe(Grappa.PubSub, Topic.user(user.name))
+
+      pid = start_session_for(user, network)
+      :ok = IRCServer.await_handshake(server, 1_000)
+
+      assert_receive %Phoenix.Socket.Broadcast{
+                       event: "event",
+                       payload: %{
+                         kind: :session_identity_changed,
+                         identified: true,
+                         account: "capacct"
+                       }
+                     },
+                     1_000
+
+      assert {:ok, %{registered: true}} =
+               Session.connection_info({:user, user.id}, network.id)
+
+      :ok = GenServer.stop(pid, :normal, 1_000)
+    end
+
     test "carries connected_at — the instant THIS link came up (#897)" do
       # #897 — the rail card's "connected <duration>" must measure the LIVE
       # link, and the only anchor that resets with the link is per-process

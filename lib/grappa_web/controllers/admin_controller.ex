@@ -27,10 +27,13 @@ defmodule GrappaWeb.AdminController do
       directory this node does not read (#1850); nothing ran. A cold
       deploy is the fix, as with the contract arm. This one is checked
       BEFORE the migration audit, and it is a DETECTION rather than a
-      prevention: `Grappa.Deploy.Preflight` already classifies a `VERSION`
-      diff COLD, but `--force-hot` skips preflight and a reload that walks
-      the stale tree answers `{"reloaded":[],"failed":[]}` — the silence
-      that served old code for ~6.5h on 2026-08-13.
+      prevention: a reload that walks the stale tree answers
+      `{"reloaded":[],"failed":[]}` — the silence that served old code for
+      ~6.5h on 2026-08-13. The mover THEN was a `VERSION` bump, which
+      `Grappa.Deploy.Preflight` classified COLD; since issue 2057 froze the
+      OTP app vsn a bump no longer moves the lib directory and that class is
+      gone, so what remains here is the general case the audit always
+      covered — any other way the built and booted vsns come apart.
     * a raising migration is NOT rescued: it 5xxes, the transaction
       rolls back, and no module is reloaded.
 

@@ -912,22 +912,33 @@ is due. Don't just look at todo.md.
    because `Grappa.Version`'s git facts are a compile-time snapshot: build
    first and prod reports the unreleased form `X.Y.Z-<sha>` instead of the
    bare `X.Y.Z` that #391's tag-≡-CTCP-VERSION contract promises.
-   🔴 **A `VERSION`-only bump is COLD, not HOT — measured on m42 2026-08-10,
-   correcting what #652 claimed here.** `Version.base/0` is a compile-time
-   constant baked from `VERSION` (an `@external_resource`), and `mix.exs`
-   reads the same file to stamp the OTP application vsn — so the bump moves
-   the release's lib directory to `lib/grappa-<new>/ebin`, while
-   `Grappa.HotReload.reload_modified/0` walks `:code.lib_dir(:grappa)`, which
-   the RUNNING node resolves to its BOOT directory `lib/grappa-<old>/ebin`.
-   Nothing in the old directory changed, so `/admin/reload` answers
-   `{"failed":[],"reloaded":[]}` and the node keeps serving the old number
-   with the new code on disk. Plan a restart for any release bump —
-   `Preflight` enforces it since #1287 (reason `version`), on the two
-   substrates that boot a `mix release`; docker stays HOT because its
-   bind-mounted `mix phx.server` layout puts no vsn in the lib-dir path.
-   Do NOT re-hardcode `@version` in `mix.exs`: it reads `VERSION` at build
-   time, and re-inlining a literal silently reinstates the COLD (guarded by
-   `version_single_source_test.exs`). Invoke deploy scripts by ABSOLUTE
+   🔴 **A `VERSION`-only bump is HOT on every substrate (issue 2057,
+   2026-09-10) — reversing what this file said from 2026-08-10, which was
+   true of the code as it then stood.** It WAS cold, and the reason was one
+   coupling: `mix.exs` read `VERSION` to stamp the OTP application vsn, and
+   that vsn is the only thing that puts a number into a release's code path,
+   so a bump wrote the fresh beams to `lib/grappa-<new>/ebin` while
+   `Grappa.HotReload.reload_modified/0` kept walking `:code.lib_dir(:grappa)`
+   — the RUNNING node's BOOT directory `lib/grappa-<old>/ebin`. Nothing there
+   changed, `/admin/reload` answered `{"failed":[],"reloaded":[]}`, and prod
+   served the old number under new code for ~6.5h on 2026-08-13.
+   **The app vsn is now the frozen `@otp_vsn` constant in `mix.exs`**: the lib
+   directory never moves, the beams land where the node already looks, and the
+   round trip is measured end to end on a real `mix release` with a live node
+   (bump → `/admin/reload` 200 reloading `Elixir.Grappa.Version` →
+   `/api/config` on the new number, no restart). `Preflight`'s `version`
+   class (#1287) is GONE with its cause.
+   🔴 **Two constraints survive the freeze, and both are silent when broken.**
+   (1) Do NOT re-hardcode `@version` in `mix.exs` — it must keep reading
+   `VERSION` at build time; re-inlining a literal makes the bump edit
+   `mix.exs`, which is COLD via `mix_deps?`. (2) Do NOT give the release a
+   `version:` of its own under `releases:` — it MUST inherit the frozen app
+   vsn, because `HotReload.audit_code_path/1` compares the booted app vsn
+   against the release vsn in `start_erl.data`, and a frozen one beside a
+   tracking one diverges forever: measured as a permanent
+   `409 {"booted":"0.0.0","built":"1.5.6"}`, the cure inverted into a total
+   silent refusal of every hot deploy. Both are pinned by
+   `version_single_source_test.exs`. Invoke deploy scripts by ABSOLUTE
    path (`/srv/grappa/scripts/…`) — cwd drift runs another
    checkout's copy. `scripts/deploy.sh` (Docker) drives the LOCAL
    dev stack only; nothing production runs on the pi.

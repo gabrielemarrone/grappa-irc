@@ -237,17 +237,29 @@ defmodule Grappa.HotReload do
 
   On the two `mix release` substrates the code path is
   `lib/grappa-<vsn>/ebin`, and `:code.lib_dir/1` resolves it to the **boot**
-  directory forever. A `VERSION`-only bump moves the build's output to
-  `lib/grappa-<new>/ebin`, so `reload_modified/0` walks the stale tree,
-  diffs it against itself and answers `%{reloaded: [], failed: []}` — a
-  shape indistinguishable from "nothing to do". `Grappa.Deploy.Preflight`
-  PREVENTS that by classifying a `VERSION` diff COLD, but prevention is
-  not detection: `--force-hot` skips preflight entirely, and a diff range
-  that misses the bump has nothing to classify. Production served the old
-  BEAM under the new git history for ~6.5 hours on 2026-08-13 that way,
-  and the deploy printed success. Same posture as
-  `migrate_and_reload/2`'s pending-migration gate: the last line of
-  defence belongs HERE, where the code path is actually observable.
+  directory forever. If the build writes its beams under a DIFFERENT vsn,
+  `reload_modified/0` walks the stale tree, diffs it against itself and
+  answers `%{reloaded: [], failed: []}` — a shape indistinguishable from
+  "nothing to do". Production served the old BEAM under the new git history
+  for ~6.5 hours on 2026-08-13 that way, and the deploy printed success.
+
+  The specific mover then was the `VERSION` file, because the OTP
+  application vsn tracked it. That is over: issue 2057 froze the app vsn to
+  a constant, so a bump no longer moves the directory and
+  `Grappa.Deploy.Preflight` no longer has a `VERSION` class at all.
+
+  **This audit stays, and is not now dead code.** It never named `VERSION`;
+  it compares what the node BOOTED against what the build WROTE, whatever
+  moved them apart — an operator or packager overriding the release vsn,
+  a release assembled into a root the node did not boot from, a
+  hand-edited `mix.exs`. Prevention moved to the root; detection is a
+  different job and belongs HERE, where the code path is actually
+  observable, exactly like `migrate_and_reload/2`'s pending-migration gate.
+  Note the standing constraint the freeze creates: the release vsn must
+  keep INHERITING the frozen app vsn, since giving the release a `version:`
+  of its own makes these two values diverge permanently and turns this
+  audit into a refusal of every hot deploy. `mix.exs` says so at the
+  constant, and `version_single_source_test.exs` pins it.
 
   ## Why the release metadata, and not the sibling directories
 

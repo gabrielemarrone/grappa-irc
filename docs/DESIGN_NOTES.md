@@ -52146,9 +52146,15 @@ question one question with one answer, asked in two directions.
 window to focus); the sweep walks it backwards (an open notification is asked
 whether it names the window already focused). Both go through the same
 `canonicalQueryNick` step, so the tap and the dismissal cannot disagree about
-which window a notification belongs to. Channels need no step there —
-`setSelectedChannel` folds the channel KEY itself (#1396) — which is precisely
-why the DM arm is the one carrying a test.
+which window a notification belongs to. Channels need no step there, and the
+reason matters more than the fact (review, 2026-09-10): it is NOT that
+`setSelectedChannel` folds the channel KEY on the way in. It does (#1396), but
+only the FORWARD path reaches the setter — the sweep never calls it. What
+covers BOTH directions is `isActiveSelection`, which runs its own argument
+through the same `foldChannelKey` before comparing. The distinction is not
+pedantry: a later reader who drops the fold from the comparator, believing the
+setter covers it, breaks the dismissal while every forward-path test stays
+green. That asymmetry is also why the DM arm is the one carrying a test.
 
 **Presence banners fall out for free, and that is the intended reading.**
 `build_presence/3` deep-links to the same `?network=&channel=` shape, so
@@ -52191,10 +52197,70 @@ so it hits the same wall one step earlier: with nothing shown,
 closing nothing. vitest is therefore the ceiling here, and the spec pays for it
 by asserting the DM canonicalisation directly.
 
-_Not covered: a notification that arrives WHILE its conversation is open and
-visible. `shouldSuppressPush()` already gates that toast at the service
-worker, so the case is handled one layer up; wiring the sweep into the push
-handler as well would add a trigger for a state that should not occur. A
-notification with no usable `data.url` is left alone rather than closed on a
+### The residual: a notification arriving while its conversation is in view
+
+All three triggers are TRANSITIONS — a visibility flip, a selection change, a
+`pageshow`. None of them fires when the reader is already looking at the window
+and the banner appears underneath it. That case is not handled here, and the
+first draft of this entry claimed it was "handled one layer up" by
+`shouldSuppressPush()` and called it "a state that should not occur". **Both
+halves of that were wrong, and this tree says so in writing.**
+`service-worker.ts` records that `clients.matchAll` visibility is UNRELIABLE on
+iOS PWAs — an empty or non-"visible" client list while foregrounded — and #182
+leaves the server-side gate deliver-leaning in the just-connected window on
+every platform. So the residual lands precisely on the device this feature
+exists for. Two independent blind reviews found it from those same two pieces
+of evidence without reading each other, which is the strongest signal available
+here that it is real rather than theoretical.
+
+The mechanism is deferred, not denied: one `postMessage` from the push handler
+to the visible client, or a sweep at the tail of `handlePush`, closes it. What
+is NOT known — and would move the severity in either direction — is whether an
+iOS banner over a foregrounded PWA produces a blur/focus pair at all. If it
+does, `isDocumentVisible()` flips and the reactive arm already self-heals the
+whole case on that platform. The tree carries no note either way and no device
+was measured.
+
+### The race between asking and acting
+
+`getRegistration()` and `getNotifications()` are IPC round-trips to the service
+worker, not microtasks, so the gap between reading `isDocumentVisible()` and
+closing anything is real wall-clock time. A reader who switches to `#sniffo`
+and then locks the phone can have a push for `#sniffo` land and be SHOWN inside
+that gap — the suppression gate being leaky in exactly that direction, per
+above. The list then comes back holding a brand-new banner, the selection has
+not changed, and a single-check sweep closes a notification the reader never
+saw.
+
+That is the one failure mode here that DESTROYS information rather than
+withholding it, and it inverts the module's own posture ("a hidden tab is
+exactly where a notification is still doing its job"). The cure is to
+re-establish the precondition immediately before acting on it rather than only
+when it was first asked. Structural, not observed: no instrumentation says this
+has fired in the field.
+
+### Two known approximations, stated so they are not rediscovered as bugs
+
+`parsePushTargetUrl` decides channel-vs-query from four hardcoded RFC-2812
+sigils (`# & ! +`) and ignores the network's advertised CHANTYPES, though
+`lib/chantypes.ts` exists. On a network advertising an exotic chantype a
+channel notification is classified as a query, gets `canonicalQueryNick`
+applied, is compared against a channel selection, and is never dismissed. That
+is pre-existing tap-path behaviour; what changed here is that the same
+approximate parse became load-bearing in a SECOND direction.
+
+A notification with no usable `data.url` is left alone rather than closed on a
 guess — unrecognised is never fatal, and leaving a banner up is the harmless
-direction of that error._
+direction of that error, whereas closing on a guess destroys a notification
+nobody read.
+
+### What was checked and cleared
+
+"The shade empties but the badge does not" is the obvious fear and it does not
+land: `lib/badge.ts` re-pulls the authoritative `/me` count on every visible
+event and force-applies it, bypassing the signal-equality skip, so the badge
+axis is server-authoritative and independently reconciled. Verified for the OS
+icon badge and the `document.title` mirror; the in-app sidebar counters were
+not audited. `installNotificationDismiss` being non-idempotent is fine — the
+sibling `installPushTargetListener` is equally so, `main.tsx` calls each once,
+and the sweep is idempotent regardless.

@@ -17,10 +17,15 @@
 // re-anchor already uses (ScrollbackPane onMount, ~:1495):
 //   * atBottom() true  → follow-live reader → keep "tail-only" (#46 resume
 //     family). Guarded by the third test below (must NOT regress).
-//   * atBottom() false → the reader deliberately left the tail → land on the
-//     re-latched unread divider if one renders, else preserve their scrollTop.
-//     NEVER tail-snap (owner ruling 2026-07-29: the only legitimate jump to the
-//     bottom is the operator's own send in the active window).
+//   * atBottom() false → the reader deliberately left the tail → preserve their
+//     scrollTop. NEVER tail-snap (owner ruling 2026-07-29: the only legitimate
+//     jump to the bottom is the operator's own send in the active window).
+//
+// ⚠️ AMENDED by issue 2032. #535 shipped that second arm as "land on the
+// re-latched unread divider if one renders, else preserve" — the divider half
+// was a defect (it moves a reader who asked for nothing) and has been removed
+// along with the re-latch that fed it. The mode is now `preserve-only`. The
+// second test below was rewritten accordingly; the other three are unchanged.
 //
 // This is the "resume ≠ switch" family, one-shot, no latch — the marker branch
 // stays scoped by the explicit `atBottom()` condition, so #168's collapse of
@@ -184,7 +189,18 @@ test.describe("#535 — visibility-return preserves the mid-backlog reader's pos
     await expect(page.locator('[data-testid="unread-marker"]')).toHaveCount(0);
   });
 
-  test("scrolled-up reader, unread divider present: return lands ON the divider, never tail-snaps", async ({
+  // ⚠️ REWRITTEN by issue 2032. This case used to assert "return lands ON the
+  // divider" — i.e. it PINNED the defect 2032 reports. #535 put
+  // `marker-or-preserve` in the divider query on the reading that a re-latched
+  // divider always sits at the reader's own position, so landing on it WAS
+  // landing where they were; the hide-edge cursor write is forward-only (#233),
+  // so that does not hold for a reader parked above the live cursor. The mode is
+  // now `preserve-only` and the contract below is the one 2032 settled: a
+  // visibility-return preserves, divider or no divider. The divider landing that
+  // used to be asserted here belongs to DELIBERATE activation only — see
+  // issue2032-visibility-return-preserve-position.spec.ts and
+  // scroll-on-window-switch.spec.ts.
+  test("scrolled-up reader, unread divider present: return preserves scrollTop, never jumps to the divider", async ({
     page,
   }) => {
     const vjt = specUser();
@@ -215,30 +231,29 @@ test.describe("#535 — visibility-return preserves the mid-backlog reader's pos
     expect(g.scrollHeight).toBeGreaterThan(g.clientHeight);
     await wheelBy(page, -400);
     await expect.poll(async () => await distanceFromBottom(page)).toBeGreaterThan(200);
+    const before = await scrollbackGeometry(page);
 
     // Leave the app and come back.
     await setTabHidden(page, true);
     await setTabHidden(page, false);
     await page.waitForTimeout(700);
 
-    // Contract: return lands the reader ON the re-latched unread divider —
-    // "the messages still to be read" — NOT at the tail. The marker is
-    // on-screen in the upper region (block:"start"); distance-to-bottom is
-    // ABOVE threshold. RED pre-fix: the tail snap pushed the divider off the
-    // top and distance collapsed to <= threshold.
+    // Contract (issue 2032): the reader is exactly where they were. A divider
+    // renders — that is the whole point of this case — and it must NOT be a
+    // scroll anchor on a resume. RED against the #535 code, which
+    // `scrollIntoView`d the divider and moved the reader off their position.
+    //
+    // Raw pixels against a sub-pixel epsilon, NOT SCROLL_BOTTOM_THRESHOLD_PX:
+    // that constant is a 50px product band for classifying follow INTENT, and
+    // reusing it as a tolerance would let a sub-band jump pass.
+    const after = await scrollbackGeometry(page);
+    expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(2);
+
+    // Still a divider, still above the reader, still not at the tail.
     await expect(marker).toHaveCount(1);
-    await expect(marker).toBeInViewport();
     await expect
       .poll(async () => await distanceFromBottom(page))
       .toBeGreaterThan(SCROLL_BOTTOM_THRESHOLD_PX);
-    const markerOffset = await page.evaluate(() => {
-      const el = document.querySelector('[data-testid="scrollback"]') as HTMLElement | null;
-      const m = document.querySelector('[data-testid="unread-marker"]') as HTMLElement | null;
-      if (!el || !m) throw new Error("scrollback/marker not found");
-      return m.getBoundingClientRect().top - el.getBoundingClientRect().top;
-    });
-    expect(markerOffset).toBeGreaterThanOrEqual(-5);
-    expect(markerOffset).toBeLessThan(g.clientHeight / 2);
   });
 
   test("follow-live reader (at the tail): return still snaps to the newest row (#46 preserved)", async ({

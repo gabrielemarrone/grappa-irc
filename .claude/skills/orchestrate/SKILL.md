@@ -822,9 +822,21 @@ at that merge (#1632). ONE batched deploy (~4–5 already-closed issues), ONE du
 - 🔴 **RUN DEPLOYS DETACHED** (`nohup` + `disown`). Tonight the `--cic` run was **HARNESS-REAPED mid-`vite build`**
   (status `killed`, no rc); detached, it completed. Same rule as long gates.
 - 🔴 **WORKERS SYSTEMATICALLY MIS-CALL SERVER CHANGES "COLD" — CHECK IT YOURSELF.** The test:
-  `git diff --name-only <prod-sha>..<branch> | grep -E '^config/|priv/repo/migrations/|mix.exs|mix.lock|Dockerfile|infra/|lib/grappa/application.ex'`
+  `git diff --name-only <prod-sha>..<branch> | grep -E '^VERSION$|^config/|^priv/repo/migrations/|^mix\.exs|^mix\.lock|Dockerfile|^infra/|^lib/grappa/application\.ex'`
   — empty ⇒ HOT. ⚠️ **The `^infra/` arm over-triggers**: a shell script under `infra/freebsd/` is git-pulled and run at
   deploy time, no restart needed. Let the CONTENT decide, not the grep.
+  🔴🔴 **`^VERSION` WAS MISSING FROM THIS PATTERN AND THAT COST A DEAD DEPLOY — measured 2026-09-10.**
+  I classified `3277a1700..9c1c9ecff` HOT off the old pattern and ran `--force-hot`; `/admin/reload`
+  answered **409** and **prod did not move a single byte** (the reload refuses BEFORE touching
+  anything). Cause established by elimination, not guessed: zero migrations (pos ctrl 77 lines, neg
+  ctrl 0), no `config/` change — what was left was **`VERSION` 1.5.4→1.5.5**, and CLAUDE.md already
+  says a `VERSION`-only bump is COLD by construction (`Version.base/0` is a compile-time constant and
+  `mix.exs` stamps the OTP vsn from the same file, so the release's lib dir MOVES while the running
+  node keeps resolving its BOOT dir). **A pattern that omits the one file whose sole purpose is to
+  change the release number cannot classify a release.** Anchors added too: unanchored `mix.exs` /
+  `priv/repo/migrations/` matched those names anywhere in a path, and the bare `.` matched any byte.
+  ⚠️ In the same measurement I also read `$?` after a `| head` — that was **`head`'s** rc, not the
+  grep's. **Read the rc of the GREP, never of a pipe.**
 - 🔴 **PROVE A HOT DEPLOY** by the reload `{"failed":[]}` list + the served cic bundle hash (`curl
   https://irc.sindro.me/`). **`/api/config` stays STALE after a hot deploy** — valid for COLD only. A release `rpc`
   from root fails `:noconnection` — use `service grappa status` + `fetch http://127.0.0.1:4000/healthz`.

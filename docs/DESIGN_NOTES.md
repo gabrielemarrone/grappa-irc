@@ -51073,21 +51073,36 @@ and was left alone deliberately.** It is what makes any residual parked window
 readable but not writable, and it is a different question (can I type here)
 from the one this slice answers (is there a row).
 
-**The `reconnecting…` badge has nowhere to live during the transition, and
-that question is OPEN — measured here, not answered.** #100's badge renders
-inside the per-network `<For>` (`Sidebar.tsx:378-380`) off
-`reconnectingByNetwork`, which the server drives with `connection_progress`
-(`connecting` on the attempt, `connected` on 001). `connection_state` stays
-`parked` for that whole window — it is operator intent, and the badge is
-deliberately NOT that state. So the badge fires while its host row does not
-exist. What the operator actually sees between clicking `[Reconnect]` on
-`$home` and 001: the button relabels to `Reconnecting…` only while
+**The `reconnecting…` badge has nowhere to live during the transition, and on
+2026-09-10 vjt ruled that nothing is to be built to give it one.** The words on
+`#grappa` at 14:59 Rome (12:59Z) were *"ci si riconnette da HOME"* and *"non
+SERVE nient'ALTRO"*. ⚠️ **Provenance: RELAYED into this session from the ircbot
+session, not read on IRC by this entry's author** — the same posture as the
+archive ruling above, and it is recorded as relayed rather than quoted as
+first-hand. So none of the three candidates is built: no badge grafted onto
+`$home`, no state machine holding `[Reconnect]` disabled longer, no teaching
+`$home` the progress signal. A parked network's row leaves the sidebar and
+reconnecting is `$home`'s business. This EXTENDS the 2026-09-08 *"redirect to
+home"* ruling rather than competing with it, and the cold-load restore gate in
+`Shell.tsx` is untouched by it.
+
+What was measured before the ruling landed still describes today's behaviour —
+it is simply no longer a question. The #100 badge renders inside the
+per-network `<For>` (`Sidebar.tsx:378-380`) off `reconnectingByNetwork`, which
+the server drives with `connection_progress` (`connecting` on the attempt,
+`connected` on 001). `connection_state` stays `parked` for that whole window —
+it is operator intent, and the badge is deliberately NOT that state. So the
+badge fires while its host row does not exist.
+
+**Observed, and placed OUT OF SCOPE by that same ruling — written down so the
+next reader does not re-discover it as new.** Between clicking `[Reconnect]` on
+`$home` and 001, the button relabels to `Reconnecting…` only while
 `reconnector.pending()` — the awaited PATCH — then returns to `Reconnect` with
-the state word still reading `parked` and no badge anywhere, while the
-upstream link is in fact coming up. Before this slice the greyed sidebar row
-hosted the badge for exactly that window. Moving the badge, disabling the
-button for longer, or teaching `$home` the progress signal are all product
-calls; none is taken here.
+the state word still reading `parked` and no badge anywhere, while the upstream
+link is in fact coming up. Before this slice the greyed sidebar row hosted the
+badge for exactly that window. It is a second-order effect of the ruling, it is
+deliberately NOT filed as an issue, and it is not cured: *"non serve
+nient'altro"*.
 
 _Code + tests. No wire change and no protocol bump — the archive response
 shape is untouched, only which entries qualify for it. It is NO LONGER cic

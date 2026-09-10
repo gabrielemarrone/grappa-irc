@@ -28,6 +28,39 @@
 //     the pane while the pane is still short of its tail by less than one row.
 //     This report is about the pane's rest position, so that is the assertion.
 //
+// 🔴 That second bullet is MEASURED, not reasoned. On the mutant bench below —
+// the pre-cure code, this gesture — the numbers separate exactly as the bullet
+// predicts: `overflowBelow = -0.172` (webkit) / `-0.422` (chromium), i.e. the
+// row sits FULLY INSIDE the pane and 2031's assertion is GREEN, while
+// `distanceFromBottom` reads 7 and 6 and the pane really is short. So the 2031
+// spec, re-run on the untouched tree, would have reported this report's gesture
+// as fine. The distance assertion is the one that catches it, and that is the
+// whole reason this file exists.
+//
+// ## What this measured  (2026-09-10, on e7677913b)
+//
+// CURED TREE, `--repeat-each 3`, and byte-identical across all three repeats of
+// every case — 12/12 green:
+//
+//   webkit-iphone-15  #1738 iphone          distance 0   overflowBelow -6.813
+//   webkit-iphone-15  #2031 iphone          distance 0   overflowBelow -7.438
+//   chromium          #1738 desktop-player  distance 0   overflowBelow -6.422
+//   chromium          #2031 desktop         distance 0   overflowBelow -6.641
+//
+// MUTANT BENCH, because a spec born green has not been shown to be able to
+// fail. `scrollToTail`'s top-up (the two lines `fffcc344c` added) was removed,
+// restoring the pre-cure shape, and all four entries went RED:
+//
+//   webkit-iphone-15  #1738 iphone          distance 7   overflowBelow -0.172
+//   webkit-iphone-15  #2031 iphone          distance 7   overflowBelow +0.203
+//   chromium          #1738 desktop-player  distance 6   overflowBelow -0.422
+//   chromium          #2031 desktop         distance 7   overflowBelow +0.359
+//
+// The bench is verified to BE the pre-cure state rather than merely broken: the
+// two 2031 rows reproduce the numbers its own header recorded over nine runs
+// before any cure existed (+0.203 webkit, +0.359 chromium) to the third
+// decimal. So a red here is the reported mechanism and not some other damage.
+//
 // ## The configuration the report was taken in
 //
 // vjt's screenshots have the docked radio player under the scrollback ("no

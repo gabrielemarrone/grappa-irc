@@ -275,41 +275,45 @@ defmodule Grappa.Deploy.PreflightTest do
     end
   end
 
-  describe "classify_paths/2 — Class 8: VERSION (COLD on the release substrates)" do
-    # #1287, repro'd in production 2026-08-13 on a v1.0.0 → v1.1.0 deploy:
-    # the bump moves the release's lib directory to `lib/grappa-<new>/ebin`
-    # while the running node keeps resolving `:code.lib_dir(:grappa)` to its
-    # BOOT directory, so the hot reload diffs a stale tree against itself and
-    # answers `{"reloaded":[]}` — a success shape it has no way to distinguish
-    # from "nothing to do". REVERSES the #652 pin that used to live in the HOT
-    # describe below.
-    test "VERSION → cold (:version) on jail (mix release, versioned lib dir)" do
-      assert {:cold, reasons} = Preflight.classify_paths(["VERSION"], :jail)
-      assert {:version, ["VERSION"]} in reasons
+  describe "classify_paths/2 — VERSION is HOT on every substrate (issue 2057)" do
+    # This describe used to assert the exact opposite on `:jail` and `:linux`
+    # (#1287's Class 8), and the reversal is not a relaxation of the
+    # conservative bias — the CAUSE was removed. The bump was COLD because the
+    # OTP application vsn tracked the VERSION file and put its number into the
+    # release code path `lib/grappa-<vsn>/ebin`, so the fresh beams landed in a
+    # sibling the running node never reads. `mix.exs` now freezes that vsn to a
+    # constant (`@otp_vsn`), the directory never moves, and the round trip was
+    # measured end to end on a real `mix release` with a live node: bump,
+    # `POST /admin/reload` 200 reloading `Elixir.Grappa.Version`,
+    # `/api/config` on the new number, no restart.
+    #
+    # A COLD class kept past its cause is not free: on an always-on bouncer
+    # every needless restart drops every IRC session.
+    test "VERSION → hot on jail (the frozen vsn keeps the lib dir still)" do
+      assert {:hot, []} = Preflight.classify_paths(["VERSION"], :jail)
     end
 
-    test "VERSION → cold (:version) on linux (mix release, versioned lib dir)" do
-      assert {:cold, reasons} = Preflight.classify_paths(["VERSION"], :linux)
-      assert {:version, ["VERSION"]} in reasons
+    test "VERSION → hot on linux (the frozen vsn keeps the lib dir still)" do
+      assert {:hot, []} = Preflight.classify_paths(["VERSION"], :linux)
     end
 
     test "VERSION → hot on docker (mix phx.server, unversioned _build lib dir)" do
-      # The container execs `mix phx.server` over a bind-mounted tree
+      # Docker was always hot here, for a different reason that still holds:
+      # the container execs `mix phx.server` over a bind-mounted tree
       # (bin/start.sh), so `:code.lib_dir(:grappa)` is `_build/<env>/lib/grappa`
-      # — no vsn in the path, and the reload sees the fresh beams. COLDing
-      # docker for a file its boot layout is immune to is the needless-restart
-      # class the substrate argument exists to prevent (moduledoc, 2026-06-10).
+      # — no vsn in the path at all. Kept as its own case so a future change
+      # that re-COLDs the release substrates cannot quietly take docker with it.
       assert {:hot, []} = Preflight.classify_paths(["VERSION"], :docker)
     end
 
-    test "the real bump-commit shape (VERSION + version.ex) → cold on linux" do
-      assert {:cold, reasons} =
-               Preflight.classify_paths(["VERSION", "lib/grappa/version.ex"], :linux)
-
-      assert {:version, ["VERSION"]} in reasons
+    test "the real bump-commit shape (VERSION + version.ex) → hot on every substrate" do
+      for substrate <- @substrates do
+        assert {:hot, []} =
+                 Preflight.classify_paths(["VERSION", "lib/grappa/version.ex"], substrate)
+      end
     end
 
-    test "a VERSION-named file elsewhere in the tree → hot (exact repo-root match)" do
+    test "a VERSION-named file elsewhere in the tree → hot (it never mattered)" do
       for substrate <- @substrates do
         assert {:hot, []} = Preflight.classify_paths(["cicchetto/VERSION"], substrate)
       end

@@ -40,10 +40,9 @@ defmodule Grappa.Deploy.Preflight do
   `infra/linux/nginx.conf` plus the shared `infra/snippets/*` proxy
   surface — is HOT on `:jail`, which since the jail-nginx removal
   runs no proxy of its own at all (#923 scoping, widened). The repo-root
-  `VERSION` file spans TWO substrates rather than one: it is COLD on
-  `:jail` and `:linux`, which boot a `mix release` whose lib directory
-  carries the vsn in its path, and HOT on `:docker`, which does not —
-  see `version?/1`. The 2026-06-10 metadata-strip
+  `VERSION` file is HOT on every substrate since issue 2057 froze the
+  OTP application vsn — the release lib directory no longer carries the
+  number, so a bump has nowhere to hide. The 2026-06-10 metadata-strip
   deploy cold-restarted prod (ALL IRC sessions dropped) for a
   Dockerfile diff the jail never reads — on an always-on bouncer
   every needless restart is incident-grade, so the substrate is an
@@ -77,7 +76,6 @@ defmodule Grappa.Deploy.Preflight do
           | {:migration, [String.t()]}
           | {:nginx, [String.t()]}
           | {:config, [String.t()]}
-          | {:version, [String.t()]}
           | {:state_shape, [String.t()]}
 
   @type verdict :: {:hot, []} | {:cold, [reason()]}
@@ -93,10 +91,6 @@ defmodule Grappa.Deploy.Preflight do
   @type migration_class :: :hot | :cold
 
   @substrates [:docker, :jail, :linux]
-  # The substrates that boot from a `mix release` artifact, whose lib
-  # directory carries the OTP application vsn in its PATH. Docker is
-  # absent by construction, not by omission — see `version?/1`.
-  @release_substrates [:jail, :linux]
   # CLI-boundary mirror of @substrates — derived, not hand-kept, so a
   # third substrate can't be accepted by classify_paths/2 yet rejected
   # at the cli/1 guard (or vice versa).
@@ -142,7 +136,6 @@ defmodule Grappa.Deploy.Preflight do
       |> add_reason(:migration, contract_migrations(paths, migration_source_fn))
       |> add_reason(:nginx, filter_on([:linux], substrate, paths, &nginx?/1))
       |> add_reason(:config, Enum.filter(paths, &config?/1))
-      |> add_reason(:version, filter_on(@release_substrates, substrate, paths, &version?/1))
       |> Enum.reverse()
 
     case reasons do
@@ -685,40 +678,30 @@ defmodule Grappa.Deploy.Preflight do
     String.starts_with?(path, "config/") and String.ends_with?(path, ".exs")
   end
 
-  # Class 8 (#1287): the repo-root VERSION file — the SSOT for the OTP
-  # application vsn, which `mix.exs` reads at build time. COLD on the
-  # substrates that boot a `mix release`, and ONLY those.
+  # Class 8 (#1287) is GONE, and this comment is its headstone (issue 2057).
   #
-  # The bump does not merely change a string: it moves every artifact to
-  # `lib/grappa-<new>/ebin`, while the running node keeps resolving
-  # `:code.lib_dir(:grappa)` — the directory `HotReload.reload_modified/0`
-  # walks, and the root `Ecto.Migrator` reaches through
-  # `Application.app_dir/1,2` — to the BOOT directory `lib/grappa-<old>/ebin`.
-  # The new artifacts land in a SIBLING the node never looks at, so the
-  # reload diffs the stale tree against itself and answers
-  # `{"failed":[],"reloaded":[],"migrated":[]}`. That is indistinguishable
-  # from "nothing to do": the miss cannot be reported, only prevented here.
-  # Repro'd in production 2026-08-13 on a self-hosted `:linux` install
-  # deploying v1.0.0 → v1.1.0 — ~6.5 hours serving the old BEAM under the
-  # new git history. Before #652 the number lived in `mix.exs` and
-  # `mix_deps?/1` caught the bump by accident; moving it to VERSION removed
-  # the accident without replacing the rule.
+  # The repo-root VERSION file was COLD on `:jail` and `:linux` because the
+  # bump moved every artifact to `lib/grappa-<new>/ebin` while the running node
+  # kept resolving `:code.lib_dir(:grappa)` to its BOOT directory — so the
+  # reload diffed a stale tree against itself and answered
+  # `{"failed":[],"reloaded":[],"migrated":[]}`, indistinguishable from
+  # "nothing to do". Repro'd in production 2026-08-13 on a `:linux` install:
+  # ~6.5 hours serving the old BEAM under the new git history.
   #
-  # Docker is excluded by MEASUREMENT, not by omission: the container execs
-  # `mix phx.server` over a bind-mounted tree (`bin/start.sh:76`), where
-  # `:code.lib_dir(:grappa)` is `/app/_build/<env>/lib/grappa` — no vsn in
-  # the path, so the fresh beams land where the node is already looking.
-  # The two release substrates say the opposite in their own words:
-  # `infra/freebsd/deploy.sh:116` names `lib/grappa-X.Y/ebin` as the
-  # daemon's code path. COLDing docker for a file its boot layout is immune
-  # to would be the needless-restart class the substrate argument exists to
-  # prevent (moduledoc: 2026-06-10, #923) — on an always-on bouncer every
-  # restart drops every IRC session.
+  # That class no longer exists because its CAUSE no longer exists. The OTP
+  # application vsn is now the frozen `@otp_vsn` constant in `mix.exs`, not the
+  # VERSION file, so the lib directory never moves and the fresh beams land
+  # where the node is already looking — measured end to end on a real
+  # `mix release` with a live node: bump, `POST /admin/reload` 200 reloading
+  # `Elixir.Grappa.Version`, `/api/config` on the new number, no restart.
   #
-  # Exact repo-root match: a sibling `VERSION` elsewhere in the tree (e.g.
-  # `cicchetto/VERSION`) is a different file with no bearing on the OTP vsn.
-  defp version?("VERSION"), do: true
-  defp version?(_), do: false
+  # Do NOT reinstate a VERSION rule here without first re-measuring `mix.exs`:
+  # a COLD class for a file whose boot layout is immune to it is exactly the
+  # needless-restart failure the substrate argument exists to prevent
+  # (moduledoc: 2026-06-10, #923), and on an always-on bouncer every restart
+  # drops every IRC session. `Grappa.HotReload.audit_code_path/1` remains the
+  # DETECTION for a lib directory going stale by any other route; prevention
+  # moved to the root, detection did not move at all.
 
   # Walk the AST collecting nodes that match any of:
   #   * `@type t :: %{...}`     — bare-map state typespec

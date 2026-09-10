@@ -16,30 +16,43 @@
 // the multi-second connect + SASL + register window against the real bahamut
 // testnet, then clears on 001.
 //
-// issue 1985 (2026-09-10) — THE DRIVER'S PRECONDITION CHANGED, and the
-// change is here because the product owner ruled the old one wrong, not
-// because this spec was flaky and not to make it pass. This comment used to
-// read "sidebar network header stays visible + greyed", i.e. the badge had a
-// host for the whole park. Under vjt's ruling a parked network LEAVES the
-// sidebar, so during the park there is no row and the badge cannot render.
+// issue 1985 (2026-09-10) — THIS SPEC NOW ASSERTS THE OPPOSITE OUTCOME, and
+// the change is here because THE PRODUCT OWNER RULED THE ASSERTED BEHAVIOUR
+// WRONG — NOT because the spec was flaky, and NOT to make it pass.
 //
-// What makes the badge observable anyway is an ORDERING, and the spec now
-// asserts it instead of assuming it: the reconnect PATCH spawns FIRST and
-// commits `:connected` only on spawn success (`NetworksController`'s U-0
-// ordering), and `Session.start_session/3` returns as soon as the GenServer
-// starts — it does not wait for registration. So the DB flip and its
-// `connection_state_changed` broadcast land within milliseconds, the network
-// returns to the sidebar, and the `connecting` flag set moments earlier is
-// still true because it only clears on 001, seconds later. The badge
-// therefore surfaces on the RETURNED row.
+// It used to assert the badge SHOWS during a park→Reconnect cycle, which
+// worked because the parked network kept a greyed sidebar row for the badge
+// to live on. Under vjt's ruling a parked network LEAVES the sidebar
+// entirely, and the badge has exactly one render site — inside the
+// per-network `<For>` in `Sidebar.tsx`. No row, no host, no badge.
 //
-// If that ever stops holding, this spec fails at the named assertion below
-// rather than at a latch that times out for an unstated reason — and the
-// failure is then evidence for the open question of where a parked network
-// shows that it is coming back, which is vjt's to answer.
+// vjt was asked precisely this and answered (2026-09-10, ⚠️ RELAYED into the
+// authoring session, not read on IRC by its author): *"ci si riconnette da
+// HOME"*, *"non SERVE nient'ALTRO"*. So the badge is NOT to be given a new
+// home, the button is NOT to be taught a progress state, and this spec must
+// stop demanding a badge the product deliberately no longer shows.
 //
-// This exercises exactly the #100 reconnect path end-to-end: a session
-// that is not currently connected coming back up, surfaced to the user.
+// AN EARLIER REVISION OF THIS COMMENT WAS WRONG AND IS CORRECTED HERE RATHER
+// THAN QUIETLY DROPPED. It argued the badge would surface anyway on an
+// ORDERING: the reconnect PATCH spawns first and commits `:connected` on
+// spawn success, `Session.start_session/3` returns at GenServer start rather
+// than at registration, so the row returns in milliseconds while `connecting`
+// (which clears only on 001) is still set. MEASURED: the ordering half is
+// TRUE — the section does come back, and this spec still asserts that — but
+// the conclusion drawn from it was FALSE. The badge never entered the DOM in
+// three consecutive runs; at timeout the page showed the network back and
+// fully registered (`+ix`, unread counts). Whatever the flag's timing, the
+// operator sees no badge, and that is what gets asserted.
+//
+// ⚠️ COVERAGE LOST, STATED PLAINLY. This was the ONLY e2e spec asserting the
+// badge RENDERS (the two other specs naming it only borrow its cleanup
+// ritual). Re-aimed this way, no e2e test covers the badge appearing at all —
+// including on a spontaneous link drop, where the row is present and the
+// badge presumably still works. That path was never covered here either (this
+// spec always drove through a park), so nothing that WAS covered is being
+// dropped silently; but the badge's render is now unguarded end-to-end. Its
+// machinery keeps unit coverage in `userTopic.test.ts` (the
+// `connection_progress` → `setReconnecting` dispatch); the RENDER has none.
 //
 // CLEANUP: afterEach reconnects the network (best-effort) and polls
 // GET /channels until autojoin restores #spec-wN — same discipline as
@@ -83,7 +96,11 @@ test.afterEach(async () => {
   }
 });
 
-test("#100 — reconnecting badge shows while a parked network reconnects, then clears on connect", async ({
+// Title carries no regex metacharacter on purpose: `--grep` is a REGEX, and a
+// title that cannot match itself collects zero tests, which reports as green.
+// Short handle: `--grep "#100 — reconnecting badge"`. Plain `#100` is NOT
+// safe — it is a prefix of #1004, #1061 and others.
+test("#100 — reconnecting badge has no surface while a parked network reconnects, and the network returns anyway", async ({
   page,
 }) => {
   const vjt = specUser();
@@ -118,14 +135,13 @@ test("#100 — reconnecting badge shows while a parked network reconnects, then 
   const reconnectBtn = parkedCard.getByRole("button", { name: `Reconnect ${NETWORK_SLUG}` });
   await expect(reconnectBtn).toBeEnabled();
 
-  // Install a MutationObserver latch BEFORE triggering the reconnect. The
-  // "reconnecting…" badge is inherently transient — it shows on `connecting`
-  // and clears on `001`, a window that can be sub-second on a healthy
-  // testnet. Racing `toBeVisible` against that flash is flaky by
-  // construction; the observer catches the badge the instant it enters the
-  // DOM regardless of how briefly it lives, latching a window flag we then
-  // await. This asserts the real outcome (the badge DID surface on the
-  // reconnect) deterministically.
+  // The SAME MutationObserver latch as before the ruling, doing the same job
+  // in the opposite direction. It watches the WHOLE document — not the
+  // network section — and flips the instant a badge enters the DOM anywhere,
+  // however briefly. Before the ruling that made a transient appearance
+  // provable without racing it; now it makes a NON-appearance provable, which
+  // a polled `toHaveCount(0)` never could: a sub-second flash between two
+  // polls would pass an assertion that claims the badge never showed.
   await page.evaluate(() => {
     const w = window as unknown as { __cic_reconnectBadgeSeen?: boolean };
     w.__cic_reconnectBadgeSeen = false;
@@ -148,31 +164,34 @@ test("#100 — reconnecting badge shows while a parked network reconnects, then 
   // connect + SASL + register window.
   await reconnectBtn.click();
 
-  // issue 1985 — the network must come BACK before the badge can render, and
-  // that return is the ordering this spec now depends on (spawn-then-commit,
-  // with the commit not waiting for registration). Asserted before the latch
-  // so a failure says WHICH link broke: no section back = the ordering
-  // changed; section back but no badge = the badge itself.
+  // The network comes BACK. Asserted FIRST, and it is what keeps the
+  // no-badge assertion below from being vacuous: an absence proves nothing on
+  // a client that never reconnected at all. The ordering behind the return is
+  // real and still worth naming — spawn-then-commit, `Session.start_session/3`
+  // returning at GenServer start rather than at registration — so the row is
+  // back long before 001.
   await expect(networkSection).toHaveCount(1, { timeout: 20_000 });
 
-  // The latch flips true the moment the badge enters the DOM — proves the
-  // transient "reconnecting…" badge surfaced on the reconnect.
-  await page.waitForFunction(
-    () =>
-      (window as unknown as { __cic_reconnectBadgeSeen?: boolean }).__cic_reconnectBadgeSeen ===
-      true,
-    undefined,
-    { timeout: 20_000 },
-  );
-
-  // On 001 RPL_WELCOME the server broadcasts `connected` → badge clears.
-  // Steady-state assertion (deterministic, not a flash).
-  await expect(reconnectingBadge).toHaveCount(0, { timeout: 20_000 });
-
-  // Sanity: the network actually came back — the channel row RETURNS and is
-  // un-greyed after autojoin (proves the reconnect completed, not just that
-  // the badge vanished). Both halves since issue 1985: the greyed-child count
-  // alone is also satisfied by a row that never came back.
+  // Reconnect fully completed: the channel row RETURNS un-greyed after
+  // autojoin. This closes the observation window — everything the badge could
+  // possibly have had to say has now been said.
   await expect(channelRow).toHaveCount(1, { timeout: 15_000 });
   await expect(channelRow.locator(".sidebar-window-greyed")).toHaveCount(0);
+
+  // THE RULED OUTCOME: across the whole window just closed — from before the
+  // Reconnect click to a fully restored network — the badge never existed
+  // anywhere in the document. Not "is absent now", which a flash would
+  // satisfy: never appeared, once, at any moment.
+  //
+  // The badge is not broken and is not being worked around. It renders in one
+  // place, inside the per-network row, and a parked network has no row — the
+  // accepted collateral of the ruling, asserted here so it stays a decision
+  // and does not quietly become a regression nobody notices.
+  const badgeEverSeen = await page.evaluate(
+    () => (window as unknown as { __cic_reconnectBadgeSeen?: boolean }).__cic_reconnectBadgeSeen,
+  );
+  expect(badgeEverSeen).toBe(false);
+
+  // Steady state agrees with the latch, from the other direction.
+  await expect(reconnectingBadge).toHaveCount(0);
 });

@@ -1351,16 +1351,26 @@ export async function setUploadConfirmEnabled(token: string, enabled: boolean): 
 }
 
 /**
- * #2037 B — force the `show_event_badge` display pref for a subject, out of
+ * #2037 B — set the `show_event_badge` display pref for a subject, out of
  * band.
  *
- * The pref ships OFF and it is SERVER-BACKED (#449/#1766), which is why this
- * helper exists rather than a click: a spec that turns it on through the
- * drawer and then dies mid-way leaves the whole account with the sidebar's
- * events pill suppressed, and every other badge spec that runs after it in
- * the same worker inherits that. Restoring through the API is the only
- * restore that survives a failed test body, so it belongs in an
- * `afterEach`/`finally` and not in the gesture under test.
+ * The pref ships OFF, so every spec whose SUBJECT is the sidebar's events
+ * pill has to opt in first, and four of them predate this pref: #265 (the
+ * event-only window bumps the events badge), #239 and r6 (the badge does NOT
+ * appear) and #532 (no event badge on an archived row). The last three are
+ * the reason this is not optional — a `toHaveCount(0)` under a pref that
+ * suppresses the element is VACUOUSLY true, so leaving them alone would have
+ * kept three specs green while they tested nothing.
+ *
+ * Called BEFORE `loginAs`, deliberately: `displayPrefs.ts` applies the
+ * server's map on the post-login refresh, so a pref written after the boot
+ * fetch would need a reload to take.
+ *
+ * No restore is needed and none is offered. Each test runs on its own
+ * throwaway subject (`provisionSpecSubject`, named off the title path and
+ * DELETEd at teardown), so the pref dies with the user and cannot reach
+ * another spec. A spec that wants it off again inside one body should say so
+ * with a second call.
  *
  * `PUT /me/settings/display-prefs` is a FULL-MAP replace with no PATCH form
  * (`UserSettingsController.update_display_prefs/2`), so this reads the

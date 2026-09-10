@@ -51056,6 +51056,56 @@ the very number the bar now shares with the bold pill and undo the other
 half. A kick that must stay loud belongs in the mention/severity channel
 (#267), which is a different axis from "how many unread rows".
 
+### A default that takes something away makes existing specs VACUOUS
+
+Worth its own heading because it is the part that nearly shipped wrong, and
+it is a general consequence of the FIRST opt-out-shaped default rather than
+anything specific to this pref.
+
+Four e2e specs read the sidebar's events pill, and under the new default
+`sidebarEventsBadge(...)` resolves to nothing at all. One of them asserts the
+pill is VISIBLE (#265) and failed loudly, which is the easy case. The other
+three assert `toHaveCount(0)`:
+
+* #239 — the presence-filtered JOIN did NOT bump the events badge
+* r6 — the operator's own ACTION earns no events badge
+* #532 A — no event badge on the archived row after a self-PART
+
+All three would have stayed GREEN while testing nothing, because the pref
+suppresses the element whether or not the thing under test happened. The full
+suite says so directly: four reds, and the three vacuous ones were not among
+them. So each now calls `setShowEventBadge(token, true)` before `loginAs` —
+before, because `displayPrefs.ts` applies the server's map on the post-login
+refresh.
+
+The general rule, for the next pref whose default removes a surface: grep for
+every assertion on that surface and split them by SIGN. The positive ones
+fail and find themselves; the negative ones pass and have to be found.
+
+No restore is needed and none was added. Every e2e test runs on its own
+throwaway subject (`provisionSpecSubject`, named off the title path and
+DELETEd at teardown), so a pref set inside one body cannot reach another
+spec — an earlier version of the #2037 spec carried an `afterEach` justified
+by a cross-spec poisoning that cannot happen, and the justification was
+wrong before the machinery was unnecessary.
+
+### The unit is not yet ONE unit — `far.missed` still has two producers
+
+Recorded because A closed most of this gap and the remainder is easy to
+mistake for closed. `far.missed` is written by two paths: the server PROBE
+(`count_after_split/6`, which excludes own-authored rows per #576/#532 A) and
+the client PRUNE (`capScrollbackRing`, which filters `isContentKind` and has
+no own-nick arm at all). Before A they counted different things entirely;
+after A they agree on everything except own-authored content.
+
+That is better and it is also a worse FAILURE MODE: two numbers differing by
+a lot are visibly two numbers, and two numbers differing by three are
+indistinguishable from one until somebody counts. The same window at the same
+cursor reports a different figure depending on whether it went far behind by
+local eviction or by a gap probe. Filed as its own issue rather than fixed
+here — it is a second behaviour change on a path that already carries one,
+and none of the three rulings asked for it.
+
 Two mechanics that are easy to get wrong and were not: the count is ZEROED
 rather than the element hidden, because `events()` feeds `title` and
 `aria-label` as well as the text and an element hidden by a `<Show>` whose

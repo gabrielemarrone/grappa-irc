@@ -52,7 +52,12 @@ import {
   sidebarEventsBadge,
   sidebarWindow,
 } from "../fixtures/cicchettoPage";
-import { joinChannel, partChannel, restoreReadCursorToTail } from "../fixtures/grappaApi";
+import {
+  joinChannel,
+  partChannel,
+  restoreReadCursorToTail,
+  setShowEventBadge,
+} from "../fixtures/grappaApi";
 import { AUTOJOIN_CHANNELS, NETWORK_SLUG } from "../fixtures/seedData";
 import { expect, specNick, specUser, test } from "../fixtures/test";
 
@@ -82,6 +87,13 @@ test("CP29 R-6 — operator's own /part → /join cycle does NOT raise an unread
   page,
 }) => {
   const vjt = specUser();
+  // #2037 B put the sidebar's events pill behind `show_event_badge`, OFF by
+  // default, so this spec opts in BEFORE login — `displayPrefs.ts` applies the
+  // server's map on the post-login refresh. Without it the closing
+  // `toHaveCount(0)` is VACUOUSLY true: the pref suppresses the element whether
+  // or not the bump-gate let the own ACTION through, which is the question.
+  await setShowEventBadge(vjt.token, true);
+
   await loginAs(page, vjt);
 
   // 1. Focus #spec-wN — initial cold load. The seeded autojoin already

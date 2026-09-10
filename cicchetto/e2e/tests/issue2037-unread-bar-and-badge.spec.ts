@@ -80,7 +80,6 @@ import {
   resetSubject,
   restoreReadCursorToTail,
   setReadCursorToId,
-  setShowEventBadge,
 } from "../fixtures/grappaApi";
 import { IrcPeer } from "../fixtures/ircClient";
 import { AUTOJOIN_CHANNELS, getSeededAdmin, NETWORK_SLUG } from "../fixtures/seedData";
@@ -138,22 +137,13 @@ const badgeNumber = async (locator: import("@playwright/test").Locator): Promise
   Number((await locator.innerText()).trim());
 
 test.describe("issue 2037 — the far-behind bar and the sidebar badges", () => {
-  // `show_event_badge` is SERVER-backed and OFF by default. A spec body that
-  // turns it on and then dies would leave the whole account with the events
-  // pill suppressed and poison every badge spec that follows in this worker,
-  // so the restore is out-of-band and unconditional rather than a click at the
-  // end of a happy path.
-  test.afterEach(async () => {
-    try {
-      await setShowEventBadge(specUser().token, false);
-    } catch {
-      // A failed restore must not mask the test's own verdict, but it must
-      // not be silent either: the next badge spec in this worker is the one
-      // that pays for it.
-      process.stderr.write("__I2037__\tshow_event_badge restore FAILED\n");
-    }
-  });
-
+  // No `afterEach` restoring `show_event_badge`. There was one, and its
+  // stated reason — that leaving the pref on would poison the badge specs
+  // that follow in this worker — is FALSE: every test runs on its own
+  // throwaway subject (`provisionSpecSubject`, named off the title path and
+  // DELETEd at teardown), so the pref dies with the user. Both tests below
+  // read the OFF default as a fresh fact, and the second one proves it: it
+  // asserts the default while running after a test that turned the pref on.
   test("the far-behind bar and the bold pill are ONE number, it is strictly below the raw gap, and bar + events + own accounts for every row", async ({
     page,
   }) => {

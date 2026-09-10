@@ -161,8 +161,10 @@ const MIRRORS: readonly Mirror[] = [
   },
 
   // The scroll-edge pair (#1646 slice 2). `SCROLL_BOTTOM_THRESHOLD_PX` is the
-  // most-copied constant in the tree by a wide margin — 20 declarations, one
-  // per spec that has to decide "is this pane at its tail".
+  // most-copied constant in the tree by a wide margin — one declaration per
+  // spec that has to decide "is this pane at its tail". The count is the list
+  // below and is deliberately not restated in prose: it grows with every such
+  // spec, and a number here would be wrong by the next one.
   ...[
     "e2e/fixtures/scrollGesture.test.ts",
     "e2e/tests/bug7-ios-own-msg-visible.spec.ts",
@@ -172,6 +174,7 @@ const MIRRORS: readonly Mirror[] = [
     "e2e/tests/issue1121-overlay-close-tail-reader.spec.ts",
     "e2e/tests/issue168-scroll-authority.spec.ts",
     "e2e/tests/issue196-preview-scroll-live-arrival.spec.ts",
+    "e2e/tests/issue2031-send-with-marker-row-clipped.spec.ts",
     "e2e/tests/issue243-tap-active-scroll-bottom.spec.ts",
     "e2e/tests/issue253-kbd-resize-scroll-preserve.spec.ts",
     "e2e/tests/issue280-button-coexist.spec.ts",

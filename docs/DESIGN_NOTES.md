@@ -50402,3 +50402,88 @@ issue specifies. Both are small, localised changes if the answers differ.
 _Not asserted: that the pref reaches every surface has been measured through
 the chokepoint (one parse caller, zero palette consumers elsewhere), not by
 exercising all twelve in a browser. The e2e covers one channel-pane line._
+<!-- entry #2032 -->
+
+---
+
+## 2026-09-10 — issue 2032: a visibility-return is a resume, and #535's divider half is reversed
+
+Reported: tapping a link that leaves the app and coming back moves the reader
+off the position they were reading at. Desktop and mobile, long-standing.
+Modals are unaffected — they never hide the document, so the pane holds
+position through `overlay-freeze`, a different writer.
+
+**Two writers moved the reader, not one, and the second is the one that makes
+the obvious fix wrong.**
+
+1. **The divider JUMP.** `scrollToActivation` read the `unread-marker` node for
+   `"marker-or-preserve"` — the scrolled-up arm of visibility-return — in the
+   SAME query as the deliberate-switch mode, and `scrollIntoView`d it. So the
+   mode preserved only when NO divider rendered. With one present it moved the
+   reader, which is the opposite of its name.
+2. **The divider RE-LATCH.** The visibility arm re-pointed `markerCursorId` at
+   the live read cursor. When that MOVES the cursor it recomputes `rows()`, and
+   every row is a fresh object literal under a `<For>` keyed by reference, so
+   the whole DOM list is recreated and **scrollTop collapses to 0**.
+
+Writer 2 is masked by writer 1: the jump lands somewhere immediately after the
+reset, so nobody sees the zero. **Remove the jump alone and the reader is
+dropped at the TOP of the buffer — strictly worse than the reported bug.** The
+cure removes both. `"marker-or-preserve"` is renamed `"preserve-only"`, which
+is now the truth rather than an aspiration.
+
+**This REVERSES the second half of #535 (2026-07-30), deliberately.** That entry
+recorded vjt's ruling verbatim — *"non dobbiamo sminchiare lo scroll, come regola
+generale. l'unico caso in cui scrolliamo to bottom è quando si scrive un
+messaggio nella finestra attiva"* — and then glossed it as "everything else
+preserves the reader's position **or lands on the unread divider**". vjt's words
+constrain scroll-to-BOTTOM only; the divider clause was the entry's own
+extension, and it is what authorised putting a resume mode into the divider
+query. #535's reasoning for why that was harmless: the hide-edge cursor write
+parks the cursor at the reader's own row, so the re-latched divider IS their
+position. **That holds only while the write lands.** `setCursorIfAdvances` is
+forward-only (#233), so a reader parked ABOVE the live cursor leaves it
+untouched and the divider sits somewhere else entirely. The invariant that
+survives is #168's (2026-07-03): only a DELIBERATE window change lands on the
+divider.
+
+**The freeze contract loses "option (b)".** `markerCursorId` no longer
+re-latches on visibility-return. It still re-latches on a deliberate switch, on
+cold-mount and on an own send — all genuine focus acquisitions. A resume is not
+one, and the divider a reader was reading against must not move under them.
+
+**The comment at the divider query asserted the opposite of the code** — *"the
+channel-SWITCH trigger jumps to the RENDERED frozen unread divider when one
+exists; every other trigger (cold-mount, visibility-return, resize) lands at the
+tail"*. Both clauses were false: cold-mount became a marker activation in #168's
+own 2026-07-03b completion, and visibility-return's scrolled-up arm was in the
+query. Fixed in the same commit as the cure, per the standing rule.
+
+**`"preserve-only"` still declares the `marker-activation` intent kind**, and
+that is deliberate. The kind is a PRECEDENCE CLASS, not a description of the
+write: it must outrank `tail-follow` (rank 4) or a concurrent tail-follow snaps
+the resuming reader to the tail, which is the #535 defect returning.
+`prepend-preserve`, the only other preserve-shaped kind, sits BELOW `tail-follow`
+and would reinstate it. Minting a new kind means widening the union and the
+PRECEDENCE array shared by the whole applier — a separate change with its own
+blast radius.
+
+**Tests that pinned the old behaviour were rewritten, not deleted.**
+`issue535-visibility-return-preserve-scroll.spec.ts`'s second case asserted
+"return lands ON the divider" — it pinned this defect, and was green by
+construction over the entire divider-present half of the space. Three unit cases
+in `ScrollbackPane.test.tsx` pinned the re-latch, one of them named "(option
+b)". The #168 display-only case kept its property and swapped its trigger from a
+visibility-return to an own send, since a resume can no longer remove a divider.
+New coverage: `issue2032-visibility-return-preserve-position.spec.ts`, whose
+discriminating case has the reader read DOWNWARD past the frozen divider so the
+input-gated scroll-settle advances the live cursor — giving the re-latch
+somewhere new to point, which is what separates writer 2 from writer 1.
+
+_Client-only. No wire change, no protocol bump, no migration._
+
+_Not asserted: the reported direction. The report says "backwards"; every path
+this analysis can construct from the code yanks the reader FORWARD by roughly a
+viewport, or to scrollTop 0 when the divider is absent on return. The backward
+variant was not reproduced, and the cure does not depend on it — the contract
+asserted is preservation, which is direction-agnostic and covers all three._

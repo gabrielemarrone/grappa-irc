@@ -29,7 +29,7 @@ import { moduleRoot } from "./moduleRoot";
 import { channelsBySlug, networkBySlug, networks } from "./networks";
 import { type PushTarget, parsePushTargetUrl } from "./pushPayload";
 import { canonicalQueryNick, openQueryWindowState } from "./queryWindows";
-import { setSelectedChannel } from "./selection";
+import { type SelectedChannel, setSelectedChannel } from "./selection";
 
 /**
  * Routes a parsed push target into the selection store.
@@ -54,28 +54,70 @@ import { setSelectedChannel } from "./selection";
  * between them.
  */
 function routePushTarget(target: PushTarget): void {
+  const selection = pushTargetSelection(target);
+  if (selection.kind === "query") {
+    const net = networkBySlug(target.networkSlug);
+    // Network not resolvable (stale deep-link to an unbound network): no
+    // query window to open, and `pushTargetSelection` has already fallen
+    // back to the raw nick. The select below is still best-effort — the
+    // selection store's bucket-E picker only fires on a was-live→not-live
+    // transition, so a fresh not-live selection is not clobbered.
+    if (net !== undefined) {
+      openQueryWindowState(net.id, selection.channelName, new Date().toISOString());
+    }
+  }
+  setSelectedChannel(selection);
+}
+
+/**
+ * THE push-target → window-identity mapping, shared by the two directions
+ * a notification travels (#2034).
+ *
+ * `routePushTarget` walks it forwards (a tapped notification names the
+ * window to focus); `notificationDismiss.ts` walks it backwards (an OPEN
+ * notification is asked whether it names the window already focused). Both
+ * must agree on what "the same window" means, so the canonicalisation lives
+ * here once rather than being spelled twice.
+ *
+ * The mapping is not the identity function, and that is the whole reason
+ * this is extracted rather than inlined. A DM payload carries the peer nick
+ * RAW as the server saw it on the wire (`Push.Payload.build/3` uses
+ * `sender`, per the key/display split), while the selection store holds the
+ * CANONICAL nick — whatever spelling the open query window already uses.
+ * `Alice` on the wire is the window `alice`, and a byte compare of the two
+ * answers "different window" for the very notification the reader is
+ * looking at.
+ *
+ * Channels need no step here, and the reason is worth stating precisely,
+ * because the obvious one is wrong for half the callers (review,
+ * 2026-09-10). It is NOT that `setSelectedChannel` folds the channel KEY on
+ * the way in — it does (`foldChannelKey`, #1396), but only the FORWARD path
+ * reaches the setter; the backward path never calls it. What covers BOTH
+ * directions is `isActiveSelection`, which runs its own argument through the
+ * same `foldChannelKey` before comparing. So the fold that makes this
+ * function safe to skip for channels lives in `selection.ts`'s comparator,
+ * not in its setter — removing it there would silently break the dismissal
+ * while every forward-path test stayed green.
+ *
+ * Total: an unresolvable network yields the raw name rather than null, so
+ * a stale deep-link degrades to a best-effort match instead of a crash.
+ */
+export function pushTargetSelection(target: PushTarget): NonNullable<SelectedChannel> {
   if (target.kind === "query") {
     const net = networkBySlug(target.networkSlug);
     if (net !== undefined) {
-      const canonical = canonicalQueryNick(net.id, target.channelName);
-      openQueryWindowState(net.id, canonical, new Date().toISOString());
-      setSelectedChannel({
+      return {
         networkSlug: target.networkSlug,
-        channelName: canonical,
+        channelName: canonicalQueryNick(net.id, target.channelName),
         kind: "query",
-      });
-      return;
+      };
     }
-    // Network not resolvable (stale deep-link to an unbound network):
-    // fall through to a best-effort plain select. The selection store's
-    // bucket-E picker only fires on a was-live→not-live transition, so a
-    // fresh not-live selection is not clobbered.
   }
-  setSelectedChannel({
+  return {
     networkSlug: target.networkSlug,
     channelName: target.channelName,
     kind: target.kind,
-  });
+  };
 }
 
 /**

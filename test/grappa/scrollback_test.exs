@@ -167,11 +167,20 @@ defmodule Grappa.ScrollbackTest do
     rows |> List.flatten() |> Enum.map_join("\n", &to_string/1)
   end
 
-  # Returns the single `{sql, params}` Ecto emitted while `fun` ran. Ecto
+  # Returns the single `{sql, params}` THIS TEST CAUSED while `fun` ran. Ecto
   # publishes `[:grappa, :repo, :query]` synchronously in the caller process,
   # so the capture needs no synchronisation. Matching on ONE query is part of
   # the contract: if `count_after_split/6` ever becomes multi-statement, this
   # raises instead of silently pinning whichever statement came last.
+  #
+  # Which is exactly why the attribution is load-bearing here (issue 2064).
+  # `:telemetry.attach/4` is VM-global and hears every emitter in the node;
+  # this file is `async: false`, so the sandbox is SHARED and a stranger's
+  # statement runs on this test's own connection. A handler runs INSIDE the
+  # emitting process, so `self() == test_pid` keeps only what this test
+  # caused — without it a single ambient query turns the one-query contract
+  # into a `MatchError` that names the wrong culprit. `$callers` is
+  # deliberately not consulted: the subject runs in the test process.
   defp capture_one_query(fun) do
     ref = make_ref()
     test_pid = self()
@@ -179,7 +188,9 @@ defmodule Grappa.ScrollbackTest do
     :telemetry.attach(
       {__MODULE__, ref},
       [:grappa, :repo, :query],
-      fn _, _, meta, _ -> send(test_pid, {ref, meta.query, meta.params}) end,
+      fn _, _, meta, _ ->
+        if self() == test_pid, do: send(test_pid, {ref, meta.query, meta.params})
+      end,
       nil
     )
 
@@ -197,6 +208,13 @@ defmodule Grappa.ScrollbackTest do
   # is deliberately MULTI-statement (`rename_dm_peer/4` emits a count plus two
   # `update_all`s). Returns them in emission order, so a test can pick the one
   # whose plan it means to pin instead of pinning whichever came last.
+  #
+  # Carries the same `self() == test_pid` attribution as its singular twin,
+  # and for consistency rather than on a measured red: its one caller picks
+  # its statement by CONTENT (`Enum.find` on an `UPDATE ... "dm_with" =`), so
+  # an ambient stranger cannot displace it today. Leaving one blind attach
+  # beside a cured one would leave two patterns in one file for the next
+  # caller to copy from, and the next caller may well index by position.
   defp capture_queries(fun) do
     ref = make_ref()
     test_pid = self()
@@ -204,7 +222,9 @@ defmodule Grappa.ScrollbackTest do
     :telemetry.attach(
       {__MODULE__, ref},
       [:grappa, :repo, :query],
-      fn _, _, meta, _ -> send(test_pid, {ref, meta.query, meta.params}) end,
+      fn _, _, meta, _ ->
+        if self() == test_pid, do: send(test_pid, {ref, meta.query, meta.params})
+      end,
       nil
     )
 

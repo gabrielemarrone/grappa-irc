@@ -833,8 +833,18 @@ defmodule Grappa.WindowCountsTest do
     subject
   end
 
-  # Counts `[:grappa, :repo, :query]` telemetry events emitted while `fun`
+  # Counts the `[:grappa, :repo, :query]` events THIS TEST CAUSED while `fun`
   # runs (Ecto emits one per statement, synchronously in the caller process).
+  #
+  # The attribution is the point (issue 2064). `:telemetry.attach/4` is
+  # VM-global: it hears every emitter in the node, and no sandbox mode gates
+  # that — under `async: true` the strangers are the other async tests running
+  # concurrently on their own connections. A handler runs INSIDE the emitting
+  # process, so `self()` here IS the emitter and `self() == test_pid` keeps
+  # exactly the statements this test is paying for. `$callers` is deliberately
+  # NOT consulted: `bulk_snapshot/4` runs in the test process, so `self()`
+  # suffices, and widening the predicate would start counting work spawned by
+  # the test that the pinned number does not describe.
   defp count_repo_queries(fun) do
     ref = make_ref()
     test_pid = self()
@@ -842,7 +852,7 @@ defmodule Grappa.WindowCountsTest do
     :telemetry.attach(
       {__MODULE__, ref},
       [:grappa, :repo, :query],
-      fn _, _, _, _ -> send(test_pid, {ref, :q}) end,
+      fn _, _, _, _ -> if self() == test_pid, do: send(test_pid, {ref, :q}) end,
       nil
     )
 

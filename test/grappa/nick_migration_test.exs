@@ -26,9 +26,17 @@ defmodule Grappa.NickMigrationTest do
   alias Grappa.IRC.Identifier
   alias Grappa.{NickMigration, QueryWindows, Scrollback, UserSettings}
 
-  # Every SQL statement Ecto reports while `fun` runs, lowercased. `async:
-  # false` because the handler is global: a concurrent test's queries would
-  # land in this list and the counts below would stop meaning anything.
+  # Every SQL statement THIS TEST CAUSED while `fun` runs, lowercased.
+  #
+  # `async: false` keeps concurrent tests out of the window, but it is not
+  # sufficient and never was (issue 2064): `:telemetry.attach/4` is VM-global,
+  # so an ambient process — a sweeper, a `Session.Server` — emits into this
+  # list too, and shared mode means it does so on this very connection. One
+  # stray transaction is enough to invert the oracle below, because a
+  # savepoint this test did not cause reads exactly like the write lock it
+  # exists to forbid. A handler runs INSIDE the emitting process, so
+  # `self() == test` is the attribution; `$callers` is not consulted because
+  # `peer_renamed/5` runs in the test process.
   defp capture_sql(fun) do
     ref = make_ref()
     test = self()
@@ -36,7 +44,9 @@ defmodule Grappa.NickMigrationTest do
     :telemetry.attach(
       "nm-sql-#{inspect(ref)}",
       [:grappa, :repo, :query],
-      fn _, _, %{query: query}, _ -> send(test, {ref, String.downcase(query)}) end,
+      fn _, _, %{query: query}, _ ->
+        if self() == test, do: send(test, {ref, String.downcase(query)})
+      end,
       nil
     )
 

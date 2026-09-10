@@ -34,10 +34,17 @@ import { channelKey } from "../lib/channelKey";
 // moves; a server that ignored its arguments would arm and clear far-behind for
 // reasons of its own.
 //
-// Deliberately threshold-agnostic: every arm leaves the cursor at the channel
-// TIP, where every candidate invalidation rule agrees. The rule itself (which
-// bound retires the record) is a separate decision and no assertion here
-// depends on it.
+// Deliberately threshold-agnostic: every arm that moves the CURSOR leaves it at
+// the channel TIP, where every candidate invalidation rule agrees. The rule
+// itself (which bound retires the record) is a separate decision and no
+// assertion in those arms depends on it.
+//
+// The last arm moves the WINDOW instead, with the cursor standing still, and it
+// is the one place a bound is asserted at all — but on the record's own terms
+// ("the unread region is not in this pane") rather than on any arithmetic:
+// page the whole region back in and the record must be gone, page part of it
+// and the record must stand. That is the caveat the chosen bound was accepted
+// with, measured instead of argued.
 //
 // What these tests do NOT cover: the browser. This is store-level — jsdom gives
 // the pane no geometry, so the read-at-the-tail door is driven through its
@@ -73,6 +80,15 @@ const CHANNEL = "#grappa";
 const KEY = channelKey(SLUG, CHANNEL);
 const DEFAULT_PAGE = 50;
 const CAUGHT_UP_AT = 1000;
+// #1094's prepend seam is the pane's scroll-geometry compensation. A store-level
+// test has no geometry to preserve, and `loadMore` documents `undefined` as a
+// legitimate answer, so the seam opens onto nothing here. Same spelling as
+// `scrollback.test.ts` / `scrollbackIngestCost.test.ts`.
+const noSeam = (): undefined => undefined;
+// A bound on the scroll-up loop below: the fake log is 6000 rows, so 120 pages
+// covers all of it. Reaching this means paging stopped making progress — a red
+// with a stack, not a five-second hang.
+const PAGE_BUDGET = 200;
 
 const row = (id: number, sender: string): ScrollbackMessage => ({
   id,
@@ -244,5 +260,70 @@ describe("issue 2050 — a far-behind badge the cursor has already retired", () 
 
     expect(scrollback.farBehindByChannel()[KEY]).toBeDefined();
     expect(selection.messagesUnread()[KEY]).toBe(5000);
+  });
+
+  it("retires the record when scroll-up re-pages the region, and thaws without marking it read", async () => {
+    await wireServer();
+    const scrollback = await import("../lib/scrollback");
+    const selection = await import("../lib/selection");
+    const { getReadCursor } = await import("../lib/readCursor");
+    await absenceThenReconnect();
+
+    // The other axis. Every arm above moves the CURSOR up to the region; this
+    // one leaves the cursor exactly where the absence left it and moves the
+    // WINDOW down to the region instead — the operator scrolls up. `loadMore`
+    // prepends OLDER rows, so it lowers the oldest loaded id, and paging far
+    // enough back therefore satisfies the invalidation bound with nothing
+    // having been read. That is the caveat the bound was accepted with, and
+    // this arm is the measurement it was accepted WITHOUT.
+    //
+    // Three rows land live while the operator is still away from the tail —
+    // the channel does not stop talking because someone is scrolling. They
+    // are also what makes the badge's two candidate readings separable: the
+    // seed is a join-time snapshot and cannot move (5000), local truth is
+    // 5003. Safe under the #1229 ceiling: the pane holds one tail page, so the
+    // unread it HOLDS is ~50, an order of magnitude under the cap that would
+    // collapse the window.
+    for (let id = 6001; id <= 6003; id++) {
+      server.tip = id;
+      scrollback.appendToScrollback(KEY, row(id, "bob"));
+    }
+    // Still the frozen seed, and now demonstrably frozen: 5003 rows are unread
+    // and the badge says 5000.
+    expect(selection.messagesUnread()[KEY]).toBe(5000);
+
+    // One page up is not enough and must not be — the pane still starts
+    // thousands of rows above the read position, so the region is still
+    // elsewhere. Without this step the arm cannot tell "retires when the hole
+    // closes" from "retires as soon as you scroll".
+    await scrollback.loadMore(SLUG, CHANNEL, noSeam);
+    expect(scrollback.farBehindByChannel()[KEY]).toBeDefined();
+    expect(selection.messagesUnread()[KEY]).toBe(5000);
+
+    // Keep scrolling until the record lets go. The loop asserts no arithmetic
+    // — the exit is the record's own state — so it holds for any bound that
+    // honours what the record claims.
+    let pages = 1;
+    while (scrollback.farBehindByChannel()[KEY] !== undefined) {
+      expect(pages).toBeLessThan(PAGE_BUDGET);
+      await scrollback.loadMore(SLUG, CHANNEL, noSeam);
+      pages++;
+    }
+
+    // Nothing was read: the cursor sits where the absence left it, on both
+    // sides. Retiring the record THAWS — it stops the badge publishing the
+    // frozen seed and hands the count back to local truth — it does not mark
+    // anything read, and an implementation that "cleared the unread" by moving
+    // the cursor would fail here rather than in some later session.
+    expect(getReadCursor(SLUG, CHANNEL)).toBe(CAUGHT_UP_AT);
+    expect(server.cursor).toBe(CAUGHT_UP_AT);
+
+    // And local truth is the WHOLE region, not a slice of it. 5003 says two
+    // things at once: the badge is no longer the seed (5000) and no longer
+    // frozen, AND the record held until every unread row was back in the pane.
+    // A bound that fired early would leave the pane holed, local truth would
+    // be short, and the badge would UNDER-report — which is the destructive
+    // unfreeze the far-behind apparatus exists to refuse.
+    expect(selection.messagesUnread()[KEY]).toBe(5003);
   });
 });

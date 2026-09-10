@@ -738,7 +738,7 @@ defmodule GrappaWeb.UserSettingsControllerTest do
                "presence_filter" => %{"libera #bofh" => "hide"},
                "show_bottom_bar" => true,
                "strip_formatting" => false,
-      "show_event_badge" => false
+               "show_event_badge" => false
              }
     end
 

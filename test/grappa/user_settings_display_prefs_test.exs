@@ -566,6 +566,7 @@ defmodule Grappa.UserSettingsDisplayPrefsTest do
       assert UserSettings.get_display_prefs(subject).presence_filter == %{"n #v" => "hide"}
     end
   end
+
   # ---------------------------------------------------------------------------
   # show_event_badge (#2037 B) — the SIXTH key, and the first whose default
   # TAKES something away

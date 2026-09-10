@@ -236,20 +236,35 @@ defmodule GrappaWeb.ArchiveController do
   # no client-side filter can restore an entry the server never sent. The
   # asymmetry was the bug; the channel arm was right.
   #
-  # Written as one `case` over the session lookup rather than an empty-list
-  # fallback plus a separate query read, so the two arms cannot drift apart
-  # again: there is now exactly one place that says what an absent session
-  # means here.
+  # Written as ONE `case` over the session lookup — both sources answered by
+  # the same arm — rather than a channels-only fallback plus a separate query
+  # read, so the two cannot drift apart again: there is exactly one place here
+  # that says what an absent session means.
+  #
+  # The `case` yields the TARGET LIST and the MapSet is built once, after it.
+  # That is a dialyzer constraint, not a style choice, and reverting it to a
+  # `MapSet.new(...)` per arm reopens two errors — measured, both directions:
+  # `MapSet.t/1` is OPAQUE, and a MapSet built from a statically-empty list
+  # collapses to the concrete `%MapSet{map: %{}}` in the success typing (it is
+  # the empty LITERAL, not the arity — `MapSet.new()` and `MapSet.new([])` are
+  # red alike). Joined with the other arm the return is then no longer purely
+  # opaque, so the `@spec` below reads as `contract_with_opaque`, and handing
+  # the value to `Scrollback.list_archive/3` — which specs the opaque type —
+  # reads as `call_without_opaque`. One construction site from a list dialyzer
+  # cannot fold to a constant keeps the opacity intact.
   @spec build_active_keyset(
           {:user, User.t()} | {:visitor, Visitor.t()},
           Grappa.Scrollback.subject(),
           integer()
         ) :: MapSet.t(String.t())
   defp build_active_keyset(subject, session_subject, network_id) do
-    case Session.list_channels(session_subject, network_id) do
-      {:ok, channels} -> MapSet.new(channels ++ open_query_targets(subject, network_id))
-      {:error, :no_session} -> MapSet.new()
-    end
+    active_targets =
+      case Session.list_channels(session_subject, network_id) do
+        {:ok, channels} -> channels ++ open_query_targets(subject, network_id)
+        {:error, :no_session} -> []
+      end
+
+    MapSet.new(active_targets)
   end
 
   @spec open_query_targets({:user, User.t()} | {:visitor, Visitor.t()}, integer()) ::

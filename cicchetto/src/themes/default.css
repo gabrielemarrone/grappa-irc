@@ -3204,10 +3204,23 @@ html.resize-dragging * {
    the #74 inline-strip <input>); editing happens here, inside the modal, in a
    roomy multi-line <textarea>. IRC topics are one wire line — newlines are
    flattened on submit (TopicBar.submitEdit); the textarea is a display-only
-   affordance. */
+   affordance.
+
+   issue 2035 — the height is `rows={8}` on the element now (TopicBar.tsx),
+   NOT a min-height here, and that is the whole cure rather than a bigger
+   number. The `min-height: 4.5em` this replaces was read as 4.5 / 1.25 = 3.6
+   text lines, and it never was: `* { box-sizing: border-box }` makes that
+   figure include the 0.6rem vertical padding and the 2px border, so at the
+   14px root it left 52.6px of content over a 17.5px line box — 3.0 lines,
+   which is exactly the "solo tre righe" the issue was filed about. Carrying
+   the same mistake forward, the 10em quoted for "8 lines" would have rendered
+   7.4. `rows` is the platform's own line count: it tracks font-size and
+   line-height by itself and cannot drift from them, so there is no arithmetic
+   left to get wrong. `resize: vertical` STAYS — an operator who wants more
+   drags. Below, the global form-control `min-height: var(--tap-min)` is the
+   only floor a drag meets, which is the tap-target one and correct. */
 .topic-modal-editor {
   width: 100%;
-  min-height: 4.5em;
   box-sizing: border-box;
   resize: vertical;
   background: var(--bg);

@@ -39,7 +39,8 @@ import PaneTopBar, { PaneTopBarRailOpener } from "./PaneTopBar";
 // modal shows a ✏️ toggle. ✏️ swaps the topic text for a multi-line
 // <textarea> + ❌ cancel + ✅ save; the ✏️ disappears. ❌ cancel DISCARDS the
 // draft, reverts to read-only, brings the ✏️ back, and KEEPS the modal open.
-// ✅ save flattens newlines → submits via the EXISTING send doors (postTopic
+// ✅ save — or Enter inside the textarea, issue 2035 — flattens newlines →
+// submits via the EXISTING send doors (postTopic
 // REST for a non-empty set, pushChannelTopicClear WS verb for an empty clear —
 // one-feature-every-door, the same doors the `/topic` slashes use) and CLOSES
 // the modal on success. A server reject surfaces inline (S21 no-false-success)
@@ -54,6 +55,8 @@ import PaneTopBar, { PaneTopBarRailOpener } from "./PaneTopBar";
 // → :invalid_line). The <textarea> is a display/editing affordance only —
 // `flattenTopicNewlines` collapses every newline run to one space on submit
 // BEFORE the send door, so a multi-line edit reaches upstream as one line.
+// Still true after issue 2035 stopped Enter from inserting one: a PASTE
+// carries newlines in, and the flatten is what spends them.
 //
 // UX-4 bucket L (2026-05-19): the settings cog AND the left channel-
 // sidebar hamburger moved out of TopicBar into the cluster-wide
@@ -242,6 +245,35 @@ const TopicBar: Component<Props> = (props) => {
     }
   };
 
+  // issue 2035 — Enter SETS the topic. This REVERSES the #263 decision that
+  // used to be recorded a few lines down ("Enter in the textarea must stay a
+  // newline, save is the ✅ button only"): the product owner ruled the
+  // asserted behaviour wrong. The premise was weak besides — an IRC topic is
+  // ONE wire line, and `flattenTopicNewlines` spends every newline BEFORE the
+  // send door, so the break Enter bought was worth exactly one space and could
+  // never reach the wire as a break.
+  //
+  // EVERY Enter submits, modifier or not — #974, vjt's 2026-08-07 ruling on
+  // `ComposeBox`, the sibling surface with the same one-wire-line domain: a
+  // Shift+Enter that refuses also EATS the keystroke, and on his device the
+  // modifier arms itself on presses he never meant as Shift+Enter, so the send
+  // silently does not happen. Same operator, same chord, same answer here
+  // rather than a second semantics for it.
+  //
+  // 🔴 Escape is NOT handled here and must never be: #232 makes the shared
+  // overlay stack the SINGLE Esc authority (it deleted every per-dialog
+  // handler), and this modal's edit-aware close verb already lives on it —
+  // see `createOverlayLock` below. An element-level keydown for Enter is
+  // allowed to exist; one that grows an Escape branch is a second authority.
+  //
+  // `preventDefault` is what stops the textarea inserting its own break; the
+  // flatten STAYS regardless, because a PASTE still carries newlines in.
+  const onEditorKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    void submitEdit();
+  };
+
   // #71 INC-2 — the per-channel presence-filter toggle (👁/🙈, #222) MOVED OUT
   // of the topic bar into the right-rail RailActions drawer (channel-gated). Q2
   // ruling: "one design" wants that toggle in the rail drawer on both form
@@ -264,10 +296,9 @@ const TopicBar: Component<Props> = (props) => {
   // `cancelEdit` (revert the draft, stay open, ✏️ back — the #263 cancel
   // contract), NOT `closeModal`. A naive `closeModal` here would tear down the
   // draft, violating #263. In read-only, Esc runs `closeModal` (the same verb
-  // the × / backdrop use). No element-level keydown on the textarea — the
-  // shared stack is the single ESC authority (#232 deleted all per-dialog
-  // handlers), and Enter in the textarea must stay a newline (save is the ✅
-  // button only), the flatten collapses it on submit.
+  // the × / backdrop use). The textarea's own keydown (issue 2035, above)
+  // handles Enter and NOTHING else — this stack remains the single ESC
+  // authority (#232 deleted all per-dialog handlers).
   createOverlayLock(
     () => modalState() === "open",
     ".topic-modal",
@@ -446,21 +477,28 @@ const TopicBar: Component<Props> = (props) => {
               }
             >
               {/* #263 — multi-line editor. IRC topics are one wire line, so
-                  newlines are flattened on submit (see submitEdit). NO
-                  Enter-to-submit: Enter inserts a newline; ✅ is the only save.
-                  NO element-level Esc handler — the shared #232 overlay stack
+                  newlines are flattened on submit (see submitEdit); a paste is
+                  the route they still arrive by. Enter SETS the topic (issue
+                  2035 — see onEditorKeyDown), ✅ is the other door. NO
+                  element-level Esc handler — the shared #232 overlay stack
                   owns Esc (edit-aware onEscape → cancelEdit). Seeded with the
-                  raw topic. */}
+                  raw topic.
+                  `rows` is the height knob (issue 2035): the platform's own
+                  "how many text lines", which tracks font-size + line-height
+                  by itself. See `.topic-modal-editor` for the min-height it
+                  replaced and the arithmetic that one got wrong. */}
               <textarea
                 class="topic-modal-editor"
                 data-testid="topic-modal-editor"
                 aria-label="edit topic"
                 placeholder="Set a topic…"
+                rows={8}
                 value={draft()}
                 ref={(el) => {
                   editorRef = el;
                 }}
                 onInput={(e) => setDraft(e.currentTarget.value)}
+                onKeyDown={onEditorKeyDown}
               />
               {/* #263 — inline submit-error surface (S21 no-false-success). */}
               <Show when={editError()}>

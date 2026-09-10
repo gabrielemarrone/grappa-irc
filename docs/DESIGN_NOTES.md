@@ -50955,3 +50955,133 @@ one instant — that is read off two clauses, not measured, and measuring it
 needs a live session. That the May snapshot is representative of the incident
 channel; it establishes a floor on how implausible 216 carve-out rows are,
 not a distribution. That the residual is explained — it is not._
+<!-- entry #2037b -->
+
+---
+
+## 2026-09-10 — #2037b: one predicate, two buckets, and a bar that is now the badge
+
+#2037a measured the three reported numbers and closed the anchor: the bar's
+term is bounded above by zero, so re-anchoring the probe moves the bar DOWN
+by at most one page and leaves the 1404-row residual exactly where it is.
+This entry records what was BUILT on top of that, under three rulings from
+vjt on the issue (2026-09-10, 08:54 / 08:56 / 09:00): use one logic for the
+counting; messages are what land in both the badge and the far-behind bar;
+the threshold stays as it is today.
+
+### The partition, named once
+
+There is ONE split and it already existed:
+
+    messages := kind IN     Grappa.Scrollback.Message.@content_kinds
+    events   := kind NOT IN @content_kinds
+
+`Scrollback.count_after_split/6` (per window) and
+`ReadCursor.bulk_unread_split/3` (the bulk `/me` seed) were both already
+computing exactly this. #2037 introduced no new predicate; it stopped a
+FOURTH surface — the far-behind bar — from using a different one. The split
+gained a name this round, `Grappa.Scrollback.count_split()`, because it is
+now a wire shape rather than only an internal return.
+
+The threshold is deliberately NOT in the partition. `count_after/6` keeps its
+predicate (raw rows, own-authored included) and its one caller, the
+`probeGap` → `isFarBehind` decision. Feeding a messages-only number into the
+threshold would have a channel with 3000 hidden JOINs and 40 messages report
+a 40-row gap and then take a contiguous-paging path it cannot serve. That is
+the 09:00 ruling and it is a correctness argument, not an omission.
+
+### The property: the bar and the badge are ONE VARIABLE
+
+The acceptance criterion was that the two numbers cannot drift apart again.
+Two values that happen to agree do not satisfy it; one value read twice does.
+So `far().missed` IS the messages count, `perChannelUnread` reads the
+far-behind entry for a far-behind key instead of the seed, and the bar
+renders the same field. Nothing compares them, because there is nothing to
+compare.
+
+Serving the seed at render time was the one-line alternative and was rejected
+for a MEASURED reason, not a stylistic one: `far.missed` also feeds
+`measuredUnread`, which places the in-pane divider. Narrowing only the
+sidebar would have left the divider on the raw number, so the operator taps
+"187 unread" and lands on "1807 unread messages". A definition that reaches
+one of its two consumers is the defect this issue is about, reproduced one
+layer down.
+
+The probe is also the fresher of the two inputs, which is a side effect worth
+recording because it is easy to mistake for a fix. The seed is written by
+`/me` and by the join reply and by nothing else: the per-message
+`window_counts` push carries the pair, but cic ignores it on purpose
+(`subscribe.ts`, #239 — messages/events stay client-derived for the presence
+filter) and a far-behind key skips client derivation by design. So a
+far-behind window's seed is frozen at login while the probe is taken when the
+pane opens. That narrows the stale-seed path for exactly the windows where it
+went stale. It is NOT a fix aimed at the residual and is not claimed as one.
+
+The prune path (#1229) had to follow or the tree would carry two definitions
+again: it arms far-behind from LOCAL eviction and was accumulating raw row
+counts into the same field. It now accumulates the content unit. The ARMING
+stays on the raw count, deliberately — what arms far-behind is "a row at or
+after the cursor left the store", which a JOIN does as surely as a message,
+and the divider cannot be placed either way. Only the displayed quantity
+narrowed.
+
+### One resolution per request
+
+Both halves of the split come from ONE `resolve_hide_presence/3` call in
+`MessagesController.count/2`. That closes by construction the divergence
+#2037a measured between the two `PresenceFilter.Resolver` doors: within a
+request there is one resolution and both counters get it. It does NOT close
+the divergence between `/me` and a later probe, which is a different pair of
+instants and has its own issue.
+
+### The `kick` consequence, said out loud
+
+`show_event_badge` is the sixth #449 display pref and the first whose DEFAULT
+takes something away. It is server-backed on #1766's criterion: a per-DEVICE
+toggle is right when the complaint is about a VIEWPORT and wrong when it is
+about the ACCOUNT, and "is my sidebar cluttered with join/part counts" is
+identical on the phone and the desktop.
+
+What it hides is WIDER than join/part, and the ruling asks for that to be
+stated rather than discovered. The events bucket is `kind not in
+@content_kinds`, so `topic`, `kick` and `server_event` follow it — the three
+kinds that sit OUTSIDE `Message.suppressed_presence_kinds/0` on purpose
+(#458), because the PANE still renders them on a denoised channel. Rendering
+in the pane and earning a badge are different questions and this pref answers
+only the second. **A KICK therefore stops contributing to a badge by
+default.** That is a deliberate behaviour change.
+
+Putting `kick` back into the message bucket would smuggle a non-message into
+the very number the bar now shares with the bold pill and undo the other
+half. A kick that must stay loud belongs in the mention/severity channel
+(#267), which is a different axis from "how many unread rows".
+
+Two mechanics that are easy to get wrong and were not: the count is ZEROED
+rather than the element hidden, because `events()` feeds `title` and
+`aria-label` as well as the text and an element hidden by a `<Show>` whose
+accessible name still says "216 unread events" is the wrong half of the
+change; and `applyServerPrefs` uses `??` and not `||`, which matters more for
+this key than for its predecessors because `false` is the default — `||`
+would make the badge impossible to turn back OFF from a second device once
+any device had turned it on.
+
+### Protocol 16, and the third `wire_pin` blindness
+
+`@protocol_version` goes 15 → 16 for the two new fields on the count
+response. `mix grappa.wire_pin --check` did not force it, for the THIRD
+release running: its digest does not span hand-written `*_json.ex` views, and
+v15 already recorded that as a property rather than an accident. The bump is
+a deliberate manual act and `protocol_test.exs` is the only automatic guard
+on the pair. `min_protocol_version` stays at 1: `countMessagesAfter` falls
+back to `{messages: count, events: 0}` when the pair is absent, which is
+exactly the pre-#2037 number in the pre-#2037 place, so a new bundle degrades
+against an old server instead of breaking.
+
+_Not asserted: that any of this explains the 1404-row residual. It does not
+and does not try. The four (bar posture, seed posture) assignments from
+#2037a remain excluded by measurement, so a premise of the MODEL has to give
+rather than a premise of the reading, and the reading that the two pills are
+not that window's pair is EXCLUDED by vjt — he settled on 2026-09-10 that it
+is one and the same window ("si stessa window", his words on IRC, reported
+into the session; I do not read IRC). The quantity was unified. The mystery
+was not closed._

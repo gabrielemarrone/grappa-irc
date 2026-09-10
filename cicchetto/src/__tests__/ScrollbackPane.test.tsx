@@ -2545,6 +2545,83 @@ describe("ScrollbackPane", () => {
     });
   });
 
+  // #2031 — the tail write's SECOND step, which has no other coverage anywhere.
+  //
+  // `scrollIntoView({block:"end"})` aligns the tail ROW's bottom with the
+  // scrollport's bottom EDGE and leaves the scroller's own `padding-bottom`
+  // unscrolled, so the pane stops ~7px short of its tail and the just-sent row
+  // sits flush against the edge with a fraction of a pixel clipped. The cure
+  // finishes the write against `scrollHeight - clientHeight`.
+  //
+  // Why this belongs in jsdom and not only in the e2e: the e2e measures the
+  // OUTCOME in a real layout, but it cannot construct the one input that makes
+  // the down-only guard matter — a `scrollHeight` read that is STALE, which is
+  // the UX-8(a3) condition the native walk exists to survive. Here that input is
+  // just a `defineProperty`. Without these two, the guard is an untested branch.
+  //
+  // The whole jsdom suite is otherwise blind to the top-up: `scrollHeight` and
+  // `clientHeight` both default to 0, so `max` is 0 and the write never fires
+  // unless a test defines geometry BEFORE the tail write — measured, which is
+  // why the W6 loadMore-preserve block above (which defines its geometry after
+  // `render`) is untouched by this change.
+  describe("#2031 — the tail write finishes at the scroller's own maximum", () => {
+    let origScrollIntoView: typeof Element.prototype.scrollIntoView;
+    beforeEach(() => {
+      // jsdom has no `scrollIntoView`. Stub it to a NO-OP so the assertion below
+      // measures the top-up alone: in a real engine the walk would already have
+      // moved the pane most of the way, and what is under test is the remainder.
+      origScrollIntoView = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = vi.fn();
+    });
+    afterEach(() => {
+      Element.prototype.scrollIntoView = origScrollIntoView;
+    });
+
+    const geometry = (list: HTMLDivElement, scrollHeight: number, scrollTop: number): void => {
+      Object.defineProperty(list, "scrollHeight", { value: scrollHeight, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 300, configurable: true });
+      Object.defineProperty(list, "scrollTop", {
+        value: scrollTop,
+        writable: true,
+        configurable: true,
+      });
+    };
+
+    it("tops the pane up to scrollHeight - clientHeight, not to the tail row's edge", async () => {
+      setScrollback({ "freenode #grappa": fixture });
+      render(() => <ScrollbackPane networkSlug="freenode" channelName="#grappa" kind="channel" />);
+      await waitFor(() => expect(screen.getAllByTestId("scrollback-line")).toHaveLength(3));
+      const list = screen.getByTestId("scrollback") as HTMLDivElement;
+      // A pane parked above the tail, with a real extent. 1000 - 300 = 700.
+      geometry(list, 1000, 120);
+
+      // The operator tail — the same `scrollToBottomGesture` the floating button
+      // invokes, and the shortest path to the shared write.
+      requestScrollToBottom();
+      await Promise.resolve();
+
+      expect(list.scrollTop).toBe(700);
+    });
+
+    it("never scrolls UP: a stale, too-small maximum leaves the native walk's position alone", async () => {
+      setScrollback({ "freenode #grappa": fixture });
+      render(() => <ScrollbackPane networkSlug="freenode" channelName="#grappa" kind="channel" />);
+      await waitFor(() => expect(screen.getAllByTestId("scrollback-line")).toHaveLength(3));
+      const list = screen.getByTestId("scrollback") as HTMLDivElement;
+      // The UX-8(a3) shape: `scrollHeight` reads SMALLER than where the pane
+      // actually is, because the bookkeeping is mid-update. max = 700 < 900.
+      // Writing that maximum would drag the reader 200px back UP and undo the
+      // very walk the first step performed — and, since the pane leaves the tail
+      // only when scrollTop DECREASES (#168), it would also drop followMode.
+      geometry(list, 1000, 900);
+
+      requestScrollToBottom();
+      await Promise.resolve();
+
+      expect(list.scrollTop).toBe(900);
+    });
+  });
+
   // #608 STEP 6 (RED-GREEN behaviour change) — the tail-follow write waits for a
   // MEASURED settle (isSettled: the appended content's extent has GROWN vs the
   // last tail AND the new tail row has a laid-out box) before scrolling, instead
@@ -5094,7 +5171,15 @@ describe("ScrollbackPane", () => {
       // queueMicrotask delays the DOM read+write; wait for it to flush.
       await new Promise((r) => queueMicrotask(() => r(undefined)));
 
-      // No marker → routine takes the scrollTop branch, not scrollIntoView.
+      // No marker → the routine's tail path, which since #2031 is the shared
+      // `scrollToTail` and no longer an inline `scrollTop = scrollHeight` branch.
+      //
+      // ⚠️ What this assertion actually pins is WEAKER than the title says, and
+      // it pre-dates #2031: `scrollToActivation` defers into rAF×2 while this
+      // waits ONE microtask, so a green here means "nothing has been written
+      // YET" rather than "the tail path was taken instead of the marker's".
+      // Named rather than rewritten — correcting it is a change to what this
+      // test measures, and it does not ride in on #2031's back.
       expect(scrollIntoViewSpy).not.toHaveBeenCalled();
       // atBottom branch sets atBottom=true → scroll-to-bottom button hidden.
       expect(screen.queryByTestId("scroll-to-bottom")).toBeNull();

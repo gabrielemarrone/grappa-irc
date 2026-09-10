@@ -821,6 +821,79 @@ export async function scrollbackDistanceFromBottom(page: Page): Promise<number |
   });
 }
 
+// Issue 2031 — where one scrollback row sits relative to the pane that clips
+// it, and to the compose below.
+//
+// 🔴 The reason this exists rather than `distanceFromBottom <= 50` or
+// `toBeInViewport()`, which are the two assertions already in the tree and
+// which BOTH pass while the reported defect is on screen:
+//
+//   * `scrollbackDistanceFromBottom` is the pane's distance from its own tail,
+//     and `SCROLL_BOTTOM_THRESHOLD_PX` declares 50px of that to be "at the
+//     tail". A message row is shorter than 50px, so a row can be entirely
+//     below the fold inside a pane that every existing assertion calls tailed.
+//     That tolerance is the thing under accusation; an assertion cannot be
+//     written in terms of it.
+//   * `toBeInViewport()` defaults to `ratio: 0`, i.e. ANY non-empty
+//     intersection. A row showing one pixel passes it. It also measures
+//     against the browser viewport rather than against the scroller, so it
+//     cannot speak about a row clipped by the pane at all.
+//
+// So the reading is the row's box against the PANE's box, in CSS pixels, and
+// it is returned rather than asserted: the caller owns the tolerance, and the
+// numbers are what make a failure legible.
+//
+// `composeTopPx` / `hiddenBehindComposePx` are here to DISCRIMINATE two
+// mechanisms that produce the same complaint ("the line is hidden under the
+// compose"), because the cure is different for each and the report cannot tell
+// them apart:
+//   (a) SCROLL — the pane is short of its own tail, so the row is below the
+//       pane's own bottom edge: `overflowBelowPx > 0`.
+//   (b) LAYOUT — the pane is genuinely at its tail and the row is inside the
+//       pane's box, but the painted pane extends under the compose, so the row
+//       is covered: `overflowBelowPx <= 0` while `hiddenBehindComposePx > 0`.
+// (b) is not hypothetical: `themes/default.css` records exactly it on iOS
+// WebKit ("last messages hide behind BottomBar", UX-6 bucket D v2), cured
+// there with `min-height: 0`. A spec that only knew (a) would misattribute it.
+export type RowClearance = {
+  readonly rowTopPx: number;
+  readonly rowBottomPx: number;
+  readonly paneTopPx: number;
+  readonly paneBottomPx: number;
+  // Positive ⇒ that many CSS px of the row are past the pane's bottom edge.
+  readonly overflowBelowPx: number;
+  // Positive ⇒ that many CSS px of the row are above the pane's top edge.
+  readonly overflowAbovePx: number;
+  // The pane's own distance from its tail, for cross-reading against the
+  // threshold that is under accusation.
+  readonly distanceFromBottomPx: number;
+  // `null` when no compose is mounted (a read-only window).
+  readonly composeTopPx: number | null;
+  readonly hiddenBehindComposePx: number | null;
+};
+
+export async function rowClearance(row: Locator): Promise<RowClearance> {
+  return await row.evaluate((el) => {
+    const pane = document.querySelector('[data-testid="scrollback"]') as HTMLElement | null;
+    if (!pane) throw new Error("rowClearance: scrollback container not found");
+    const r = el.getBoundingClientRect();
+    const p = pane.getBoundingClientRect();
+    const compose = document.querySelector(".compose-box") as HTMLElement | null;
+    const composeTop = compose ? compose.getBoundingClientRect().top : null;
+    return {
+      rowTopPx: r.top,
+      rowBottomPx: r.bottom,
+      paneTopPx: p.top,
+      paneBottomPx: p.bottom,
+      overflowBelowPx: r.bottom - p.bottom,
+      overflowAbovePx: p.top - r.top,
+      distanceFromBottomPx: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+      composeTopPx: composeTop,
+      hiddenBehindComposePx: composeTop === null ? null : r.bottom - composeTop,
+    };
+  });
+}
+
 // #237 — the on-JOIN inline topic line. NOT a `scrollback-line` (it is a
 // presentational, non-message row derived from the topic store — no server
 // message id, so it never enters the unread/cursor math). Its own testid

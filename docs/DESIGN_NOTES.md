@@ -50487,3 +50487,202 @@ this analysis can construct from the code yanks the reader FORWARD by roughly a
 viewport, or to scrollTop 0 when the divider is absent on return. The backward
 variant was not reproduced, and the cure does not depend on it — the contract
 asserted is preservation, which is direction-agnostic and covers all three._
+<!-- entry #2031 -->
+
+---
+
+## 2026-09-10 — #2031: a send stops one padding short of the tail, and the obvious cure was a regression
+
+Reported from an iPhone: send while the `── N unread messages ──` divider is on
+screen and the just-sent line comes out clipped at the bottom of the scrollback.
+The issue's own guess named the `SCROLL_BOTTOM_THRESHOLD_PX` slack — 50px of
+declared "close enough to the tail", which is wider than a message row, so a
+pane every assertion in the codebase calls "at the tail" can hold a whole row
+below the fold.
+
+That guess is right about the mechanism it enables and wrong about the distance.
+Measured over nine runs on the untouched tree, the terminal state has exactly
+two values: `distanceFromBottom = 7` with the row overflowing the pane's bottom
+edge by +0.203px (`webkit-iphone-15`, 3/3 — deterministic on the reported
+platform) or +0.359px (chromium, 2/3), against `distanceFromBottom = 0` and
+−6.640px on the one healthy chromium run. The pane does not stop somewhere
+inside 50px of slack. It stops SEVEN pixels short, and seven is the scroller's
+own `padding-bottom` (`.scrollback { padding: 0.5rem 1rem }`).
+
+`scrollIntoView({ block: "end" })` aligns the tail ROW's bottom box with the
+scrollport's bottom EDGE. The scroller's padding sits below that row inside the
+scrollable extent, so it is simply never scrolled: the row lands flush against
+the edge with no breathing room and a fraction of a pixel cut. Nothing repairs
+it afterwards, because 7 ≤ 50 makes every "am I at the tail" reader answer yes —
+the #625 fail-safe included, which then skips its write for exactly the reason
+#625 taught it to.
+
+So the divider is not what leaves the pane short. Its collapse is the follow-on
+rows change that produces the poll whose correction gets suppressed; the
+shortfall itself is the padding blind spot, and it is there on every send. The
+divider is what makes it visible.
+
+### Two cures were refused, and a third refusal is the entry
+
+Lowering `SCROLL_BOTTOM_THRESHOLD_PX` is not available: that number is the
+definition of "at the tail" for the whole product — the scroll-to-bottom button,
+the `followMode` re-arm, the read-cursor advance, the badge suppression in
+`readingAtTail.ts`. Four unrelated behaviours moved to repair one scroll write.
+
+Changing the #625 fail-safe's PREDICATE — comparing against the tail row's box
+instead of the fixed slack — treats the symptom. The fail-safe did not misjudge
+anything; it was asked to patch a write that should have been correct.
+
+The third is the one worth recording, because it was the obvious move and it
+would have been a REGRESSION. The write's two branches read as interchangeable:
+
+```
+if (tail?.scrollIntoView) { tail.scrollIntoView({ block: "end" }); }
+else { listRef.scrollTop = listRef.scrollHeight; }
+```
+
+and the `else` branch reaches the real tail, so swapping them is a one-line fix
+that measures correct on this issue. The branches are not alternatives. UX-8(a3)
+chose the native walk over the `scrollHeight` math from a measured incident: the
+browser scrolls the container from the element's real box, which stays
+layout-aware while `scrollHeight` bookkeeping is mid-update — the channel-back
+path, where a cached window's store reload races the key-effect even after
+rAF×2. The setter has no such property, and it does not walk scrollable
+ANCESTORS either. The `else` branch is the fallback for having no element (and,
+incidentally, the jsdom path, where `Element.prototype.scrollIntoView` does not
+exist).
+
+Trading the walk for the setter therefore trades a measured 7px clip for the
+re-opening of a measured page-scale defect, on a path this issue's spec does not
+cover. So the write is COMPLETED rather than replaced:
+
+```
+const tail = list.lastElementChild as HTMLElement | null;
+tail?.scrollIntoView?.({ block: "end" });
+const max = list.scrollHeight - list.clientHeight;
+if (max > list.scrollTop) list.scrollTop = max;
+```
+
+The maximum is spelled `scrollHeight - clientHeight` rather than left to the
+browser clamping `scrollTop = scrollHeight` — the same call #1121 made two
+screens down for `restoreTo`, for the reason written there: *a number that has
+to be clamped before it is true cannot be measured against*. The shape of this
+cure was already reasoned out elsewhere in the same file; the pre-existing
+`else` branch is the part that leans on clamping.
+
+The top-up only ever scrolls DOWN, and that guard is the walk's insurance rather
+than defensive habit. A stale `scrollHeight` is the precise condition step 1
+exists to survive, so writing a stale maximum over a good walk would undo it;
+`max <= scrollTop` means the read cannot be trusted (or the pane is already
+there) and the walk stands. Down-only also keeps `followMode` out of it — the
+pane leaves the tail only when `scrollTop` DECREASES (#168).
+
+### Three sites, and "verbatim" was measured rather than eyeballed
+
+The same five lines appear three times: `scrollToActivation`'s no-marker branch,
+`tailFollowWhenSettled`, and `dispatchScrollWrite`'s operator-tail. All three
+target `lastElementChild` of the same `.scrollback` node with the same padding
+and all three mean "put the pane at the tail". Only the middle one was measured
+defective; the other two are cured BY CONSTRUCTION, and that phrase is worth
+something only if "verbatim" is a measurement.
+
+It is: stripping leading indentation and nothing else, the three write cores
+share one md5 and the three `const tail` bindings share another. Controls in
+both directions — an independent block from the same file (the marker write,
+`block: "start"`) differs; a one-byte mutant (`"end"` → `"enD"`) differs; and
+the normaliser is shown not to have gutted the content (five lines, tokens
+intact), because three empty files would also share an md5. The raw blocks are
+NOT identical — two sit at ten spaces of indentation and one at eight — so the
+identity is post-normalisation and is stated that way.
+
+The set is CLOSED, which is what "all three" actually rests on: `block: "end"`
+occurs exactly three times in non-test `cicchetto/src`, and
+`scrollTop = …scrollHeight` at those three `else` branches plus two comments.
+There is no fourth site left behind.
+
+### The spec that photographed the defect and called it green
+
+The first draft of `issue2031-send-with-marker-row-clipped.spec.ts` carried a
+1px "sub-pixel" tolerance and passed. That thread swallowed the defect whole:
+the clipped state overflows by +0.203px, so the spec measured exactly what it
+was written to catch and reported ok. The tolerance is ZERO, and zero is safe
+here precisely because it is not a knife edge — the two states are ~7px apart
+(−6.64 against +0.20) with no sub-pixel path between them.
+
+Two hypotheses were falsified on the way, recorded so the dead ends are not
+walked twice. The soft keyboard is not involved: a third case with
+`visualViewport` shrunk to 300px the way issue253 stubs it produced numbers
+identical to its keyboard-less twin to the third decimal. The CSS layout
+mechanism `themes/default.css` records for iOS WebKit ("last messages hide
+behind BottomBar", UX-6 bucket D v2) is excluded: `composeTop` equals
+`paneBottom` exactly on both engines, so nothing is painted under the compose.
+The case and the fixture that served only the dead hypothesis were REMOVED
+rather than left green and meaningless; `rowClearance` still reports the field
+so the next reader can tell the two failure shapes apart.
+
+### What the runs actually said
+
+RED on the untouched tree, both projects, and the artefact was read rather than
+the reason deduced: `Expected: <= 0 / Received: 0.203125` on
+`webkit-iphone-15`, `0.359375` on chromium, both at `distanceFromBottom = 7`.
+GREEN after the cure: `−6.640625 / d=0` (chromium) and `−6.796875 / d=0`
+(webkit) — the terminal state the untouched tree had produced once by itself on
+its healthy chromium run. The write probe shows the predicted shape: two writes
+in the SAME tick (`scrollIntoView`, then `scrollTop=1415` from `before:1408`),
+which is why #625's gap-based `delayedWrites` is unmoved by a second door
+opening.
+
+#625 is green on both its cases after the cure — the control that the
+double-scroll it killed has not come back, not a bonus. `scroll-on-window-switch`
+is green on all four, and its first test is the guard on the UX-8(a3)
+channel-back path this cure deliberately does not re-open. That guard's
+granularity is worth naming: it asserts `scrollHeight - scrollTop - clientHeight
+<= 50` — the very slack this issue accuses — so it can see a page-scale
+regression and cannot see seven pixels. Right instrument for that job, blind to
+this one. Both it and #625 run on `chromium` only (neither carries `@webkit` or
+`@touch`), which is why this issue's spec adds a `@webkit` case rather than
+trusting the desktop projection.
+
+The mutant flipped the guard (`max > scrollTop` → `max <`), which disables the
+top-up and inverts its direction at once. It killed the two new jsdom guards and
+NOTHING else (expected 120 to be 700; expected 700 to be 900 — the second is the
+guard dragging a reader 200px back up), and it killed the e2e on both projects
+with numbers bit-identical to the pre-cure red. Restore was proven rather than
+assumed: mutate → dirty → `git checkout --` → porcelain empty → the eight
+scoped e2e green again.
+
+### The jsdom suite is blind to this write, which is why two guards ride in
+
+Under jsdom `scrollHeight` and `clientHeight` both default to 0, so `max` is 0
+and the top-up never fires unless a test defines geometry BEFORE the tail write.
+The 6922-test suite therefore says nothing about the two new lines — measured,
+not assumed: a prediction that the W6 loadMore-preserve block would break was
+WRONG, and the reason is exactly this. That block defines its geometry after
+`render`, so at mount `max` is 0 and there is nothing to top up; what protects
+it is the zero geometry, not the `scrollIntoView` stub its comment credits.
+
+So two guards were added where the coverage was: one pins the top-up (700 from
+a 1000/300 pane), one pins the down-only branch (a stale maximum of 700 must
+leave a pane at 900 alone). The e2e cannot construct the second one's input —
+a stale `scrollHeight` read is a `defineProperty` in jsdom and not reachable
+from a real layout — so the guard would otherwise be an untested branch.
+
+_Not asserted: that what the reporter saw has been reproduced. They describe a
+line substantially hidden; the measurement here is 0.203px of clip — the same
+mechanism at its minimum amplitude, not the same amplitude. What makes those
+seven pixels into many more on that device is not known and is not guessed at._
+
+_Not asserted: that the report's second face — "after a moment it shifts by a
+few pixels on its own" — is cured, or absent. It did NOT reproduce: all nine
+runs recorded exactly one scroll write. The spec asserts it anyway, as the
+invariant #625 bought, stated on webkit for the first time; a green there is a
+guard, not a reproduction._
+
+_Not asserted: that UX-8(a3) is still true today. It is a measured incident
+written into the file by someone else, and it is PRESERVED rather than
+re-tested — preserving it does not require re-measuring it, removing it would
+have._
+
+_Not asserted: that the two other call sites were measured. They were not. They
+are cured by construction from the md5 identity above and carry no e2e of their
+own. Only scoped e2e was run here; the full-suite ship gate is CI's._

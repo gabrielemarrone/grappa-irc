@@ -51662,3 +51662,105 @@ broken. The `extended-join` echo of our OWN JOIN carries the account
 (`JOIN #capchan capacct :realname`), a third potential seeding path, left
 deliberately untouched: it is not the connection's login signal, it is a
 channel event that happens to mention it.
+<!-- entry #2050 -->
+
+---
+
+## 2026-09-10 — #2050: the far-behind record had no way to notice the cursor had caught up
+
+vjt: *"hai rotto i badge e di conseguenza il bottone alt+a, adesso ho tre badge
+su tre canali che non riesco a marcare read"*, then *"dopo un restart dell'app
+problema sparito"*, and the repro: *"l'app ha passato un periodo di tempo senza
+connessione e poi si è riconnessa"*.
+
+Alt+A was never the defect — `keybindings.ts` dispatches `nextUnread`, so the
+chord kept landing on the same three windows because their badges would not
+fall. One thing was broken, not two.
+
+### What the record promises, and where the promise lapses
+
+#693's `farBehindByChannel[key]` says "the unread region is NOT in this pane".
+Two consumers act on it: `perChannelUnread` (`selection.ts`) discards local
+truth and publishes `serverSeedCounts[key]` instead, and `setCursorIfAdvances`
+FREEZES the read cursor. Both are sound only while the cursor sits where it did
+when the record was written.
+
+It does not stay there. The record had exactly three exits — `jumpToUnread`,
+`dismissFarBehind`, `purgeScrollback` — and not one of them was keyed on the
+cursor, while at least four paths move it: `sendMessage`'s DIRECT
+`setReadCursor` (deliberately not routed through the frozen door, to avoid an
+import cycle), `applyReadCursorSet` (the unconditional cross-device echo), and
+the two hydration paths. Once any of them fires, the cursor is at the tip with
+nothing unread and the record still stands — so the badge keeps publishing a
+seed that only a per-channel join reply or a `/me` fetch can rewrite, neither of
+which happens again while the socket stays up.
+
+That is the report exactly: unclearable in session, clean after a restart,
+because both stores are in-memory. Measured against the real stores and a fake
+server whose cursor the POST actually moves: one send takes both cursors to 6001
+with zero rows unread while the badge holds 5000 across a visit, a read at the
+tail, a reopen and the activation refetch. The single-device path needs no
+second client — talking in the window is enough.
+
+### Why an effect, and why this bound
+
+An EFFECT on the cursor rather than a call at each door, because the doors are
+not a closed set: patching the two known ones cures the instances and leaves the
+next to be found in production.
+
+The bound is `cursor >= oldestLoaded - 1` — "the loaded window already reaches
+down to the read position". It states the record's own claim instead of
+approximating it. Two alternatives were measured and rejected:
+
+* `cursor >= resumeFrom + missed` adds an ID to a per-channel row COUNT.
+  `messages.id` is one global autoincrement across every network and channel (a
+  single `messages` table, `20260425000000_init.exs`), so the sum is not an id.
+  With two channels interleaved on that sequence it fires at HALF the region,
+  and the error scales to ~1/N with N busy channels — worst exactly when the
+  absence was longest. Measured retiring the record with 2500 rows still unread,
+  which is the destructive unfreeze #693 exists to refuse.
+* `cursor >= newest loaded` is not wrong, it says less: it closes only at the
+  very newest row, so an operator who has scrolled INTO the loaded window keeps
+  a "jump back" bar over a pane with no hole left. The objection raised against
+  it — that live traffic keeps raising the newest id so the record would never
+  close — was measured false: under far-behind the only doors that move the
+  cursor land ON the row that just arrived, so cursor and newest rise together.
+
+### The caveat, named rather than discovered later
+
+`loadMore` prepends older rows and LOWERS the oldest loaded id, so scrolling up
+far enough satisfies the bound. That is correct, and the reason is that clearing
+**thaws; it does not mark anything read**. The badge stops publishing the frozen
+seed and returns to LOCAL truth — still N if N rows follow the cursor, but now a
+live number the operator retires by reading. Re-paging the region back into the
+pane IS closing the hole. The destructive move would have been the opposite:
+unfreezing while the pane was still holed, leaving local truth incomplete and
+the count under-reported.
+
+`measuredUnreadByChannel` (#947) is deliberately not cleared alongside: the pane
+spends it only while `measured.at === cursor`, so a cursor that moved has
+already expired it.
+
+### Two siblings named, not folded in
+
+Measured on the way and filed separately, because each fails differently and one
+fix does not obviously cover them:
+
+* issue 2052 — `applyJoinReply` lands the reply's cursor unconditionally, so
+  after a POST that failed offline a rejoin moves the local cursor BACKWARDS to
+  the server's stale value and the badge resurrects. It self-heals on the next
+  successful forward write; the asymmetry is that forward-only holds on the
+  write path and not on the join-reply path.
+* issue 2053 — the INVERSE defect on the same branch: a window driven far behind
+  by the #1229 ring cap, whose seed is a truthful zero from join time, shows NO
+  badge while hundreds of rows are unread. There the seed is stale LOW and
+  cannot rise; retiring the record on cursor catch-up does nothing for it,
+  because the cursor is frozen and never catches up.
+
+### Scope, declared
+
+Store-level. jsdom gives the pane no geometry, so the read-at-the-tail door is
+driven through its published verb rather than by scrolling, and nothing here
+asserts the fix reaches a rendered badge in a browser.
+
+_cic only. No wire change, no protocol bump, no migration — cic bundle deploy._

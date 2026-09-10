@@ -1,4 +1,4 @@
-import { batch, createSignal } from "solid-js";
+import { batch, createEffect, createSignal } from "solid-js";
 import {
   sendMessage as apiSendMessage,
   countMessagesAfter,
@@ -921,6 +921,83 @@ const exports = identityScopedStore((onIdentityChange) => {
       return rest;
     });
   };
+
+  // issue 2050 — the record retires itself when the read cursor catches up.
+  //
+  // Before this, the three exits above were the whole list (`jumpToUnread`,
+  // `dismissFarBehind`, `purgeScrollback`) and NONE of them was keyed on the
+  // cursor. That is the hole: both consumers of the record — the badge memo,
+  // which discards local truth for the frozen `serverSeedCounts` value
+  // (`selection.ts` `perChannelUnread`), and `setCursorIfAdvances`, which
+  // freezes the cursor — are sound only while the cursor sits where it did
+  // when the record was written, and it does not stay there. Measured: one
+  // `sendMessage` puts the cursor at the tip with nothing unread while the
+  // badge holds 5000 across a visit, a read at the tail, a reopen and the
+  // activation refetch, clearing only on the next app restart.
+  //
+  // An EFFECT rather than a call at the doors that move it, because the doors
+  // are not a closed set. Two bypass the frozen one today — `sendMessage`'s
+  // direct `setReadCursor` (deliberately not routed through
+  // `setCursorIfAdvances`; see its comment) and `applyReadCursorSet`, the
+  // unconditional cross-device echo — and the hydration paths (`/me`, the
+  // join reply) are two more. Patching the known ones cures the instances and
+  // leaves the next one to be found in production. Watching the cursor cures
+  // the class: whatever moves it, the record is re-examined.
+  //
+  // THE BOUND is "the loaded window already reaches down to the read
+  // position", i.e. nothing is missing between the cursor and what the pane
+  // holds. That is the record's own claim — "the unread region is NOT in this
+  // pane" — stated rather than approximated. The two alternatives were
+  // measured and rejected:
+  //
+  //   * `cursor >= resumeFrom + missed` adds an ID to a per-channel row
+  //     COUNT. `messages.id` is one global autoincrement across every network
+  //     and channel (a single `messages` table), so the sum is not an id at
+  //     all: with two channels interleaved on that sequence it fires at HALF
+  //     the region, and the error scales to ~1/N with N busy channels — worst
+  //     exactly when the absence was longest. Measured retiring the record
+  //     with 2500 rows still unread, which is the destructive unfreeze #693
+  //     exists to refuse.
+  //   * `cursor >= newest loaded` is not wrong, it says less: it closes only
+  //     at the very newest row, so an operator who has scrolled INTO the
+  //     loaded window keeps a "jump back" bar over a pane with no hole left.
+  //
+  // CAVEAT, named rather than discovered later: `loadMore` prepends older
+  // rows and LOWERS the oldest loaded id, so scrolling up far enough
+  // satisfies this bound. That is correct, and the reason is that clearing
+  // here THAWS — it does not mark anything read. The badge stops publishing
+  // the frozen seed and goes back to LOCAL truth, which is still N if N rows
+  // follow the cursor; the difference is that it is now a live number the
+  // operator retires by reading. Re-paging the region back into the pane IS
+  // closing the hole, so the far-behind apparatus has nothing left to do.
+  // What T1 would have done is the opposite: unfreeze while the pane was
+  // still holed, leaving local truth incomplete and the count under-reported.
+  //
+  // `measuredUnreadByChannel` (#947) is deliberately NOT cleared alongside:
+  // the pane spends it only while `measured.at === cursor`, so a cursor that
+  // moved has already expired it.
+  createEffect(() => {
+    const far = farBehindByChannel();
+    const sb = scrollbackByChannel();
+    batch(() => {
+      for (const rawKey of Object.keys(far)) {
+        const key = rawKey as ChannelKey;
+        // No rows loaded says nothing about where the region is — keep the
+        // record. Same for an unreadable key and for a channel with no read
+        // position at all: absence of evidence, not evidence of catching up.
+        const oldestLoaded = sb[key]?.[0]?.id;
+        if (oldestLoaded === undefined) continue;
+        const decoded = decodeChannelKey(key);
+        if (decoded === null) continue;
+        const cursor = getReadCursor(decoded.slug, decoded.name);
+        if (cursor === null) continue;
+        // `oldestLoaded - 1` and not `oldestLoaded`: the boundary case is a
+        // cursor sitting exactly one row below the oldest loaded, where the
+        // first unread row IS `rows[0]` and the pane is already contiguous.
+        if (cursor >= oldestLoaded - 1) clearFarBehind(key);
+      }
+    });
+  });
 
   // #693 — the operator took the "N unread — jump back" affordance. Swap the
   // tail window for the one anchored at their read position: exactly the fetch

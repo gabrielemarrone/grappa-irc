@@ -51876,3 +51876,103 @@ driven through its published verb rather than by scrolling, and nothing here
 asserts the fix reaches a rendered badge in a browser.
 
 _cic only. No wire change, no protocol bump, no migration — cic bundle deploy._
+<!-- entry #2057 -->
+
+---
+
+## 2026-09-10 — issue 2057: the OTP app vsn was never a version, it was a path
+
+A `VERSION`-only bump was COLD on `:jail` and `:linux`, and #1287 had already
+established WHY: the bump moves the release's lib directory to
+`lib/grappa-<new>/ebin` while the running node keeps resolving
+`:code.lib_dir(:grappa)` to its BOOT directory, so `reload_modified/0` diffs a
+stale tree against itself and answers `{"failed":[],"reloaded":[]}`. Production
+served the old BEAM under new git history for ~6.5 hours on 2026-08-13 that way.
+
+What had never been named is that this is not a property of deploying, or of
+releases, or of the version number. It is one line of `mix.exs`. The repo-root
+`VERSION` was read to stamp the **OTP application vsn**, and the app vsn is the
+only thing that puts a number into a release's code path. Freeze it and the
+class disappears: `@otp_vsn "0.0.0"`, a constant that never moves, with
+`@version` left deriving from `VERSION` exactly as #652 built it.
+
+### The bench, three arms, one live node
+
+Measured on a real `mix release` (not the docker dev stack, whose bind-mounted
+`mix phx.server` layout has no vsn in the lib path and would have passed for
+the wrong reason), in an isolated tree, booting the release and asking the
+**live** node rather than reading the disk:
+
+| arm | live `:code.lib_dir(:grappa)` | `start_erl.data` after bump | `POST /admin/reload` | `/api/config` after |
+|---|---|---|---|---|
+| app vsn tracks `VERSION` (before) | `lib/grappa-1.5.5` | `1.5.6` | **409** `stale_code_path` | **1.5.5** — stuck |
+| app vsn frozen, release vsn inherits | `lib/grappa-0.0.0` | `0.0.0` | **200** `reloaded:["Elixir.Grappa.Version"]` | **1.5.6** |
+| app vsn frozen, release vsn tracks | `lib/grappa-0.0.0` | `1.5.6` | **409** `booted 0.0.0 / built 1.5.6` | **1.5.5** — stuck |
+
+The first arm is the negative control and it reproduced the production 409
+exactly, so the bench can see the defect it claims to cure. A side effect worth
+recording: under the freeze the second `mix release --overwrite` left **one**
+lib directory, where the tracking arm accumulated `grappa-1.5.5` beside
+`grappa-1.5.6`. Stale sibling directories stop piling up forever.
+
+### The third arm is the whole reason this entry is long
+
+Freezing the app vsn while letting the release keep `version: @version` is the
+obvious half-measure — it preserves an honest number in the tarball name — and
+it is **catastrophic and silent**. `HotReload.audit_code_path/1` compares the
+app vsn it reads off the booted code path against the RELEASE vsn in
+`start_erl.data`. Frozen beside tracking, those two diverge on every bump and
+never reconverge, so the audit refuses **every hot deploy, permanently**. The
+cure becomes its own exact opposite and says nothing while doing it.
+
+So the constraint is: the release vsn MUST inherit the freeze, i.e. the release
+must have no `version:` key of its own. That is not enforceable by reading the
+value — an inheriting release and a re-coupled one both produce a plausible
+number — so the pin asserts the KEY IS ABSENT
+(`version_single_source_test.exs`). This was predicted from the source and then
+measured rather than shipped as a reasoned-about hazard.
+
+### What was in the way, and it was a false zero
+
+The proposal rested on "`Application.spec(:grappa, :vsn)` has zero consumers;
+the only matches are prose". Re-measured, that is false in the way this repo
+fails most often: the census had stopped at `lib/`.
+`test/grappa/version_single_source_test.exs:67` asserted
+`Application.spec(:grappa, :vsn) == @canonical_version` — not a stale test but
+the #538/#652 PIN on the exact coupling being removed, with its rationale in
+the comment above it: *"If they disagree the running node's .app would report a
+version the source never declared."*
+
+That is now true and deliberate, which is a thing a worker does not get to
+decide. vjt ruled it (**relayed via the ircbot, not observed first-hand**): the
+number in the source stays one — the `VERSION` file — and the second place is
+the app vsn, which is a path component and not a carrier. The pin is
+**rewritten as the pin of the DECOUPLING, not deleted**, because an accidental
+re-coupling is silent and the inverted assertion is what catches it. Both
+mutants were run and each kills exactly one assertion.
+
+Two `Application.spec(:grappa, …)` readers do remain — `:modules`, a different
+key — which also falsifies `Grappa.Version`'s own moduledoc claim to be the
+only consumer. Corrected in place.
+
+### What deliberately did NOT change
+
+`stale_code_path` (#1850) stays. It is fair to observe that with both vsns
+frozen it can no longer fire for the class it was written against, and that is
+the correct outcome rather than an argument to delete it: prevention moved to
+the ROOT, detection did not move at all. It never named `VERSION` — it compares
+what the node booted against what the build wrote, whatever drove them apart,
+and the third arm above is a live example of a route that has nothing to do
+with a bump.
+
+Also not taken: vjt floated running the jail the way docker runs, `mix
+phx.server` over a bind-mount, hot by construction. The price is the whole
+release — no `bin/grappa`, so no `rpc`, no boot script, no operator CLI — and
+he did not pursue it. The decision here is to freeze a constant, not to change
+substrate.
+
+The price paid, in full: paths and the release tarball on the box read `0.0.0`.
+Nothing consumes them — measured across `infra/`, `scripts/`, `.github/` and
+`Dockerfile*`, every one of which names the unversioned
+`_build/prod/rel/grappa`. The number an operator reads is `Grappa.Version`,
+still baked from `VERSION`, still declared exactly once.

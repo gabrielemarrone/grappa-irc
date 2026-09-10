@@ -31,9 +31,15 @@ export const ADDQUOTE_COMMAND = "!addquote ";
 // that is the predictable shape, not the exception to it: each is the line the
 // scrollback showed. `attributionHead` is shared with `replyQuote` so the two
 // doors cannot drift.
+//
+// issue 2033 — `"wrapped"` is where this door parts from Reply's, and only
+// here: a bridged row is archived under the author the relay wrapped, spelled
+// as the scrollback spelled them. It takes NO `@` (vjt's ruling 4) because an
+// archive addresses nobody — a mention notifies a person, and there is no
+// person reading a quote database.
 export function addQuoteCommand(msg: ScrollbackMessage): string | null {
   const body = quotableBody(msg);
-  return body === null ? null : `${ADDQUOTE_COMMAND}${attributionHead(msg)} ${body}`;
+  return body === null ? null : `${ADDQUOTE_COMMAND}${attributionHead(msg, "wrapped")} ${body}`;
 }
 
 // #1356 — ONE verb, N payloads. What a long-press adds to THIS draft: the whole
@@ -59,7 +65,7 @@ export function addQuoteCommand(msg: ScrollbackMessage): string | null {
 export function addQuoteAppendText(draft: string, msg: ScrollbackMessage): string | null {
   const body = quotableBody(msg);
   if (body === null) return null;
-  const payload = `${attributionHead(msg)} ${body}`;
+  const payload = `${attributionHead(msg, "wrapped")} ${body}`;
   if (!draft.includes(ADDQUOTE_COMMAND)) return `${ADDQUOTE_COMMAND}${payload}`;
   return draft.endsWith(" ") ? payload : ` ${payload}`;
 }

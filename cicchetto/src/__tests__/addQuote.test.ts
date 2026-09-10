@@ -255,3 +255,62 @@ describe("addQuoteToCompose", () => {
     expect(document.activeElement).toBe(ta);
   });
 });
+
+// issue 2033 — the same relay defect at the second door. An archived quote that
+// names `Gazzurbo` credits a bot forever, and by the time the quote is recalled
+// the channel context that would have explained it is gone.
+//
+// vjt's ruling 4: `!addquote` STRIPS ONLY — no `@`. An archive addresses
+// nobody, so it takes no mention; the wrapped author stays wrapped and only the
+// outer relay nick goes. Detection itself is shared with Reply, one predicate,
+// so the two doors cannot disagree about what a relay looks like.
+describe("addQuoteCommand — a bridged message is archived under its AUTHOR (issue 2033)", () => {
+  it("drops the relay's nick and keeps the author wrapped", () => {
+    expect(addQuoteCommand(msg({ sender: "Gazzurbo", body: "<THREADelli> ciao mondo" }))).toBe(
+      "!addquote <THREADelli> ciao mondo",
+    );
+  });
+
+  // The divergence from Reply is the POINT of ruling 4, so it is asserted as a
+  // difference rather than as two independent literals: an implementation that
+  // shared the mention would archive `@THREADelli` and pass a strip-only check
+  // that merely looked for the author's name.
+  it("takes no mention, where Reply takes one", () => {
+    const relayed = msg({ sender: "Gazzurbo", body: "<THREADelli> ciao" });
+    expect(addQuoteCommand(relayed)).not.toContain("@");
+    expect(replyQuote(relayed)).toContain("@THREADelli");
+  });
+
+  it("leaves an unbridged row exactly as it was", () => {
+    expect(addQuoteCommand(msg({}))).toBe("!addquote <vjt> ciao mondo");
+  });
+
+  it("refuses a head that is not nick-shaped", () => {
+    expect(addQuoteCommand(msg({ body: "<3 you" }))).toBe("!addquote <vjt> <3 you");
+  });
+
+  // Same #1126 carve-out Reply makes, and the reason it exists lives on THIS
+  // side: rendering `* Gazzurbo <THREADelli> waves` as `<THREADelli> waves`
+  // would archive an action as something the person SAID.
+  it("never reads an ACTION as bridged — #1126 outranks the heuristic", () => {
+    expect(
+      addQuoteCommand(
+        msg({ kind: "action", sender: "Gazzurbo", body: "\x01ACTION <THREADelli> waves\x01" }),
+      ),
+    ).toBe("!addquote * Gazzurbo <THREADelli> waves");
+  });
+
+  it("refuses a body that is only the wrapping", () => {
+    expect(addQuoteCommand(msg({ sender: "Gazzurbo", body: "<THREADelli> " }))).toBeNull();
+  });
+
+  // The accumulating door (#1356) shares the payload builder, so it inherits
+  // the strip. Pinned because it is a SECOND call site of `attributionHead`,
+  // and a fix applied only to `addQuoteCommand` would leave it behind.
+  it("strips the relay when accumulating a second payload too", () => {
+    mountCompose();
+    addQuoteToCompose(msg({ sender: "ska", body: "primo" }), NET, CHAN);
+    addQuoteToCompose(msg({ id: 2, sender: "Gazzurbo", body: "<THREADelli> secondo" }), NET, CHAN);
+    expect(getDraft(KEY)).toBe("!addquote <ska> primo <THREADelli> secondo");
+  });
+});

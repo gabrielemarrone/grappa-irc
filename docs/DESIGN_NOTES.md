@@ -50686,3 +50686,66 @@ have._
 _Not asserted: that the two other call sites were measured. They were not. They
 are cured by construction from the md5 identity above and carry no e2e of their
 own. Only scoped e2e was run here; the full-suite ship gate is CI's._
+<!-- entry #2033 -->
+
+---
+
+## 2026-09-10 — #2033: quoting the author a bridge relayed, not the bridge
+
+A bridge bot relays somebody else's words under its OWN IRC nick and wraps the
+real author into the body — `<Gazzurbo> <THREADelli> ne parlavamo…`. `msg.sender`
+is therefore the RELAY, so both quote doors credited a bot: Reply put
+`<Gazzurbo> <THREADelli> body << ` on the wire, arriving three attributions deep
+and addressing the author as plain text (notifying nobody), and `!addquote`
+archived that misattribution permanently, into a database where the channel
+context that would explain it no longer exists.
+
+### What vjt ruled (2026-09-10, relayed into the issue — not observed on IRC)
+
+Detection is the head shape ALONE: no configured relay list, no second gate. The
+false positive is priced in. `@name` does produce a real mention because this
+bridge relays the Telegram USERNAME, not the display name — which also settles
+the charset worry the issue raised, since a username is `[A-Za-z0-9_]` and the
+existing RFC 2812 `NICK` admits that in full. `!addquote` is in scope but takes
+STRIP ONLY, no `@`: an archive addresses nobody. The cap is measured on the body
+after the head comes off.
+
+### The limitation is a dropped speaker, not a stray `@`
+
+Worth restating because the cheap reading understates it. A human writing
+`<foo> bar` is read as a relay, and the cure then drops `alice` — the actual
+speaker — and answers `@foo`, who does not exist. Accepted knowingly, and pinned
+as an assertion in `replyQuote.test.ts` so it is a recorded decision rather than
+a bug report somebody files in six months.
+
+### Two decisions the rulings did not cover
+
+**An ACTION is never read as bridged.** #1126 forbids rendering an action as
+speech, and detection is SHARED with `!addquote`, which would otherwise archive
+`<THREADelli> waves` as something nobody said. No transcript of an action-shaped
+relay exists, so this falls back to today's behaviour — the same bounded,
+deliberate silence the accepted limitations already carry. The cost is that a
+genuinely action-shaped bridge stays unfixed; the alternative was inventing a
+shape for a case with no evidence behind it.
+
+**The order of the two peels is FORCED, not a preference.** #1123's
+previous-quote cut must run FIRST. A plain reply body (`<bob> original<< answer`)
+opens with a nick wrapping too, so looking for a relay first recovers `bob` — who
+is being QUOTED, not speaking — and strands the remainder past a cut that no
+longer matches. Measured, not argued: swapping the two kills 14 tests, 13 of them
+pre-existing #1123 guards. The consequence is a real gap, stated rather than
+hidden — a bridge relaying a line that was ITSELF a reply loses its author,
+because #1123's greedy cut consumes the relay head on its way to the tail.
+
+### Shape
+
+`attributionHead/1` became `attributionHead/2`, gaining a `RelayedAuthorStyle`
+(`"mention" | "wrapped"`). One shared site, one predicate, one parameter — a
+fork would let the two doors disagree about what a relay IS, which is the
+failure `quotableBody`'s own header warns about. The 100-char cap needed no edit
+to satisfy ruling 5: it has always been measured on what `quotableBody` returns,
+and that is now the body with the head already gone.
+
+_Not asserted: that `<nick> ` is the only bridged shape in the wild. One
+transcript exists, from one bridge, and no survey was made. Verified on chromium
+via vitest only — no real bridge, no Telegram, no device._

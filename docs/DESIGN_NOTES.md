@@ -50853,3 +50853,105 @@ Neither is the IME case covered: like `ComposeBox` before it, this handler has
 no `isComposing` guard, so an Enter that confirms a candidate mid-composition
 submits. That is a shared gap of the two surfaces and wants one issue over both,
 not a divergence introduced on one of them here._
+<!-- entry #2037a -->
+
+---
+
+## 2026-09-10 — #2037: three unread numbers, and the four ways they cannot be one window
+
+The report is one operator returning after ~21h: the far-behind bar says
+`1807 unread`, the sidebar pills say `187` and `216`, and `187 + 216 = 403`.
+The issue body attributes the direction to own-authored rows plus the
+content/events split, states plainly that those do not account for the
+`1404` residual, and nominates the ANCHOR. This entry records what the
+residual is NOT, which is all that got settled.
+
+### The anchor cannot contribute in the observed direction
+
+Measured on the client, where the anchor lives
+(`cicchetto/src/__tests__/unread2037AnchorProbe.test.ts`). The cold-open path
+probes ONCE, at the read cursor — the same integer
+`ReadCursor.bulk_unread_split/3` anchors the badge seed at, so that path has
+no anchor term at all. The reconnect path is the only one holding two
+anchors, and it renders the CURSOR-anchored number. The one branch that
+renders the other is the re-probe failure the issue names, and it renders the
+SMALLER number, because the fallback anchor sits further FORWARD and
+`count_after/6` is monotone non-increasing in `m.id > ?`.
+
+So the anchor term is bounded ABOVE by zero. **Anyone who closes this by
+re-anchoring the probe moves the bar DOWN by at most one page and leaves the
+1404 exactly where it is.** The positive control is what makes that claim
+worth anything: it asserts two DISTINCT anchors actually reached the wire
+before the sign is read, without which the same assertion passes a harness
+that only ever probed once.
+
+### The two presence resolvers are two doors, and they can disagree
+
+The body says *"Both paths DO share the presence-hidden filter, so that is
+not a divergence source."* They share the RULE (`PresenceFilter.hidden?/2`)
+and nothing else. The bar reaches it through `Resolver.hidden?/4` →
+`Session.list_members/3`; the seed through `Resolver.hidden_channels/3` →
+`Session.list_member_counts/2`. Two calls, at two instants.
+
+Measured through the real `Grappa.Session` facade against a `Session.Server`
+stand-in registered under the real registry key: with no session both SHOW,
+with consistent over-threshold answers both HIDE, and with the two calls
+answered independently the bar SHOWS while the seed HIDES — the sign the
+issue needs. The cost of that one disagreement on a 78-row fixture is 69
+rows, i.e. own-authored UNION suppressed-presence (they overlap on the
+operator's own presence rows, so the residual is the union and the assertion
+says so exactly rather than `> 0`).
+
+Reachability is a READING, not a measurement: both `handle_call` clauses read
+the same `state.seeded_channels` and `state.members`, so a real server cannot
+answer asymmetrically within one instant. The divergence needs two instants,
+or a call failure at one door — `member_count_for_unset/4`'s catch-all folds
+`:uninitialized`, `{:error, :timeout}` and `{:error, :no_session}` to one
+`nil`, and decision D reads nil as SHOW. For a history FETCH that is correct.
+For a COUNT it converts "I could not reach the session" into "count every
+JOIN/PART", and freezes it into the far-behind state.
+
+### And that mechanism is not what happened, by measurement
+
+Write, for one window at one anchor, `C` = non-own content, `E_s` = non-own
+suppressed presence, `E_c` = non-own carve-out (`topic`/`kick`/`server_event`,
+outside `suppressed_presence_kinds/0` per #458), `O` = own-authored,
+`O_s` = own presence. Then `bar(SHOW) = C + E_s + E_c + O`,
+`bar(HIDE) = C + E_c + (O − O_s)`, `pills(SHOW) = C | E_s + E_c`,
+`pills(HIDE) = C | E_c`. Against 187 / 216 / 1807 all four assignments fail:
+the two SHOW-seed ones require ~1404 own-authored rows in 21h, and the two
+HIDE-seed ones additionally require `E_c = 216`.
+
+`E_c = 216` is the one that is measurable off-line, and it was measured
+against the on-host prod snapshot (13320 rows, opened `immutable=1`). On
+channel-shaped windows the entire carve-out population is 13 `topic` rows and
+4 `kick` rows; `server_event` never lands in a channel window at all. The
+largest carve-out in any single channel window, ever, is 9. The incident
+needs 216 in one window in 21 hours — 24× the observed maximum, 30× on the
+ratio against content. The suppressed-presence half of the same snapshot is
+by contrast entirely ordinary (`suppressed/content` ranges 0.078 to 5.43, and
+the assignment needs 7.5).
+
+So the reading that "216 is exactly what is left over once presence is
+hidden" is dead, and it was mine. Two numbers agreeing was the whole of that
+argument; the control that discriminates between agreement and coincidence
+says no.
+
+### What is left
+
+At least one premise of the report is false, and the anchor is not it. The
+economical candidate is that the two pills are not one window's pair, or not
+the bar's window — which the same snapshot makes circumstantial rather than
+speculative: every one of the five furthest-behind cursors in it is a
+`$server` window (1584, 1531, 1370, 1052, 113 rows behind), the furthest
+channel window is 68 behind, and `$server` is 99.9% content, so its own pill
+pair reads ~N messages and ~0 events. A 1807-row far-behind bar looks like a
+`$server` window, and a `$server` window does not produce 187/216.
+
+_Not asserted: that the resolver divergence caused the incident (measured
+that it CAN happen and what it costs; measured that the arithmetic it needs
+does not hold). That a real `Session.Server` cannot produce the asymmetry in
+one instant — that is read off two clauses, not measured, and measuring it
+needs a live session. That the May snapshot is representative of the incident
+channel; it establishes a floor on how implausible 216 carve-out rows are,
+not a distribution. That the residual is explained — it is not._

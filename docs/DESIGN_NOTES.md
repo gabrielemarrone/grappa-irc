@@ -51554,3 +51554,111 @@ down as an argument rather than dressed as a measurement.
 A spec that references a remote type is digested as the reference TEXT, so a
 change inside `Grappa.Scrollback.count_split()` moves nothing unless that type
 reaches the digest by another route.
+<!-- entry #2056 -->
+
+---
+
+## 2026-09-10 — #2056: SASL logs you in on solanum, and nothing on the wire told the session
+
+`IdentityState` (#388) ORs two axes, and on solanum/Libera only one of them
+exists: there is no registered umode in `user_modes[256]`, so the services
+account IS the verdict. It was seeded in exactly two places — the IRCv3
+`ACCOUNT` relay and a self-targeted 330 RPL_WHOISLOGGEDIN — and a SASL login
+reaches neither, so a session that authenticated successfully read
+`identified: false` until the operator happened to WHOIS themselves.
+
+**The issue said that, and said it was NOT measured.** Its analysis derives
+"no self `ACCOUNT` on a SASL login" from the absence of a seeding path plus
+the pre-registration timing. That is a reading of structure: structure says a
+path EXISTS or does not, never that it is the cause. So the first step here
+was a capture, not a clause.
+
+**The capture.** A stock solanum (upstream main @ `30f74b2c`) fronted by
+Atheme 7.3.0-rc2, in an isolated compose project on its own subnet. Stock
+matters: the #349 e2e conf loads an `umode_regd` extension that emits `+r` on
+services login, and that shim would have handed the bench a registered-umode
+axis solanum does not have — the exact axis under measurement. A client ACKed
+`account-notify extended-join multi-prefix sasl chghost server-time` and
+logged in with SASL PLAIN. What arrived:
+
+```
+<< CAP w2sasl ACK :account-notify extended-join multi-prefix sasl chghost server-time
+>> AUTHENTICATE AGNhcGFjY3QAY2FwYWNjdHBhc3MxMjM=
+<< 900 w2sasl w2sasl!w2sasl@172.31.99.1 capacct :You are now logged in as capacct
+<< 903 w2sasl :SASL authentication successful
+>> CAP END
+<< 001 … 376, :w2sasl MODE w2sasl :+i
+```
+
+From socket open through 001, a ten-second tail, and a JOIN: **zero `ACCOUNT`
+lines**. The premise holds.
+
+**The zero is only worth printing because the instrument answered a known
+question first.** Two positive controls, same tool, same transcript format: a
+`NickServ LOGOUT` on the SAME socket with the SAME caps produced
+`:w2sasl!~w2sasl@… ACCOUNT *` (plus `901`), and a `NickServ IDENTIFY` on a
+second socket produced `:w2ident!~w2ident@… ACCOUNT capacct` (plus `900`). The
+harness refuses to print the negative count unless both fire — and that refusal
+earned its keep on the first run: the line classifier skipped the `:` source
+prefix but not the `@time=` tag that `server-time` puts in front of it, so every
+tagged line was classified as the tag blob. It reported "INSTRUMENT BLIND"
+rather than "0 ACCOUNT lines". The answer would have been right for the wrong
+reason.
+
+**Why no ACCOUNT, now read WITH the measurement in hand.** solanum emits the
+relay in one place, `modules/m_services.c:148` (`me_su`), and
+`sendto_common_channels_local` does deliver it to the user themselves even
+with no channels in common (`ircd/send.c`, the trailing `MyConnect(user)`
+branch) — which is why the IDENTIFY control fires. SASL takes the other door:
+`me_svslogin` (`modules/m_signon.c:122`) sends the numeric and then, on the
+`IsUnknown(target_p)` pre-registration branch, merely stashes `suser` and the
+spoof fields. No ACCOUNT to anyone; `register_local_user` propagates
+`ENCAP * LOGIN` to SERVERS only; no `account_change` hook consumer emits one.
+
+**The cure** is a `do_route/2` clause for `{:numeric, 900}` mirroring the 330
+one — `normalize_account/1`, `identity_effects/2`, `identity_secret_effects/2`
+— and nothing else. Two details the issue's sketch did not carry, both from
+the capture and the source:
+
+  * **It must NOT be gated on the leading param matching our nick.** The 330
+    clause is, correctly. But SASL completes pre-registration and solanum
+    fills that param with `*` while the client has no nick
+    (`m_signon.c:218`, `EmptyString(target_p->name) ? "*"`). The numeric is
+    `sendto_one` to this link about this link; there is no third party it
+    could describe.
+  * **It does not fold into the WHOIS card.** 330 folds because 330 is a
+    WHOIS reply; 900 describes the connection, and folding it would write an
+    account into whatever WHOIS happened to be open.
+
+The vjt ruling of 2026-08-11 is untouched: the account counts as proof only
+where `account-notify` is ACKed. On solanum it is, which is precisely why the
+seeded axis is retractable — the `ACCOUNT *` in positive control 1 is the
+retraction, captured.
+
+**A correction to the issue text.** It says "900 has no logged-out form". True
+of 900; not true of the transition — solanum emits `901 RPL_LOGGEDOUT`, and
+the capture has it. The clause stays set-only anyway: where the account counts
+at all, the cap guarantees the `ACCOUNT *`, so 901 would be a second spelling
+of a retraction already handled. Recorded so the next reader does not
+rediscover it as a gap.
+
+**Reachability, checked because the fix depends on it.** The 900 lands
+mid-registration. `IRC.Client.process_line/2` forwards every parsed line to
+the session BEFORE stepping the auth FSM, and `Session.Server`'s numeric
+clause delegates to `EventRouter` after window routing — so the clause is
+reached. The `:acquired` transition also releases the deferred autojoin
+(#347); it cannot fire early here, because that latch is armed at 001
+(`maybe_autojoin_or_defer/1`) and is a no-op while nil.
+
+**What this does NOT establish.** The bench is stock solanum plus stock
+Atheme, not Libera's deployment: Libera runs its own solanum fork and its own
+services, and nothing here was captured against Libera itself (no account
+there was in scope). What the bench does establish is that the behaviour is
+solanum's DEFAULT, in the code path Libera runs, with the positive controls to
+show the tool would have seen the counter-example. Nor is it established that
+this is the only cause of a stuck `identified: false` on an atheme network —
+the capture shows the SASL arm carries no seed, not that no other arm is also
+broken. The `extended-join` echo of our OWN JOIN carries the account
+(`JOIN #capchan capacct :realname`), a third potential seeding path, left
+deliberately untouched: it is not the connection's login signal, it is a
+channel event that happens to mention it.

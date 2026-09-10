@@ -10,13 +10,33 @@
 // (which stays :connected through a transient reconnect); the badge is
 // an ephemeral overlay cic mirrors, never originates.
 //
-// Driver: the proven park→Reconnect cycle. `/disconnect` parks the
-// network (selection redirects to Home, sidebar network header stays
-// visible + greyed). Clicking the Home Reconnect chip fires
-// Networks.connect → eager SpawnOrchestrator → a fresh Session.Server
-// whose do_start_client broadcasts `connecting` — so the badge appears
-// on the network-header row during the multi-second connect + SASL +
-// register window against the real bahamut testnet, then clears on 001.
+// Driver: the proven park→Reconnect cycle. Clicking the Home Reconnect chip
+// fires Networks.connect → eager SpawnOrchestrator → a fresh Session.Server
+// whose do_start_client broadcasts `connecting` — so the badge shows during
+// the multi-second connect + SASL + register window against the real bahamut
+// testnet, then clears on 001.
+//
+// issue 1985 (2026-09-10) — THE DRIVER'S PRECONDITION CHANGED, and the
+// change is here because the product owner ruled the old one wrong, not
+// because this spec was flaky and not to make it pass. This comment used to
+// read "sidebar network header stays visible + greyed", i.e. the badge had a
+// host for the whole park. Under vjt's ruling a parked network LEAVES the
+// sidebar, so during the park there is no row and the badge cannot render.
+//
+// What makes the badge observable anyway is an ORDERING, and the spec now
+// asserts it instead of assuming it: the reconnect PATCH spawns FIRST and
+// commits `:connected` only on spawn success (`NetworksController`'s U-0
+// ordering), and `Session.start_session/3` returns as soon as the GenServer
+// starts — it does not wait for registration. So the DB flip and its
+// `connection_state_changed` broadcast land within milliseconds, the network
+// returns to the sidebar, and the `connecting` flag set moments earlier is
+// still true because it only clears on 001, seconds later. The badge
+// therefore surfaces on the RETURNED row.
+//
+// If that ever stops holding, this spec fails at the named assertion below
+// rather than at a latch that times out for an unstated reason — and the
+// failure is then evidence for the open question of where a parked network
+// shows that it is coming back, which is vjt's to answer.
 //
 // This exercises exactly the #100 reconnect path end-to-end: a session
 // that is not currently connected coming back up, surfaced to the user.
@@ -81,10 +101,15 @@ test("#100 — reconnecting badge shows while a parked network reconnects, then 
   // Baseline: connected → no reconnecting badge.
   await expect(reconnectingBadge).toHaveCount(0);
 
-  // Park the network. Selection redirects to Home; the sidebar network
-  // header row stays rendered (greyed), so the badge has a home to
-  // appear on when the reconnect fires.
+  // Park the network. Selection redirects to Home and — issue 1985 — the
+  // sidebar network section LEAVES, taking the badge's host with it.
   await composeSend(page, `/disconnect ${NETWORK_SLUG} ${PARK_REASON}`, { expectUnmount: true });
+
+  // The disappearance is asserted here rather than left as background: it is
+  // the precondition that makes the rest of this spec a real test of the
+  // ordering. Without it, a badge seen later could be a badge that never
+  // went away.
+  await expect(networkSection).toHaveCount(0, { timeout: 10_000 });
 
   const parkedCard = page.locator(".home-pane-network-row-parked", {
     has: page.locator(".home-pane-network-slug", { hasText: NETWORK_SLUG }),
@@ -123,6 +148,13 @@ test("#100 — reconnecting badge shows while a parked network reconnects, then 
   // connect + SASL + register window.
   await reconnectBtn.click();
 
+  // issue 1985 — the network must come BACK before the badge can render, and
+  // that return is the ordering this spec now depends on (spawn-then-commit,
+  // with the commit not waiting for registration). Asserted before the latch
+  // so a failure says WHICH link broke: no section back = the ordering
+  // changed; section back but no badge = the badge itself.
+  await expect(networkSection).toHaveCount(1, { timeout: 20_000 });
+
   // The latch flips true the moment the badge enters the DOM — proves the
   // transient "reconnecting…" badge surfaced on the reconnect.
   await page.waitForFunction(
@@ -137,8 +169,10 @@ test("#100 — reconnecting badge shows while a parked network reconnects, then 
   // Steady-state assertion (deterministic, not a flash).
   await expect(reconnectingBadge).toHaveCount(0, { timeout: 20_000 });
 
-  // Sanity: the network actually came back — channel row ungreys after
-  // autojoin (proves the reconnect completed, not just that the badge
-  // vanished).
-  await expect(channelRow.locator(".sidebar-window-greyed")).toHaveCount(0, { timeout: 15_000 });
+  // Sanity: the network actually came back — the channel row RETURNS and is
+  // un-greyed after autojoin (proves the reconnect completed, not just that
+  // the badge vanished). Both halves since issue 1985: the greyed-child count
+  // alone is also satisfied by a row that never came back.
+  await expect(channelRow).toHaveCount(1, { timeout: 15_000 });
+  await expect(channelRow.locator(".sidebar-window-greyed")).toHaveCount(0);
 });

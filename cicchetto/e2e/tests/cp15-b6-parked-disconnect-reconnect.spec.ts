@@ -28,18 +28,21 @@
 //      surfaces connection_state=parked → selection.ts:287-316 fires
 //      → selection jumps to Home.
 //   3. Assert: selection is Home, HomePane renders the parked network
-//      card (slug + nick + reason + Reconnect button). Sidebar still
-//      shows the network section with `.sidebar-network-greyed`
-//      (rows remain visible — operator can re-navigate to view
-//      scrollback; greyed-cascade visual is intact).
+//      card (slug + nick + reason + Reconnect button). The sidebar
+//      network section is GONE, and its channel rows with it.
 //   4. Operator clicks `[Reconnect bahamut-test]` on the Home card
 //      (mirrors the same patchNetwork verb /connect would invoke).
 //      Server-side: Networks.connect → eager SpawnOrchestrator → DB
 //      flip + broadcast. Cic-side: networkBySlug.connection_state =
 //      connected → home card re-renders as connected.
-//   5. Assert: sidebar network section ungreys; SEED_CHANNEL row
-//      ungreys after autojoin (typed events flow through subscribe.ts
-//      as before).
+//   5. Assert: the sidebar network section is BACK (not greyed);
+//      SEED_CHANNEL row returns un-greyed after autojoin (typed events
+//      flow through subscribe.ts as before).
+//
+// issue 1985 (2026-09-10) — steps 3 and 5 were rewritten from
+// "stays, greyed" to "leaves, comes back". The spec is not being
+// relaxed: the product owner ruled the previously asserted behaviour
+// wrong. See the in-body comment at the disappearance assertion.
 //
 // Why click Reconnect instead of typing `/connect`: from Home, there
 // IS no ComposeBox — the only way to issue `/connect` from the Home
@@ -125,24 +128,31 @@ test("CP19 T32 — /disconnect parks network + redirects to Home; Reconnect ungr
   const reconnectBtn = parkedCard.getByRole("button", { name: `Reconnect ${NETWORK_SLUG}` });
   await expect(reconnectBtn).toBeEnabled();
 
-  // Sidebar network section gains .sidebar-network-greyed. The
-  // cascading CSS rule (.sidebar-network-section.sidebar-network-
-  // greyed li .sidebar-window-btn) paints channel rows muted+italic
-  // via the network derivation overlay. Operator can still see + re-
-  // navigate to scrollback for the parked channels; the greyed visual
-  // is the cue "this network is parked, no live messages."
-  await expect(networkSection).toHaveClass(/sidebar-network-greyed/, { timeout: 10_000 });
-
-  // Tooltip on the network header carries the reason text. Implemented
-  // as a `title=` attr (zero-bundle-cost; design pass deferred a
-  // richer tooltip).
+  // issue 1985 — THE SIDEBAR SECTION LEAVES. It used to gain
+  // `.sidebar-network-greyed` and stay, and this spec asserted that, with a
+  // comment calling the greyed row the cue "this network is parked, no live
+  // messages" and the operator's way back to the parked channels' scrollback.
   //
-  // UX-5 BH (2026-05-19): legacy `<h3>` per-network header was dropped
-  // in UX-4 bucket C; the `title` attr now lives on
-  // `.sidebar-network-header .sidebar-channel-name` (Sidebar.tsx
-  // L319-326).
-  const networkHeader = networkSection.locator(".sidebar-network-header .sidebar-channel-name");
-  await expect(networkHeader).toHaveAttribute("title", PARK_REASON, { timeout: 5_000 });
+  // That assertion changed because THE PRODUCT OWNER RULED THE ASSERTED
+  // BEHAVIOUR WRONG — not because it was flaky, and not to make this spec
+  // pass. vjt, 2026-09-07: *"sparisce se è disconnected (parked)"*, and on
+  // 2026-09-10 that the parked window's history is reachable from the
+  // ARCHIVE, which is what replaces the greyed row as the way back. A
+  // parked network and every row under it leave the sidebar and come back on
+  // reconnect. `failed` still greys in place; the asymmetry is deliberate.
+  //
+  // The whole section goes, so the reason tooltip that used to sit on the
+  // network header (`.sidebar-network-header .sidebar-channel-name`,
+  // `title=`) has no host any more. The reason is NOT lost to the operator —
+  // it is asserted above on the Home card's `.home-pane-network-reason`,
+  // which is now its only surface.
+  await expect(networkSection).toHaveCount(0, { timeout: 10_000 });
+
+  // The channel rows go with it — they render inside that section, so this
+  // is the same disappearance seen one level down rather than a second
+  // claim. Asserted because "the network header is gone" and "the operator
+  // has no parked channel row" are what a reader will want separated.
+  await expect(channelRow).toHaveCount(0);
 
   // Operator unparks via the Home card's Reconnect chip. Server-side:
   // Networks.connect → eager SpawnOrchestrator → DB flip + broadcast.
@@ -151,23 +161,32 @@ test("CP19 T32 — /disconnect parks network + redirects to Home; Reconnect ungr
   // as a connected row.
   await reconnectBtn.click();
 
-  // Sidebar network section ungreys on the user-topic event (sub-
-  // second).
-  await expect(networkSection).not.toHaveClass(/sidebar-network-greyed/, { timeout: 10_000 });
+  // issue 1985 — the section COMES BACK, which is the other half of the
+  // ruling and the half a disappearance-only assertion would let rot: "and
+  // come back when it reconnects". Was: ungreys in place.
+  await expect(networkSection).toHaveCount(1, { timeout: 10_000 });
+  await expect(networkSection).not.toHaveClass(/sidebar-network-greyed/);
 
   // Parked card flips off the Home pane (the network re-renders as
   // a connected `home-pane-network-row-connected` row, not parked).
   await expect(parkedCard).toHaveCount(0, { timeout: 10_000 });
 
-  // Tooltip is gone (or empty) once the network is connected — the
-  // derivation only attaches a `title=` when the network is in a
-  // greyed state; when connected, the helper returns undefined and
-  // Solid removes the attribute.
-  await expect(networkHeader).not.toHaveAttribute("title", PARK_REASON);
+  // The reason tooltip does not come back either: the derivation only
+  // attaches a `title=` in a greyed state, and a reconnected network is not
+  // one. Re-derived from the returned section rather than the pre-park
+  // locator, which pointed at a node that has since been unmounted.
+  await expect(
+    networkSection.locator(".sidebar-network-header .sidebar-channel-name"),
+  ).not.toHaveAttribute("title", PARK_REASON);
 
-  // Channel row ungreys post-autojoin: SpawnOrchestrator spawns a
-  // fresh Session.Server, the autojoin loop re-JOINs SEED_CHANNEL,
-  // and the typed window-state event flows through subscribe.ts as
-  // before.
-  await expect(channelRow.locator(".sidebar-window-greyed")).toHaveCount(0, { timeout: 15_000 });
+  // Channel row RETURNS post-autojoin, un-greyed: SpawnOrchestrator spawns a
+  // fresh Session.Server, the autojoin loop re-JOINs SEED_CHANNEL, and the
+  // typed window-state event flows through subscribe.ts as before.
+  //
+  // Both halves are asserted since issue 1985. `toHaveCount(0)` on the greyed
+  // child alone is satisfied by a row that never came back at all — it was a
+  // fair assertion while the row could only ever be present-and-greyed, and
+  // it is a hole now that disappearance is a real state.
+  await expect(channelRow).toHaveCount(1, { timeout: 15_000 });
+  await expect(channelRow.locator(".sidebar-window-greyed")).toHaveCount(0);
 });

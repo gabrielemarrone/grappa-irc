@@ -476,6 +476,101 @@ describe("TopicBar", () => {
       expect(screen.queryByTestId("topic-modal-editor")).toBeNull();
       expect(screen.getByTestId("topic-modal-edit")).toBeInTheDocument();
     });
+
+    // issue 2035 — Enter SETS the topic. This REVERSES #263's own decision
+    // ("Enter in the textarea must stay a newline, save is the ✅ button
+    // only"): vjt ruled the asserted behaviour wrong, and the premise it
+    // rested on was weak anyway — `flattenTopicNewlines` spends every newline
+    // BEFORE the send door, so the line break Enter bought could never reach
+    // the wire as anything but a space.
+    describe("Enter sets the topic (issue 2035)", () => {
+      it("Enter submits the FLATTENED draft through the same door ✅ uses, and closes", async () => {
+        withTopic("Old topic");
+        render(() => <TopicBar {...baseProps()} />);
+        enterEdit();
+        const editor = screen.getByTestId("topic-modal-editor") as HTMLTextAreaElement;
+        // A draft that already CARRIES newlines (a paste — the route that
+        // survives Enter no longer inserting one). The flatten must still run.
+        fireEvent.input(editor, { target: { value: "line one\nline two" } });
+        fireEvent.keyDown(editor, { key: "Enter" });
+        expect(postTopicMock).toHaveBeenCalledWith(
+          "tok-test",
+          "freenode",
+          "#italia",
+          "line one line two",
+        );
+        await settle();
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+
+      it("Enter is preventDefault'd, so the textarea never inserts the line break", () => {
+        withTopic("Old topic");
+        render(() => <TopicBar {...baseProps()} />);
+        enterEdit();
+        const editor = screen.getByTestId("topic-modal-editor") as HTMLTextAreaElement;
+        fireEvent.input(editor, { target: { value: "one line" } });
+        // fireEvent returns false when the event was cancelled. jsdom does not
+        // insert the break itself, so the cancellation IS the observable.
+        expect(fireEvent.keyDown(editor, { key: "Enter" })).toBe(false);
+      });
+
+      it("Shift+Enter sets the topic too — EVERY Enter sends", () => {
+        // RULED, not derived. The issue left this chord open; vjt settled it
+        // for this surface — "anche shift-invio setta il topic" (2026-09-10,
+        // relayed in session). It agrees with #974, his 2026-08-07 ruling on
+        // the SIBLING surface (ComposeBox), which reversed his own day-old
+        // split: a Shift+Enter that refuses also EATS the keystroke, and on
+        // his device the modifier arms itself on presses he never meant as
+        // Shift+Enter — so the message silently does not go. One chord, one
+        // semantics, on both surfaces.
+        withTopic("Old topic");
+        render(() => <TopicBar {...baseProps()} />);
+        enterEdit();
+        const editor = screen.getByTestId("topic-modal-editor") as HTMLTextAreaElement;
+        fireEvent.input(editor, { target: { value: "shifted" } });
+        expect(fireEvent.keyDown(editor, { key: "Enter", shiftKey: true })).toBe(false);
+        expect(postTopicMock).toHaveBeenCalledWith("tok-test", "freenode", "#italia", "shifted");
+      });
+
+      // #232 guardrail — the new element-level keydown may exist, but it must
+      // NOT become a second ESC authority. The isolation is that `keybindings`
+      // (the ONE global keydown listener, which drives the shared overlay
+      // stack) is never installed in this file, so the element handler is the
+      // only thing an Escape can reach here: an Escape branch smuggled into it
+      // kills the draft right here, and nothing else can.
+      //
+      // 🔴 The event MUST bubble. Solid DELEGATES `onKeyDown` to the document
+      // root, so a `bubbles: false` dispatch never reaches the handler at all
+      // and this test passes with the smuggled branch in place — measured, it
+      // is how the first version of it survived its own mutant.
+      it("the editor's keydown ignores Escape — the shared stack keeps that authority", () => {
+        withTopic("Old topic");
+        render(() => <TopicBar {...baseProps()} />);
+        enterEdit();
+        const editor = screen.getByTestId("topic-modal-editor") as HTMLTextAreaElement;
+        fireEvent.input(editor, { target: { value: "still here" } });
+        expect(fireEvent.keyDown(editor, { key: "Escape" })).toBe(true);
+        expect((screen.getByTestId("topic-modal-editor") as HTMLTextAreaElement).value).toBe(
+          "still here",
+        );
+        // Still EDITING — no revert, no close.
+        expect(screen.queryByTestId("topic-modal-edit")).toBeNull();
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+      });
+
+      // issue 2035 height half. `rows` is the production knob — the platform's
+      // own "how many text lines", which tracks font-size and line-height by
+      // itself, where the `min-height` it replaces had to restate both and got
+      // the arithmetic wrong (see the CSS comment). jsdom has no layout, so
+      // this pins the ATTRIBUTE only; the rendered pixels are measured in
+      // e2e/tests/issue2035-topic-editor-height.spec.ts.
+      it("the editor opens eight text lines tall", () => {
+        withTopic("Old topic");
+        render(() => <TopicBar {...baseProps()} />);
+        enterEdit();
+        expect((screen.getByTestId("topic-modal-editor") as HTMLTextAreaElement).rows).toBe(8);
+      });
+    });
   });
 
   // #219-general — the topic modal COVERS the ScrollbackPane (fixed

@@ -1287,6 +1287,18 @@ const exports = identityScopedStore((onIdentityChange) => {
     // releasing here would unlock a fetch belonging to whoever replaced us.
     if (identityMoved(t)) return;
     try {
+      // issue 2050 — the WINDOW moved under the fetch. This page was computed
+      // as "older than `oldest.id`", and it only abuts the pane while that row
+      // is still the head. `anchorAtTail` (#693) replaces the whole window
+      // mid-flight and the ring cap can evict the head, so prepending here
+      // splices two non-adjacent regions — the silent hole `anchorAtTail`
+      // refuses to create and #1538 made an invariant of every path. Same
+      // sentence `loadInitialScrollback` already applies to its own two pages:
+      // the loser drops them, they describe a window the pane has left.
+      //
+      // Before the empty-page latch on purpose: a window that moved says
+      // nothing about whether the NEW head has older rows.
+      if (scrollbackByChannel()[key]?.[0]?.id !== oldest.id) return;
       // A transient failure does NOT latch as exhausted: the operator can
       // retry by scrolling again, and the in-flight guard releases below.
       if (page === null) return;

@@ -341,4 +341,70 @@ describe("issue 2050 — a far-behind badge the cursor has already retired", () 
     // unfreeze the far-behind apparatus exists to refuse.
     expect(selection.messagesUnread()[KEY]).toBe(5003);
   });
+
+  it("keeps the record when an in-flight loadMore page lands after the pane re-anchored", async () => {
+    await wireServer();
+    const api = await import("../lib/api");
+    const scrollback = await import("../lib/scrollback");
+    const { getReadCursor } = await import("../lib/readCursor");
+
+    // The e2e (#1062) found this and it is a RACE, so it is pinned here where
+    // the order is decided rather than raced: 3 reds in 5 runs there, 3/3
+    // green with the guard, and every red rendering the SAME pane — rows
+    // 1..22 and 212..260, a 189-row hole, with the "jump back" bar gone.
+    //
+    // `loadMore` computes its page as "older than the current head" and the
+    // page only abuts the pane while that row IS still the head. `anchorAtTail`
+    // (#693) replaces the whole window mid-flight, so the late page splices two
+    // non-adjacent regions — the silent hole `anchorAtTail` refuses to create
+    // and #1538 made an invariant of every path. The far-behind record is then
+    // read off a pane whose `rows[0]` is BELOW the cursor with the region still
+    // missing, which is exactly the false premise the bound cannot detect from
+    // the inside.
+    //
+    // Hold the older page on the wire until the re-anchor has happened.
+    let releaseOlder: (() => void) | null = null;
+    vi.mocked(api.listMessages).mockImplementation(async (_t, _s, _c, before) => {
+      if (before === undefined) return server.listMessages(undefined);
+      return new Promise((resolve) => {
+        releaseOlder = () => resolve(server.listMessages(before));
+      });
+    });
+
+    // A window that is behind but NOT far behind: the resume drains it, so the
+    // pane holds a contiguous region above the cursor and no record is armed.
+    server.tip = CAUGHT_UP_AT + 250;
+    await joinChannelTopic();
+    await scrollback.refreshScrollback(SLUG, CHANNEL);
+    expect(scrollback.farBehindByChannel()[KEY]).toBeUndefined();
+    const headBefore = scrollback.scrollbackByChannel()[KEY]?.[0]?.id;
+    expect(headBefore).toBe(CAUGHT_UP_AT + 1);
+
+    // The operator scrolls up: the request goes out against THAT head.
+    const older = scrollback.loadMore(SLUG, CHANNEL, noSeam);
+    expect(releaseOlder).not.toBeNull();
+
+    // While it is on the wire the channel floods and the next resume gives up
+    // on contiguity: the window is replaced by the tail page and armed.
+    server.tip = 6000;
+    await scrollback.refreshScrollback(SLUG, CHANNEL);
+    expect(scrollback.farBehindByChannel()[KEY]).toBeDefined();
+
+    // Now the older page lands. It describes a window the pane has left.
+    (releaseOlder as unknown as () => void)();
+    await older;
+
+    // The record stands — nothing has been recovered, and the operator still
+    // has the only affordance that leads back to the region.
+    expect(scrollback.farBehindByChannel()[KEY]).toBeDefined();
+    expect(getReadCursor(SLUG, CHANNEL)).toBe(CAUGHT_UP_AT);
+
+    // And the reason it stands: the pane was never holed. Asserted as the
+    // general invariant rather than as "the page was dropped" — a future verb
+    // that re-pages the region properly must be allowed to pass this.
+    const ids = (scrollback.scrollbackByChannel()[KEY] ?? []).map((m) => m.id);
+    expect(ids.length).toBeGreaterThan(0);
+    const gaps = ids.filter((id, i) => i > 0 && id !== (ids[i - 1] ?? 0) + 1);
+    expect(gaps).toEqual([]);
+  });
 });

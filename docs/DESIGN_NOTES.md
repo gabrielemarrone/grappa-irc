@@ -51774,6 +51774,60 @@ where every candidate bound agrees; this one is about the bound by construction
 pane"), not the arithmetic, so it survives any bound that honours what the
 record says.
 
+### What the e2e found: the bound was reading a HOLED pane
+
+The first contact with a browser turned the slice red — `#1062`'s spec, which
+asserts the "jump back" bar is attached on a freshly-opened far-behind window.
+It was not a flake and it was not the threshold being greedy. Measured:
+
+| tree | runs | verdict |
+| --- | --- | --- |
+| this branch | 5 (1 cold stack, 4 warm) | **3 red**, 2 green |
+| `9c1c9ecff` with `scrollback.ts` byte-identical to the base | 4 (1 cold, 3 warm) | 4 green |
+| this branch + the guard below | 3 | 3 green |
+
+Every red rendered the SAME pane, read off the DOM in three independent
+artefacts (one Playwright trace snapshot, two `error-context.md`): rows
+`seed line #1..#22` and `#212..#260` — **71 rows with a 189-row hole** — and
+the sidebar badge at 49 rather than the frozen 240.
+
+The chain, from the trace's own request order. `refreshScrollback` fills the
+pane with the region after the cursor; the pane scrolls up and `loadMore` puts
+`?before=<head>` on the wire; `loadInitialScrollback` probes, decides the gap
+is undrainable and `anchorAtTail` REPLACES the window with the tail page and
+arms the record; and THEN the older page lands and is prepended into a window
+it no longer abuts.
+
+So the far-behind bound was not wrong about its own claim — it was reading a
+pane that lied. `rows[0]` is the bottom of the unread region ONLY while the
+window is contiguous, and a late `loadMore` had spliced rows from BELOW the
+cursor onto a tail-anchored pane. `cursor >= oldestLoaded - 1` was then TRUE
+with the whole region still missing.
+
+**Fixed at the root, not at the threshold.** `loadMore` now drops a page whose
+window moved under it — `scrollbackByChannel()[key]?.[0]?.id !== oldest.id` —
+which is the same sentence `loadInitialScrollback` already applies to its own
+two pages ("the loser drops its pages: they describe a window the pane has
+deliberately left"). Narrowing the bound instead would have papered over a
+PRE-EXISTING defect: without this cure the same race still splices the hole,
+silently, and the pane renders two non-adjacent regions as if they were
+consecutive — precisely what `anchorAtTail` says it refuses to create and what
+#1538 calls an invariant of every path. The cure did not create the hole; it
+made it visible by reading it.
+
+The guard sits BEFORE the empty-page exhausted latch on purpose: a window that
+moved says nothing about whether the NEW head has older rows. It is not
+far-behind-specific — the ring cap evicting the head produces the same stale
+page, and `purgeScrollback` and `jumpToUnread` replace the window too.
+
+The e2e is a race and races are bad evidence, so the invariant is pinned where
+the order is decided rather than raced: a sixth arm in
+`unreadBadgeFarBehindStale.test.ts` holds the older page on the wire until the
+re-anchor has happened, then releases it and asserts BOTH that the record
+stands and that the pane carries no id gap. With the guard disabled it fails on
+the record; the other five arms stay green, which is the same coverage gap the
+e2e had.
+
 ### A send retires the affordance, and that is the ruling
 
 Writing in a far-behind window clears the record, so the "N unread — jump back"

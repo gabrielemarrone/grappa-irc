@@ -166,7 +166,14 @@ defmodule GrappaWeb.ArchiveControllerTest do
     # session, which is why it pays for the fake ircd.
     test "an open query window DOES hide its DM while a session is live",
          %{conn: conn, vjt: vjt} do
-      {server, port} = IRCServer.start_server(IRCServer.welcome_handler(":irc", "grappa-test"))
+      # The fake ircd stays SILENT (`passthrough_handler`, no 001) on purpose.
+      # All this test needs is a session PROCESS — `Session.list_channels/2`
+      # answers from its state, registration or not. Send a welcome and the
+      # session registers, then autojoins the fixture's `#sniffo` on a socket
+      # this test is about to tear down: an intermittent `:tcp_closed` crash
+      # in the log, green run and all. A silent ircd absorbs the connect and
+      # nothing else happens.
+      {server, port} = IRCServer.start_server(IRCServer.passthrough_handler())
       slug = "az-#{System.unique_integer([:positive])}"
       {net, _} = network_with_server(port: port, slug: slug)
       _ = credential_fixture(vjt, net, %{nick: "grappa-test"})
@@ -175,6 +182,8 @@ defmodule GrappaWeb.ArchiveControllerTest do
       {:ok, _} = QueryWindows.open({:user, vjt.id}, net.id, "vjt-peer", vjt.name)
 
       _pid = start_session_for(vjt, net)
+      # Handshake awaited so the socket is up before the read — the session is
+      # live either way, but a half-open connect is not a state worth racing.
       :ok = IRCServer.await_handshake(server, 1_000)
 
       conn = get(conn, "/networks/#{slug}/archive")

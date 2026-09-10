@@ -238,7 +238,15 @@ test.describe("issue 2037 — the far-behind bar and the sidebar badges", () => 
 
       await setReadCursorToId(vjt.token, NETWORK_SLUG, CHANNEL, cursorRow.id);
 
-      // Back into the window: this is the open that takes the probe.
+      // A RELOAD, and it is load-bearing rather than tidiness. `probeGap`
+      // fires from `loadInitialScrollback`, which sits behind a load-once gate
+      // (`loadedChannels`, `scrollback.ts`): this window was already hydrated
+      // by the visit above, so simply selecting it again re-renders the store
+      // and takes no probe. Measured — the first version of this spec switched
+      // away and back, and the bar never appeared while the pane happily
+      // rendered the already-loaded rows. The gate is cleared on identity
+      // transition and by a fresh document; the document is the cheap one.
+      await page.reload();
       await selectChannel(page, NETWORK_SLUG, CHANNEL, { awaitWsReady: false });
       await expect(page.getByTestId("far-behind-bar")).toBeVisible({
         timeout: OUTCOME_TIMEOUT_MS,

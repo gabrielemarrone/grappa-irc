@@ -377,6 +377,19 @@ defmodule Grappa.Scrollback do
 
   @type subject :: Subject.t()
 
+  @typedoc """
+  The unread split one window's counting doors return: `@content_kinds`
+  under `:messages`, every other kind under `:events`.
+
+  Named (#2037) because it is now a WIRE shape and not only an internal
+  return: `GrappaWeb.MessagesJSON.count/1` renders it, so the far-behind
+  bar and the sidebar pills read the same partition. Both producers —
+  `count_after_split/6` here and `ReadCursor.bulk_unread_split/3`'s
+  per-window value — answer in it, which is what makes "one predicate"
+  checkable rather than a convention.
+  """
+  @type count_split :: %{messages: non_neg_integer(), events: non_neg_integer()}
+
   @doc """
   Fetches up to `limit` messages for `(subject, network_id, channel)`,
   ordered by `server_time` DESC then `id` DESC (stable inside same-ms
@@ -767,7 +780,7 @@ defmodule Grappa.Scrollback do
           integer(),
           String.t() | nil,
           boolean()
-        ) :: %{messages: non_neg_integer(), events: non_neg_integer()}
+        ) :: count_split()
   def count_after_split(subject, network_id, channel, after_id, own_nick, hide_presence)
       when is_integer(network_id) and is_integer(after_id) and
              (is_binary(own_nick) or is_nil(own_nick)) and is_boolean(hide_presence) do

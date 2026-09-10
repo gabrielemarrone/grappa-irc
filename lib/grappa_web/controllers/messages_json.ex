@@ -35,8 +35,32 @@ defmodule GrappaWeb.MessagesJSON do
   Renders the `:count` action (#693) — the uncapped row count after an
   anchor. An object rather than a bare integer so the shape stays
   additive: a future sibling figure (say, a tail id) is a new key, not a
-  breaking change of the response type.
+  breaking change of the response type. #2037 is that future arriving.
+
+  ## Three numbers, because the route answers TWO questions (#2037)
+
+  `count` is the THRESHOLD's feed and is unchanged from #693: raw rows a
+  `?after=` page would return, own-authored included. cic's
+  `isFarBehind(gap)` asks "is contiguous paging achievable", which is a
+  question about rows on the wire, and the #2037 ruling puts it out of
+  scope explicitly.
+
+  `messages` + `events` are the DISPLAY split — the same
+  `@content_kinds`-vs-rest partition `ReadCursor.bulk_unread_split/3`
+  seeds the sidebar pills with. The far-behind bar renders `messages`,
+  so the bar and the bold pill are the same quantity rather than two
+  opinions about one.
+
+  All three come from ONE `resolve_hide_presence/3` in the caller, so
+  the split can never be resolved on a different presence posture than
+  the count — which is precisely the divergence #2037 measured between
+  the two `PresenceFilter.Resolver` doors.
   """
-  @spec count(%{count: non_neg_integer()}) :: %{count: non_neg_integer()}
-  def count(%{count: n}), do: %{count: n}
+  @spec count(%{count: non_neg_integer(), split: Grappa.Scrollback.count_split()}) :: %{
+          count: non_neg_integer(),
+          messages: non_neg_integer(),
+          events: non_neg_integer()
+        }
+  def count(%{count: n, split: %{messages: messages, events: events}}),
+    do: %{count: n, messages: messages, events: events}
 end

@@ -327,7 +327,39 @@ defmodule Grappa.Protocol do
   # requires. #1973's `protocol_test.exs` pin is what caught the half-done bump
   # here — and with `wire_pin --check` blind to this payload, that pin was the
   # ONLY automatic guard standing on this change.
-  @protocol_version 15
+  # v16 (#2037) — TWO shape changes, one number, because they ship together and
+  # the version names a wire STATE rather than counting edits.
+  #
+  # (A) the gap-probe response (`GET …/messages/count?after=`) grows
+  # `messages` + `events` beside the existing `count`. Three numbers because the route answers two questions:
+  # `count` stays the THRESHOLD's raw feed (`isFarBehind`, out of scope per
+  # the #2037 ruling) and the new pair is the DISPLAY split, so the
+  # far-behind bar renders the same quantity the sidebar's bold pill already
+  # shows instead of a third opinion on it.
+  #
+  # 🔴 `mix grappa.wire_pin --check` DOES NOT force this bump either, and the
+  # reason is the one v15 recorded and generalised: the digest spans the
+  # codegen artefacts, whose sources are `lib/grappa/**/*wire.ex` plus a
+  # hand-kept list of web envelopes, and `GrappaWeb.MessagesJSON` is on
+  # neither. That is now THREE carriers (`BootJSON` #1679,
+  # `UserSettingsJSON` #2029, this) hitting the same silence, which is what
+  # v15 predicted when it called it a property of every hand-written
+  # `*_json.ex` rather than an accident. Bumped deliberately, by hand.
+  #
+  # (B) `display_prefs` grows a SIXTH key, `show_event_badge` — the opt-in the
+  # same ruling puts the `!messaggi` badge behind. Same carrier as v15's
+  # `strip_formatting` and v6's `show_bottom_bar`, and the same reason it
+  # counts. It is the first display pref whose DEFAULT takes something away,
+  # which is a product change and not a protocol one; the wire only sees a
+  # sixth boolean.
+  #
+  # @min_protocol_version stays at 1. Both are purely additive and cic
+  # reads them absent-tolerantly (a missing `messages` falls back to `count`,
+  # the pre-#2037 number), so a new bundle against an older server degrades
+  # to the old behaviour instead of breaking. cic's
+  # `CLIENT_PROTOCOL_VERSION` moves 15 → 16 in lockstep because it says what
+  # cic SPEAKS, not what it requires.
+  @protocol_version 16
   @min_protocol_version 1
 
   @doc "The protocol version the server currently speaks."

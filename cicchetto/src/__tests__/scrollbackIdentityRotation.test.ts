@@ -24,7 +24,14 @@
 
 import { createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ScrollbackMessage } from "../lib/api";
+import type { GapProbe, ScrollbackMessage } from "../lib/api";
+
+// #2037 — the gap probe returns three numbers now: `gap` (raw rows, the
+// threshold's input) and the `{messages, events}` display split. These specs
+// were written about the gap, so the helper reports a window whose unread is
+// all content — the messages count then equals the gap and every assertion
+// below keeps meaning exactly what it meant.
+const probe = (gap: number, events = 0) => ({ gap, messages: gap - events, events });
 
 // Mirrors loadInitialScrollback.test.ts: keep importing scrollback's
 // transitive graph from opening a real WebSocket against jsdom's
@@ -50,7 +57,7 @@ vi.mock("../lib/auth", () => ({
 
 const listMessagesSpy = vi.fn<(...a: unknown[]) => Promise<ScrollbackMessage[]>>();
 const listMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<ScrollbackMessage[]>>();
-const countMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<number>>();
+const countMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<GapProbe>>();
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
   return {
@@ -127,7 +134,7 @@ describe("#788 identity rotation mid-flight", () => {
     listMessagesAfterSpy.mockReset();
     listMessagesAfterSpy.mockResolvedValue([]);
     countMessagesAfterSpy.mockReset();
-    countMessagesAfterSpy.mockResolvedValue(0);
+    countMessagesAfterSpy.mockResolvedValue(probe(0));
     setReadCursorSpy.mockClear();
     // Each test starts from a clean identity. Setting the token IS a
     // rotation, so this also fires the store purge between cases.

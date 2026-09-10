@@ -23,7 +23,7 @@
 //     and there is no anchor term at all.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ScrollbackMessage } from "../lib/api";
+import type { GapProbe, ScrollbackMessage } from "../lib/api";
 
 vi.mock("../lib/socket", () => ({
   joinUser: vi.fn(() => ({ on: vi.fn(), push: vi.fn().mockReturnValue({ receive: vi.fn() }) })),
@@ -48,7 +48,7 @@ vi.mock("../lib/auth", () => ({
 
 const listMessagesSpy = vi.fn<(...a: unknown[]) => Promise<ScrollbackMessage[]>>();
 const listMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<ScrollbackMessage[]>>();
-const countMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<number>>();
+const countMessagesAfterSpy = vi.fn<(...a: unknown[]) => Promise<GapProbe>>();
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
   return {
@@ -95,7 +95,7 @@ describe("issue 2037 — the ANCHOR term, measured with its sign", () => {
     listMessagesAfterSpy.mockReset();
     listMessagesAfterSpy.mockResolvedValue([]);
     countMessagesAfterSpy.mockReset();
-    countMessagesAfterSpy.mockResolvedValue(0);
+    countMessagesAfterSpy.mockResolvedValue({ gap: 0, messages: 0, events: 0 });
     mockTokenValue = "test-bearer";
   });
 
@@ -109,14 +109,18 @@ describe("issue 2037 — the ANCHOR term, measured with its sign", () => {
     const { channelKey } = await import("../lib/channelKey");
 
     applyJoinReply("net", "#coldprobe", 100);
-    countMessagesAfterSpy.mockResolvedValue(1807);
+    // #2037 — the probe now returns three numbers. The bar renders `messages`;
+    // `gap` is what `isFarBehind` reads. Kept distinct here on purpose, so the
+    // assertions below say WHICH one reached the bar.
+    countMessagesAfterSpy.mockResolvedValue({ gap: 1807, messages: 187, events: 216 });
     listMessagesSpy.mockResolvedValue([row(1907), row(1906)]);
 
     await loadInitialScrollback("net", "#coldprobe");
 
     expect(anchorsProbed()).toEqual([100]);
     expect(farBehindByChannel()[channelKey("net", "#coldprobe")]).toEqual({
-      missed: 1807,
+      missed: 187,
+      events: 216,
       resumeFrom: 100,
     });
   });
@@ -139,7 +143,9 @@ describe("issue 2037 — the ANCHOR term, measured with its sign", () => {
     // Monotone in the anchor: the earlier anchor (the cursor) counts MORE.
     countMessagesAfterSpy.mockImplementation(async (..._a: unknown[]) => {
       const anchor = _a[3] as number;
-      return anchor === 100 ? 1807 : 1500;
+      return anchor === 100
+        ? { gap: 1807, messages: 187, events: 216 }
+        : { gap: 1500, messages: 150, events: 180 };
     });
 
     await refreshScrollback("net", "#twoanchors");
@@ -155,7 +161,8 @@ describe("issue 2037 — the ANCHOR term, measured with its sign", () => {
     expect(probed[1] as number).toBeLessThan(probed[0] as number);
 
     expect(farBehindByChannel()[channelKey("net", "#twoanchors")]).toEqual({
-      missed: 1807,
+      missed: 187,
+      events: 216,
       resumeFrom: 100,
     });
   });
@@ -180,23 +187,28 @@ describe("issue 2037 — the ANCHOR term, measured with its sign", () => {
     countMessagesAfterSpy.mockImplementation(async (..._a: unknown[]) => {
       const anchor = _a[3] as number;
       if (anchor === 100) throw new Error("probe failed");
-      return 1500;
+      return { gap: 1500, messages: 150, events: 180 };
     });
 
     await refreshScrollback("net", "#reprobefail");
 
     const far = farBehindByChannel()[channelKey("net", "#reprobefail")];
-    expect(far).toEqual({ missed: 1500, resumeFrom: 300 });
-    // The fallback number is SMALLER than the cursor-anchored one (1807 in
-    // the case above, same fixture): the anchor term's sign is <= 0.
-    expect(far?.missed as number).toBeLessThan(1807);
+    expect(far).toEqual({ missed: 150, events: 180, resumeFrom: 300 });
+    // The fallback number is SMALLER than the cursor-anchored one (187 in the
+    // case above, same fixture): the anchor term's sign is <= 0. Measured on
+    // the DISPLAY quantity now, which is the one the operator reads.
+    expect(far?.missed as number).toBeLessThan(187);
   });
 
   // Where the SIDEBAR number comes from while the bar is up. The seed is
   // whatever the server last pushed for the key; the bar is a separate probe.
   // Two numbers, two server functions, ONE anchor — so the residual between
   // them is a PREDICATE difference, not an anchor difference.
-  it("the far-behind badge is the server seed, untouched by the bar's probe", async () => {
+  // #2037 A — after the cure this is no longer "the seed survives"; it is
+  // "the bar and the badge are the SAME VARIABLE". `perChannelUnread` reads
+  // the far-behind entry for a far-behind key, and the bar renders the same
+  // field, so they cannot disagree by construction rather than by luck.
+  it("the far-behind badge and the bar read one value (#2037)", async () => {
     const { loadInitialScrollback } = await import("../lib/scrollback");
     const { applyJoinReply } = await import("../lib/readCursor");
     const { channelKey } = await import("../lib/channelKey");
@@ -207,15 +219,21 @@ describe("issue 2037 — the ANCHOR term, measured with its sign", () => {
     // The join reply's `window_counts` — `Scrollback.count_after_split/6`,
     // anchored at the SAME cursor the bar probes at.
     setServerSeedCount(key, { messages: 187, events: 216 });
-    countMessagesAfterSpy.mockResolvedValue(1807);
+    countMessagesAfterSpy.mockResolvedValue({ gap: 1807, messages: 187, events: 216 });
     listMessagesSpy.mockResolvedValue([row(1907), row(1906)]);
 
     await loadInitialScrollback("net", "#seedwins");
 
+    const { farBehindByChannel } = await import("../lib/scrollback");
+    const far = farBehindByChannel()[key];
+    expect(far?.missed).toBe(187);
     expect(messagesUnread()[key]).toBe(187);
     expect(eventsUnread()[key]).toBe(216);
-    // ...while the bar rendered 1807 from the same anchor. Same anchor, three
-    // numbers.
+    // The bar renders `far.missed`; the pill renders `messagesUnread()[key]`.
+    // Same value, one origin. Before #2037 the bar showed 1807 here — the raw
+    // `gap`, which is still probed and still decides the threshold, and is now
+    // never rendered.
+    expect(far?.missed).toBe(messagesUnread()[key]);
     expect(anchorsProbed()).toEqual([100]);
   });
 });

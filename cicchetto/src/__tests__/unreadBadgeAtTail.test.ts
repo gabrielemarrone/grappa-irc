@@ -28,7 +28,7 @@ vi.mock(import("../lib/api"), async (importOriginal) => {
     listChannels: vi.fn().mockResolvedValue([]),
     listMessages: vi.fn().mockResolvedValue([]),
     listMessagesAfter: vi.fn().mockResolvedValue([]),
-    countMessagesAfter: vi.fn().mockResolvedValue(0),
+    countMessagesAfter: vi.fn().mockResolvedValue({ gap: 0, messages: 0, events: 0 }),
     sendMessage: vi.fn(),
     me: vi.fn().mockResolvedValue({
       kind: "user",
@@ -156,7 +156,7 @@ describe("#981 unread badge on the window being read at the tail", () => {
   // on its own.
   it("keeps a FAR-BEHIND window's badge even while the pane reads its tail", async () => {
     const api = await import("../lib/api");
-    vi.mocked(api.countMessagesAfter).mockResolvedValue(3000);
+    vi.mocked(api.countMessagesAfter).mockResolvedValue({ gap: 3000, messages: 3000, events: 0 });
     vi.mocked(api.listMessages).mockResolvedValue([
       {
         id: 3100,
@@ -177,7 +177,7 @@ describe("#981 unread badge on the window being read at the tail", () => {
 
     applyJoinReply(SLUG, CHANNEL, 100);
     await loadInitialScrollback(SLUG, CHANNEL);
-    expect(farBehindByChannel()[key]).toEqual({ missed: 3000, resumeFrom: 100 });
+    expect(farBehindByChannel()[key]).toEqual({ missed: 3000, events: 0, resumeFrom: 100 });
 
     selection.setServerSeedCount(key, { messages: 3000, events: 0 });
     expect(selection.messagesUnread()[key]).toBe(3000);

@@ -50874,18 +50874,29 @@ reconnect. Option 2 is dropped; #450 (collapsible network groups) stays a
 separate concern. When the cold-load orphan below was put to him on
 2026-09-08, the answer was equally flat: *"redirigi a home"*.
 
-**Q2 is an INFERENCE, and confirmation is still pending.** Choosing the
-redirect implies that the one door for re-reading a parked window's history
-dies — `selection.ts`'s bucket-D redirect is transition-only precisely so an
-operator can navigate BACK to a parked window, and with no row and no restore
-there is nothing left to navigate back to. That question was written in the
-same line as Q1 and the ruling did not address it in words, so it is being
-treated as accepted collateral by the session that relayed it, not as
-something vjt said. **What holds the loss up is that the network itself does
-not become invisible:** `$home` still renders a parked network as a
-disconnected row with its `connection_state_reason` and a `[Reconnect]` chip
-(`HomePane.tsx:438,463`). If a dedicated door for a parked network's history
-is wanted, that is a NEW issue, not a piece of this one.
+**Q2 was flagged as an inference and is now RULED, and the ruling reverses
+what this entry first said.** Choosing the redirect looked like it killed the
+one door for re-reading a parked window's history — `selection.ts`'s bucket-D
+redirect is transition-only precisely so an operator can navigate BACK to a
+parked window, and with no row and no restore there is nothing left to
+navigate back to. That collateral was recorded here as accepted-but-unspoken.
+It is not accepted: on 2026-09-10 vjt answered *"the history is reachable
+from the archive"* (relayed in session, not read on IRC by the author of this
+entry), and on 09-09 that reading the history of a parked network is deferred
+to SEARCH rather than to a dedicated re-entry door. **So nothing is lost and
+this paragraph's earlier claim that something was is FALSE.** The archive is
+the door, and it is reachable while parked: `ArchiveModal` iterates the RAW
+`networks()` store (`:174`), not the sidebar's filtered list, and the archive
+launcher renders unconditionally (`RailActions.tsx:525-533`).
+
+**But the door only opened once this slice made it open, and that is the
+substance of the fix below.** Naming the archive as the surface turns
+`archive.ts`'s subtraction into a load-bearing part of the ruling rather than
+a detail: the filter removes what the nav draws, and a parked network's nav
+draws nothing. Measured on this branch before the cure — a parked network
+whose archive holds an autojoin channel and a kicked pseudo-row rendered
+**zero** rows in the modal, both swallowed. Half of that was invisible to the
+issue's own reading of the code (see "The hole the ruling exposed").
 
 **`failed` is out of scope and the asymmetry is deliberate.** A failed network
 keeps its greyed row IN PLACE: a failure is something the operator must see
@@ -50946,6 +50957,56 @@ alongside the resources at every call site and could only ever be tested
 through a mirror of itself. Extracted, it is measured directly and the Sidebar
 and Shell suites run the real rule.
 
+### The hole the ruling exposed, and where the cure goes
+
+`visibleArchiveForNetwork` subtracts three sets — the live channels, the live
+queries, and the pseudo-rows — on the premise #402 wrote down: *a nav renders
+what it subtracts*. Dropping a whole network from the Sidebar's `<For>` breaks
+that premise wholesale, and the archive kept subtracting. Three legs, and only
+one of them was predicted:
+
+**Pseudo-rows (predicted).** `navPseudoChannelsForNetwork` returned the
+projection unconditionally on desktop, so `pending` / `failed` / `kicked` /
+`parked` windows under a parked network were subtracted from the archive while
+no sidebar row drew them: one window, ZERO surfaces — #402's bug, one level up.
+
+**Live channels (NOT predicted, and read as safe until it was measured).**
+`GET /networks/:slug/channels` returns the union of the credential's AUTOJOIN
+list and the live session's channels (`ChannelsController.index` →
+`Networks.merge_channel_sources/2`). A parked network has no session, so
+`Session.list_channels/2` answers `{:error, :no_session}` → `[]` and the union
+is exactly the autojoin list, at `joined: false`. Those rows sit in
+`channelsBySlug`, the archive subtracts them, and the sidebar no longer draws
+them. The server, meanwhile, PUTS them in the archive precisely because the
+session is gone: `ArchiveController`'s `active_keyset` is empty without one —
+*"everything with rows qualifies for the archive when no session is live"*.
+So the two sides disagreed, and the operator's own autojoin channels were the
+casualty. This is the leg that makes the cure worth more than a tidy-up.
+
+**The cure is `navDrawsNetwork(slug)` in `lib/pseudoChannels.ts`**, one level
+above `navPseudoChannelsForNetwork`: does the nav of THIS form factor draw ANY
+row for this network. Desktop answers `!isNetworkParked(...)`; **mobile answers
+YES**, measured rather than assumed — `BottomBar.tsx` iterates the raw
+`networks()` store and renders each network's channels and queries with no
+state filter (`:138`, `:174`, `:215`), so on a phone those rows are still on
+screen and must still be subtracted. The archive consumes the one answer and
+returns its entries unfiltered when the nav draws nothing. It does NOT live in
+`archive.ts` as a local `isNetworkParked` call: that would be a second
+statement of the parked policy plus a copy of the form-factor rule, and
+`lib/networkParked.ts` exists to stop the first.
+
+**Queries are the leg that stays broken, and it cannot be closed here.**
+`ArchiveController.build_active_keyset/3` composes the live session channels
+(empty when parked) with `open_query_targets/2`, which reads
+`QueryWindows.list_for_subject/1` — a DB read with no session gate. So a
+parked network's DM windows are excluded from the archive response by the
+SERVER while the desktop sidebar no longer draws them either: one window, zero
+surfaces, and no client-side filter can put back a row the server never sent.
+The asymmetry is the bug — the same controller's own moduledoc says everything
+with rows qualifies when no session is live, and its channel leg honours that
+while its query leg does not. Closing it is a server change (and this slice
+claims none), so it is written down here and carried to vjt rather than taken.
+
 ### Limits, stated
 
 **Not device-verified.** The gates here are jsdom + the pure predicate; the
@@ -50966,6 +51027,22 @@ to prevent.
 and was left alone deliberately.** It is what makes any residual parked window
 readable but not writable, and it is a different question (can I type here)
 from the one this slice answers (is there a row).
+
+**The `reconnecting…` badge has nowhere to live during the transition, and
+that question is OPEN — measured here, not answered.** #100's badge renders
+inside the per-network `<For>` (`Sidebar.tsx:378-380`) off
+`reconnectingByNetwork`, which the server drives with `connection_progress`
+(`connecting` on the attempt, `connected` on 001). `connection_state` stays
+`parked` for that whole window — it is operator intent, and the badge is
+deliberately NOT that state. So the badge fires while its host row does not
+exist. What the operator actually sees between clicking `[Reconnect]` on
+`$home` and 001: the button relabels to `Reconnecting…` only while
+`reconnector.pending()` — the awaited PATCH — then returns to `Reconnect` with
+the state word still reading `parked` and no badge anywhere, while the
+upstream link is in fact coming up. Before this slice the greyed sidebar row
+hosted the badge for exactly that window. Moving the badge, disabling the
+button for longer, or teaching `$home` the progress signal are all product
+calls; none is taken here.
 
 _Code + tests. No wire change, no protocol bump, no server change. Deploy:
 cic bundle only._

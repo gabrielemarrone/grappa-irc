@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ScrollbackMessage } from "../lib/api";
+import type { GapProbe, ScrollbackMessage } from "../lib/api";
 import { channelKey } from "../lib/channelKey";
 
 // issue 2050 — a badge that no in-session gesture can clear, clean again after
@@ -7,9 +7,16 @@ import { channelKey } from "../lib/channelKey";
 //
 // The #693 far-behind record says "the unread region is NOT in this pane". Two
 // consumers act on it: `selection.ts`'s `perChannelUnread` discards local truth
-// and publishes `serverSeedCounts[key]` instead, and `setCursorIfAdvances`
+// and publishes a frozen server-side number instead, and `setCursorIfAdvances`
 // FREEZES the read cursor. Both are right only while the cursor is still where
 // it was when the record was written.
+//
+// WHICH frozen number moved under this file while it was being written. Until
+// #2037 (landed 2026-09-10) the badge published `serverSeedCounts[key]`; it now
+// publishes the far-behind record's OWN `missed`, so the record is not merely
+// the gate on a frozen figure, it CARRIES it. Same defect, and the same cure —
+// retiring the record releases both readings — which is why nothing here had to
+// change but the wording and the fake's probe shape.
 //
 // It does not stay there. Two doors move the cursor without passing through the
 // frozen one, and neither tells the far-behind record:
@@ -22,10 +29,11 @@ import { channelKey } from "../lib/channelKey";
 //     A peer device reading the channel moves this device's cursor.
 //
 // Once either fires, the cursor is at the tip and nothing is unread — but the
-// record still stands, so the badge keeps publishing the seed, which is written
-// ONLY by a per-channel join reply or a `/me` fetch and therefore cannot move
-// while the socket stays up. Hence: unclearable in-session, clean after a
-// restart (both stores are in-memory).
+// record still stands, so the badge keeps publishing a number taken at the
+// moment of the decision, which nothing moves while the socket stays up (the
+// seed is written only by a join reply or a `/me`; `missed` only by a ring-cap
+// bite). Hence: unclearable in-session, clean after a restart (both stores are
+// in-memory).
 //
 // These tests assert the OUTCOME — the badge, and whether the pane still offers
 // a "jump back" bar — not the sequence of calls that produces it. They run the
@@ -122,8 +130,14 @@ class FakeServer {
     return out;
   }
 
-  countMessagesAfter(after: number): number {
-    return Math.max(0, this.tip - after);
+  // #2037 — the probe answers THREE numbers, not one: `gap` (raw rows, what
+  // decides far-behind) and the `messages`/`events` split (what gets rendered).
+  // Every row this log serves is a privmsg, so the split is degenerate here by
+  // construction — which is the honest fake for THIS log, not a shortcut: an
+  // events figure would have to come from rows the fake never produces.
+  countMessagesAfter(after: number): GapProbe {
+    const gap = Math.max(0, this.tip - after);
+    return { gap, messages: gap, events: 0 };
   }
 }
 
@@ -157,7 +171,8 @@ const joinChannelTopic = async (): Promise<void> => {
   const { applyJoinReply } = await import("../lib/readCursor");
   const { setServerSeedCount } = await import("../lib/selection");
   applyJoinReply(SLUG, CHANNEL, server.cursor);
-  setServerSeedCount(KEY, { messages: server.countMessagesAfter(server.cursor), events: 0 });
+  const probe = server.countMessagesAfter(server.cursor);
+  setServerSeedCount(KEY, { messages: probe.messages, events: probe.events });
 };
 
 /**
@@ -205,7 +220,7 @@ describe("issue 2050 — a far-behind badge the cursor has already retired", () 
     // Both sides agree the channel is read to the tip...
     expect(getReadCursor(SLUG, CHANNEL)).toBe(6001);
     expect(server.cursor).toBe(6001);
-    expect(server.countMessagesAfter(server.cursor)).toBe(0);
+    expect(server.countMessagesAfter(server.cursor).gap).toBe(0);
     // ...so there is nothing left to badge.
     expect(selection.messagesUnread()[KEY]).toBeUndefined();
   });

@@ -51681,9 +51681,22 @@ fall. One thing was broken, not two.
 
 #693's `farBehindByChannel[key]` says "the unread region is NOT in this pane".
 Two consumers act on it: `perChannelUnread` (`selection.ts`) discards local
-truth and publishes `serverSeedCounts[key]` instead, and `setCursorIfAdvances`
-FREEZES the read cursor. Both are sound only while the cursor sits where it did
-when the record was written.
+truth and publishes a frozen server-side number instead, and
+`setCursorIfAdvances` FREEZES the read cursor. Both are sound only while the
+cursor sits where it did when the record was written.
+
+WHICH frozen number moved while this was in flight, and the note is here so the
+next reader does not think the entry describes code that no longer exists.
+Until #2037 (landed 2026-09-10, hours before this) the published figure was
+`serverSeedCounts[key]`; it is now the far-behind record's OWN `missed`, so the
+record no longer merely GATES a frozen number, it CARRIES one. That makes the
+defect sharper rather than different — and the cure identical, because retiring
+the record is what releases either reading. Re-measured on the new base with
+the bound removed: the same three reds, the third now printing
+`{ missed: 5000, events: +0, … }` where it printed `{ missed: 5000,
+resumeFrom: 1000 }`. Nothing in the tests moved but the fake's probe shape
+(#2037 turned `countMessagesAfter` into a three-field `GapProbe`) — no
+assertion was touched, which is the only reason the reds are comparable at all.
 
 It does not stay there. The record had exactly three exits — `jumpToUnread`,
 `dismissFarBehind`, `purgeScrollback` — and not one of them was keyed on the

@@ -51726,7 +51726,7 @@ approximating it. Two alternatives were measured and rejected:
   close — was measured false: under far-behind the only doors that move the
   cursor land ON the row that just arrived, so cursor and newest rise together.
 
-### The caveat, named rather than discovered later
+### The caveat, named rather than discovered later — and then measured
 
 `loadMore` prepends older rows and LOWERS the oldest loaded id, so scrolling up
 far enough satisfies the bound. That is correct, and the reason is that clearing
@@ -51736,6 +51736,51 @@ live number the operator retires by reading. Re-paging the region back into the
 pane IS closing the hole. The destructive move would have been the opposite:
 unfreezing while the pane was still holed, leaving local truth incomplete and
 the count under-reported.
+
+That paragraph shipped as an ARGUMENT, labelled as one in the code comment and
+in the PR: the bound was measured on the cursor axis only, and everything above
+about the window axis was reasoning. It is now measured too, by a fifth arm on
+the other axis — the cursor never moves, the WINDOW does, page by page up to
+the read position. Three rows land live mid-scroll, which is what makes the
+badge's two readings separable: the seed is a join-time snapshot stuck at 5000,
+local truth is 5003. So the closing number is neither zero (thaw ≡ mark read),
+nor 5000 (still frozen), nor short (a bound firing over a holed pane).
+
+Its evidence is a mutation bench, because a green arm on a shipped cure proves
+nothing on its own. Bound deleted (= `origin/main`): red at the arm's page
+budget. **Bound fires one page into the scroll: all FOUR pre-existing arms stay
+GREEN and only the new one goes red** — that gap is the arm's whole reason to
+exist, since "retires when the hole closes" and "retires as soon as you scroll"
+were indistinguishable before it. Clear-and-also-advance-the-cursor: again only
+the new arm, on the cursor assertion.
+
+The price is the file's blanket threshold-agnosticism, and the header note is
+amended rather than left to rot. Four arms park the cursor at the channel tip
+where every candidate bound agrees; this one is about the bound by construction
+— but it asserts the record's own claim ("the unread region is not in this
+pane"), not the arithmetic, so it survives any bound that honours what the
+record says.
+
+### A send retires the affordance, and that is the ruling
+
+Writing in a far-behind window clears the record, so the "N unread — jump back"
+bar disappears after your own message. That reads like a loss — the operator
+never asked to give up the way back to the region — so it is worth saying that
+it is a DECISION and not a side effect nobody looked at.
+
+vjt ruled on 2026-09-10 (relayed by the orchestrator, whose session it reached):
+writing in a far-behind window counts as having caught up; the bar going away
+after a send is wanted. So the cure is NOT narrowed — `sendMessage` gets no
+special case and the record is not held armed for it.
+
+Why it holds, beyond the ruling: the SERVER already thought so. A send takes its
+read cursor to the tip, so before this the client was publishing a "you are
+thousands behind" affordance over a channel the server considered read. The
+change removes a disagreement rather than creating one.
+
+The cross-device echo (`applyReadCursorSet`) was NOT put to him and carries no
+ruling. It needs none — the bound covers it by construction, since the cursor
+lands at the tip whoever moved it.
 
 `measuredUnreadByChannel` (#947) is deliberately not cleared alongside: the pane
 spends it only while `measured.at === cursor`, so a cursor that moved has

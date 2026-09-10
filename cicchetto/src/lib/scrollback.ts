@@ -973,6 +973,12 @@ const exports = identityScopedStore((onIdentityChange) => {
   // What T1 would have done is the opposite: unfreeze while the pane was
   // still holed, leaving local truth incomplete and the count under-reported.
   //
+  // That was an ARGUMENT when this shipped and is now a measurement: the last
+  // arm of `unreadBadgeFarBehindStale.test.ts` scrolls the window down to a
+  // cursor that never moves and pins the badge to local truth (5003) rather
+  // than to zero, to the frozen seed, or to a short count. A bound that
+  // retired one page into the scroll passed every other arm in that file.
+  //
   // `measuredUnreadByChannel` (#947) is deliberately NOT cleared alongside:
   // the pane spends it only while `measured.at === cursor`, so a cursor that
   // moved has already expired it.

@@ -86,8 +86,18 @@ function routePushTarget(target: PushTarget): void {
  * CANONICAL nick — whatever spelling the open query window already uses.
  * `Alice` on the wire is the window `alice`, and a byte compare of the two
  * answers "different window" for the very notification the reader is
- * looking at. Channels need no step here: `setSelectedChannel` folds the
- * channel KEY itself (`foldChannelKey`, #1396), so both sides arrive folded.
+ * looking at.
+ *
+ * Channels need no step here, and the reason is worth stating precisely,
+ * because the obvious one is wrong for half the callers (review,
+ * 2026-09-10). It is NOT that `setSelectedChannel` folds the channel KEY on
+ * the way in — it does (`foldChannelKey`, #1396), but only the FORWARD path
+ * reaches the setter; the backward path never calls it. What covers BOTH
+ * directions is `isActiveSelection`, which runs its own argument through the
+ * same `foldChannelKey` before comparing. So the fold that makes this
+ * function safe to skip for channels lives in `selection.ts`'s comparator,
+ * not in its setter — removing it there would silently break the dismissal
+ * while every forward-path test stayed green.
  *
  * Total: an unresolvable network yields the raw name rather than null, so
  * a stale deep-link degrades to a best-effort match instead of a crash.

@@ -29,6 +29,7 @@ import { installGlobalPaste } from "./lib/globalPaste";
 import { HIDDEN_TICK_MS, installHiddenProbe } from "./lib/hiddenProbe";
 import { installKeyboardPreserve } from "./lib/keepKeyboard";
 import { refetchChannels, refetchNetworks } from "./lib/networks";
+import { installNotificationDismiss } from "./lib/notificationDismiss";
 import { applyIosClass, isStandalonePwa } from "./lib/platform";
 import { installPushResubscribe } from "./lib/pushResubscribe";
 import { applyDeepLinkFromUrl, installPushTargetListener } from "./lib/pushTarget";
@@ -203,6 +204,15 @@ bootstrapAuth();
 // is what lets an invite survive the login round-trip.
 installPushTargetListener();
 applyDeepLinkFromUrl();
+
+// #2034 — the OTHER half of the notification lifecycle, mounted next to the
+// tap path it completes. A tap has always closed its notification; nothing
+// ever closed one because the reader caught up in the app, so the shade kept
+// banners for conversations that were read minutes ago and a later tap
+// yanked the reader back to them. `installNotificationDismiss` sweeps the
+// open notifications whenever a conversation comes into view and closes the
+// ones naming it. See `lib/notificationDismiss.ts`.
+installNotificationDismiss();
 
 // #1103 — the THIRD boot-time shape, and the only one that is not a link: the
 // OS share sheet POSTs files at the service worker, which stashes them and

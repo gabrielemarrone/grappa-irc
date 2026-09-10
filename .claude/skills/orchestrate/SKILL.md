@@ -1535,6 +1535,21 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
 12. 🪞 **"E' un'etichetta" e' una proprieta' del SINGOLO PORTATORE, non della classe.** Un vendor che
     mente in una URL non dice nulla su cosa dichiara il suo header, e viceversa. **Prima di
     generalizzare un'accusa a un secondo portatore, misura QUEL portatore.**
+13. 🔴🔴 **HO MERGIATO L'ECONOMICA MENTRE L'ESPANSIVA ERA IN VOLO, E LE HO FATTO PAGARE UN TERZO
+    REBASE (10-09 22:43Z, misurato).** #2066 costava **4** check (diff `test/**` + DN ⇒ `test/**` non
+    sta nei `paths:` di `integration`) e #2062 ne costava **9**, quattro dei quali shard `integration`.
+    #2066 e' andata verde per prima e l'ho mergiata **subito**; dieci minuti dopo #2062 e' andata
+    verde 9/9 **e si e' trovata 2 dietro** ⇒ rebase e ~25 minuti di shard da ripagare, il TERZO
+    rebase per quel ramo in una sera.
+    🥇 **La regola era gia' scritta in questo file e dice l'inverso: «fai prima tutto il movimento
+    ECONOMICO, mergia l'ESPANSIVA quando e' verde, e lascia che le economiche si ri-gatino — una
+    suite economica E' il controllo dell'unione, al prezzo della suite economica.»** Invertendo,
+    l'unione la paga sempre la suite costosa.
+    ⇒ **Con due PR in volo l'ordine di merge lo decide il COSTO del loro gate, non l'ordine in cui
+    diventano verdi.** E il costo si LEGGE (quanti check ha la PR, e quali `paths:` tocca il suo
+    diff), non si indovina.
+    🥇 *Detto alla worker che quel rebase era per un mio errore di ordinamento e non suo: una worker
+    che paga il conto di una mia decisione ha diritto di saperlo.*
 
 ## 🕳️ TRAPPOLE DI MISURA DEL REPO (PERMANENTI — spostate dall'handoff 2026-08-18)
 - 🔴🔴 **LO ZERO FALSO E PLAUSIBILE E' LA TRAPPOLA RICORRENTE DI QUESTO REPO — quattro istanze misurate,

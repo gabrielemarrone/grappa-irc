@@ -51190,3 +51190,111 @@ not that window's pair is EXCLUDED by vjt — he settled on 2026-09-10 that it
 is one and the same window ("si stessa window", his words on IRC, reported
 into the session; I do not read IRC). The quantity was unified. The mystery
 was not closed._
+<!-- entry #2037c -->
+
+---
+
+## 2026-09-10 — #2037c: the wire pin was blind to every hand-written JSON view, and a list was never going to fix it
+
+`mix grappa.wire_pin --check` is the gate behind the #1393d ruling: a wire
+shape that moves without `Grappa.Protocol.version/0` moving is RED. It failed
+to see #2037's own wire change. It caught the commit only on the VERSION
+field, printing a byte-identical digest across a two-field ADDITION — the
+gate's own output was the proof of its blindness.
+
+### Measured on demand, this session, not inherited
+
+A field named `mutant_probe` was added to `GrappaWeb.MessagesJSON.count/1` —
+`@spec` and body together — on the untouched branch:
+
+| tree | command | rc | verdict |
+|---|---|---|---|
+| pre-cure + the new field | `wire_pin --check` | **0** | `wire shape and protocol 16 agree.` |
+| the same tree | `gen_wire_types --check` | 0 | `in sync.` on BOTH artefacts |
+| the same tree | grep the artefacts | — | `mutant_probe` **0×** in each |
+
+with a positive control on the grep (223 / 190 hits for a token that is in
+them) and a negative control (0). So the addition was invisible to the drift
+gate, invisible to the tripwire, and absent from both generated files.
+
+The second row is the live instance of what CLAUDE.md already claims in the
+abstract — the generator compares the artefact with its own SOURCE and answers
+`in sync.` in exactly the case to catch. It had been recorded from a Wire
+typespec; here it is measured on a hand-written `*_json.ex`, where the source
+it compares against never mentioned the field at all.
+
+### Why the obvious cure is not one
+
+This is a RECURRENCE. #1679 met the same class — `/boot` invisible to the
+tripwire — and cured it by adding `GrappaWeb.BootJSON` to `gen_wire_types`'s
+hand-kept `@extra_modules` and writing a comment telling the next author to
+remember. The note did not hold, and it could not: an inclusion list is
+**fail-OPEN**, so forgetting it costs nothing and says nothing. Measured
+today, two views that were never added — `PushSubscriptionJSON` (3 declared
+types) and `UserSettingsJSON` (9) — have been outside the digest the whole
+time.
+
+Widening that list still would not have caught #2037, and this is the part
+that decided the design: of the twelve `GrappaWeb.*JSON` views, **eight
+declare no named `@type` at all**, `MessagesJSON` among them. The codegen
+renders named types, so listing those modules buys exactly zero. All twelve
+DO carry `@spec`s — 29 of them.
+
+### What shipped
+
+`wire_pin` grew a third digest component: the `@spec`s of the EXPORTED
+functions of every `GrappaWeb.*JSON` module, read from BEAM chunks, over a
+module set derived from the build output (`Elixir.GrappaWeb.*JSON.beam` under
+the compile path) rather than typed by hand. Fail-CLOSED twice — a new view is
+covered the moment it compiles, and a discovery that finds nothing RAISES
+rather than contributing an empty string to a digest that would go on
+agreeing.
+
+The module name comes from the beam FILENAME, which IS the module. Not from
+camelizing a source path: `gen_wire_types` records that guess turning
+`controllers/me_json.ex` into `GrappaWeb.Controllers.MeJson`, a module that
+does not exist, dropped SILENTLY — zero coverage while looking widened.
+
+Reading BEAM chunks rather than source is what keeps it from firing on
+comments and reformatting, the property the two-artefact digest already had
+and had to keep.
+
+### Deliberately NOT routed through the codegen
+
+Adding the twelve views to `@extra_modules` and letting `gen_wire_types` emit
+them would drag their shapes into `wireTypes.ts` **and `wireSchema.ts`** — and
+the schema one is RUNTIME validation in cic. Widening a runtime validator is a
+client change with its own blast radius; this is a gate change. They do not
+belong in one commit, and the gate does not need the client to move for the
+server-side hole to close.
+
+### Cost paid once, and the route was the documented one
+
+Widening what the digest COVERS is not a wire-shape change and the gate cannot
+tell — it saw a moved digest and a still number, which is the violation, and
+`--update` refused. That is the moduledoc's own scenario, and its prescribed
+route was taken: DELETE `priv/wire/shape.pin` and re-create it, visible in
+review, rather than adding a `--force` flag that would be the hole the refusal
+exists to close. Re-created at protocol **16** — unchanged, because the WIRE
+did not move, only the gate's view of it. The pin's header states its coverage
+on purpose, so it was rewritten in the same commit; a header describing a
+coverage that no longer exists is the same lie, moved.
+
+### Proof the cure is a gate and not decoration
+
+The identical `mutant_probe` addition, re-applied after the cure:
+`wire_pin --check` rc **1**, digest `sha256:cdc283e8…` → `sha256:e9de1fa8…`.
+Reverted: rc 0. A gate that has never failed on the case it must catch is
+decoration, and that is literally the defect being cured here — repeating it
+in the cure was not an option.
+
+### Two limits, stated so they are not rediscovered
+
+A view whose BODY grows a key while its `@spec` stands still is still
+invisible to this component. Dialyzer is the leg that catches that one, and
+that is an ARGUMENT — it was not measured in this session, and it is written
+down as an argument rather than dressed as a measurement.
+
+A spec that references a remote type is digested as the reference TEXT, so a
+change inside `Grappa.Scrollback.count_split()` moves nothing unless that type
+reaches the digest by another route.

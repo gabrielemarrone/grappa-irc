@@ -38,6 +38,51 @@ defmodule Mix.Tasks.Grappa.WirePin do
   suite went green against it. `priv/wire/` has its own override in
   `_lib.sh`, alongside the drift-pin inputs there for the same reason.
 
+  ## The third component, and why a list could not be it (#2037)
+
+  🔴 **Measured in this session, on this branch, not inherited:** a brand
+  new field added to `GrappaWeb.MessagesJSON.count/1` — spec and body
+  together — left `mix grappa.wire_pin --check` answering
+  `wire shape and protocol 16 agree.` at rc 0, and
+  `mix grappa.gen_wire_types --check` answering `in sync.` on the same
+  tree, with the field appearing **0 times** in either generated artefact
+  (positive control: 223 / 190 hits for a token that is in them; negative
+  control 0). #2037 hit the same hole for real and the gate failed only on
+  the VERSION field, printing a byte-identical digest across a two-field
+  wire ADDITION.
+
+  This is a RECURRENCE. #1679 met the class — `/boot` invisible to the
+  tripwire — and cured it by adding one module to `gen_wire_types`'s
+  hand-kept `@extra_modules` and writing a comment telling the next author
+  to remember. The note did not hold, and it could not: the list is
+  **fail-OPEN**, so forgetting it costs nothing and says nothing.
+
+  Widening that list is not the cure either, measured: of the twelve
+  `GrappaWeb.*JSON` views, **eight declare no named `@type` at all** —
+  `MessagesJSON` among them, which is where #2037's fields live. The
+  codegen renders named types, so listing those modules buys exactly
+  nothing. All twelve DO carry `@spec`s (29 of them).
+
+  So the third component digests what the views **declare** — the
+  `@spec`s of their EXPORTED functions, read from BEAM chunks, over a
+  module set derived from the build output rather than typed by hand
+  (`json_view_spec_text/0`). It is fail-CLOSED twice: a new view is
+  covered the moment it compiles, and a discovery that finds nothing
+  RAISES instead of contributing an empty string.
+
+  Deliberately NOT routed through the codegen: it would drag twelve views'
+  shapes into `wireTypes.ts` and `wireSchema.ts`, and the schema one is
+  RUNTIME validation for cic. Widening a runtime validator is a client
+  change; this is a gate change, and they do not belong in one commit.
+
+  ⚠️ **Two limits, stated so they are not rediscovered as surprises.**
+  A view whose BODY grows a key while its `@spec` stands still is still
+  invisible here — Dialyzer is the leg that catches that one, and that is
+  an ARGUMENT rather than something measured in this session. And a spec
+  that references a remote type is digested as the reference TEXT, so a
+  change INSIDE `Grappa.Scrollback.count_split()` moves nothing unless
+  that type is in the digest's set by another route.
+
   The digest is taken over BOTH generated artefacts — `generate/0`
   (`wireTypes.ts`) and `generate_schema/0` (`wireSchema.ts`) — concatenated.
   Covering only the schema was the first design and it rested on an
@@ -96,6 +141,10 @@ defmodule Mix.Tasks.Grappa.WirePin do
 
   @pin_path "priv/wire/shape.pin"
   @protocol_source "lib/grappa/protocol.ex"
+
+  # The hand-written web JSON views, matched on the BUILD OUTPUT so the set
+  # is derived and cannot be under-kept. See `json_view_modules/0`.
+  @json_view_beam_glob "Elixir.GrappaWeb.*JSON.beam"
 
   @version_re ~r/^protocol_version = (\d+)$/m
   @digest_re ~r/^shape_digest = (sha256:[0-9a-f]+)$/m
@@ -195,12 +244,78 @@ defmodule Mix.Tasks.Grappa.WirePin do
   end
 
   @doc """
-  Everything the wire codegen emits, as one string. Regenerated in memory,
-  so a typespec edit that was never regenerated is caught here too.
+  Everything the wire shape is made of, as one string: what the codegen
+  emits, plus what the hand-written web JSON views declare. Regenerated in
+  memory, so a typespec edit that was never regenerated is caught here too.
   """
   @spec shape_text() :: String.t()
   def shape_text do
-    GenWireTypes.generate() <> "\n" <> GenWireTypes.generate_schema()
+    GenWireTypes.generate() <>
+      "\n" <> GenWireTypes.generate_schema() <> "\n" <> json_view_spec_text()
+  end
+
+  @doc """
+  Every `GrappaWeb.*JSON` view, DERIVED from the compiled beams.
+
+  The module name comes from the beam FILENAME, which IS the module — not
+  from camelizing a source path. That distinction is the one
+  `gen_wire_types` records having been bitten by: `controllers/me_json.ex`
+  camelizes to `GrappaWeb.Controllers.MeJson`, a module that does not
+  exist, which fails `Code.ensure_loaded?`, becomes `nil` and is dropped
+  SILENTLY — zero coverage while looking widened.
+  """
+  @spec json_view_modules() :: [module()]
+  def json_view_modules do
+    Mix.Project.compile_path()
+    |> Path.join(@json_view_beam_glob)
+    |> Path.wildcard()
+    |> Enum.map(&(&1 |> Path.basename(".beam") |> String.to_atom()))
+    |> Enum.sort()
+  end
+
+  @doc """
+  What the hand-written views DECLARE they return, as one deterministic
+  string — module order sorted, spec order sorted, read from BEAM chunks so
+  comments and formatting are invisible to it.
+
+  Raises when discovery finds nothing. An empty contribution would be a
+  silent fail-OPEN, which is the exact defect this component exists to
+  remove: the digest would go on agreeing while covering one component
+  fewer, and nothing would say so.
+  """
+  @spec json_view_spec_text() :: String.t()
+  def json_view_spec_text do
+    case json_view_modules() do
+      [] ->
+        raise "wire_pin: no #{@json_view_beam_glob} in #{Mix.Project.compile_path()} — " <>
+                "the hand-written view discovery is broken, and a digest taken without it " <>
+                "would silently cover less than the pin claims"
+
+      mods ->
+        Enum.map_join(mods, "\n", &render_view_specs/1)
+    end
+  end
+
+  defp render_view_specs(mod) do
+    "// === #{inspect(mod)} ===\n" <> Enum.map_join(exported_specs(mod), "\n", &"  @spec #{&1}")
+  end
+
+  # EXPORTED only. A `@spec` on a private helper is not a wire shape, and
+  # digesting it would redden the gate on a refactor that no client can see.
+  defp exported_specs(mod) do
+    with true <- Code.ensure_loaded?(mod),
+         {:ok, specs} <- Code.Typespec.fetch_specs(mod) do
+      exported = MapSet.new(mod.__info__(:functions))
+
+      specs
+      |> Enum.filter(fn {name_arity, _} -> MapSet.member?(exported, name_arity) end)
+      |> Enum.flat_map(fn {{name, _}, forms} ->
+        Enum.map(forms, &Macro.to_string(Code.Typespec.spec_to_quoted(name, &1)))
+      end)
+      |> Enum.sort()
+    else
+      _ -> []
+    end
   end
 
   @doc """
@@ -220,9 +335,12 @@ defmodule Mix.Tasks.Grappa.WirePin do
     #
     # The two facts below belong together. `protocol_version` is the value of
     # `Grappa.Protocol.version/0` at the moment `shape_digest` was taken over
-    # BOTH generated artefacts — `wireTypes.ts` and `wireSchema.ts`,
-    # concatenated. A shape change with a still number is the violation the
-    # gate exists for, and --update refuses to write it away.
+    # THREE components, concatenated: the two generated artefacts
+    # (`wireTypes.ts` and `wireSchema.ts`) and the `@spec`s the hand-written
+    # `GrappaWeb.*JSON` views export (#2037 — a field added to one of those
+    # views moved neither artefact, and this gate said `agree.`). A shape
+    # change with a still number is the violation the gate exists for, and
+    # --update refuses to write it away.
     #
     # This line states the COVERAGE on purpose: widening or narrowing what
     # the digest spans is not a wire-shape change, the gate cannot tell one

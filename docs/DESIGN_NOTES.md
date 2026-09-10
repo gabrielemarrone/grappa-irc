@@ -50430,16 +50430,20 @@ break Enter bought was worth exactly one space and could never reach the wire
 as a break. The decision was defending a cosmetic that the next function call
 spent.
 
-**Shift+Enter was NOT ruled**, and the issue says so. It is answered here by
-#974 rather than by invention: vjt's 2026-08-07 ruling on `ComposeBox` — the
-sibling surface, same operator, same one-wire-line domain — reversed his own
-day-old split with the measurement that *a Shift+Enter that refuses also EATS
-the keystroke*, and that on his device the modifier arms itself on presses he
-never meant as Shift+Enter, so the send silently does not happen. Growing a
-second semantics for the same chord on a second surface is exactly the
-"whatever pattern is closest gets propagated" failure CLAUDE.md warns about, so
-the topic editor answers the chord the way the composer does: every Enter
-sends, modifier or not.
+**Shift+Enter was left unruled by the issue, and is RULED now**: *"anche
+shift-invio setta il topic"* — vjt, 2026-09-10, his words on #grappa relayed in
+session rather than read off IRC by the implementer, which is worth stating
+because it is the provenance of the whole slice.
+
+The code predates the ruling and did not have to guess, because #974 already
+answered the same question one surface over: vjt's 2026-08-07 ruling on
+`ComposeBox` — same operator, same device, same one-wire-line domain — reversed
+his own day-old split with the measurement that *a Shift+Enter that refuses
+also EATS the keystroke*, and that on his device the modifier arms itself on
+presses he never meant as Shift+Enter, so the send silently does not happen.
+Growing a second semantics for the same chord on a second surface is exactly
+the "whatever pattern is closest gets propagated" failure CLAUDE.md warns
+about. One chord, one semantics: every Enter sends, modifier or not, on both.
 
 Two guardrails, both held. The new element-level `keydown` handles `Enter` and
 returns on everything else — it is **not** a second ESC authority, which #232

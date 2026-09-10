@@ -514,14 +514,15 @@ describe("TopicBar", () => {
         expect(fireEvent.keyDown(editor, { key: "Enter" })).toBe(false);
       });
 
-      it("Shift+Enter sets the topic too — EVERY Enter sends (#974)", () => {
-        // Not invented here: #974 is vjt's 2026-08-07 ruling on the SIBLING
-        // surface (ComposeBox), reversing his own day-old split. A Shift+Enter
-        // that refuses also EATS the keystroke, and on his device the modifier
-        // arms itself on presses he never meant as Shift+Enter — so the
-        // message silently does not go. Same operator, same device, same
-        // one-wire-line domain: the topic editor answers it the same way
-        // rather than growing a second semantics for the same chord.
+      it("Shift+Enter sets the topic too — EVERY Enter sends", () => {
+        // RULED, not derived. The issue left this chord open; vjt settled it
+        // for this surface — "anche shift-invio setta il topic" (2026-09-10,
+        // relayed in session). It agrees with #974, his 2026-08-07 ruling on
+        // the SIBLING surface (ComposeBox), which reversed his own day-old
+        // split: a Shift+Enter that refuses also EATS the keystroke, and on
+        // his device the modifier arms itself on presses he never meant as
+        // Shift+Enter — so the message silently does not go. One chord, one
+        // semantics, on both surfaces.
         withTopic("Old topic");
         render(() => <TopicBar {...baseProps()} />);
         enterEdit();

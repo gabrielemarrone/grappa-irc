@@ -253,12 +253,18 @@ const TopicBar: Component<Props> = (props) => {
   // send door, so the break Enter bought was worth exactly one space and could
   // never reach the wire as a break.
   //
-  // EVERY Enter submits, modifier or not — #974, vjt's 2026-08-07 ruling on
-  // `ComposeBox`, the sibling surface with the same one-wire-line domain: a
-  // Shift+Enter that refuses also EATS the keystroke, and on his device the
-  // modifier arms itself on presses he never meant as Shift+Enter, so the send
-  // silently does not happen. Same operator, same chord, same answer here
-  // rather than a second semantics for it.
+  // EVERY Enter submits, modifier or not. The issue left Shift+Enter
+  // explicitly unruled; vjt then ruled it FOR THIS SURFACE — "anche
+  // shift-invio setta il topic" (2026-09-10, his words on #grappa, relayed
+  // in session; not observed on IRC by the author of this line).
+  //
+  // It agrees with #974, which is why the code predates the ruling rather
+  // than waiting on it: that is vjt's 2026-08-07 ruling on `ComposeBox`, the
+  // sibling surface with the same one-wire-line domain, reversing his own
+  // day-old split because a Shift+Enter that refuses also EATS the keystroke,
+  // and on his device the modifier arms itself on presses he never meant as
+  // Shift+Enter — so the send silently does not happen. One chord, one
+  // semantics, across both surfaces.
   //
   // 🔴 Escape is NOT handled here and must never be: #232 makes the shared
   // overlay stack the SINGLE Esc authority (it deleted every per-dialog

@@ -50995,17 +50995,62 @@ returns its entries unfiltered when the nav draws nothing. It does NOT live in
 statement of the parked policy plus a copy of the form-factor rule, and
 `lib/networkParked.ts` exists to stop the first.
 
-**Queries are the leg that stays broken, and it cannot be closed here.**
-`ArchiveController.build_active_keyset/3` composes the live session channels
-(empty when parked) with `open_query_targets/2`, which reads
-`QueryWindows.list_for_subject/1` — a DB read with no session gate. So a
-parked network's DM windows are excluded from the archive response by the
-SERVER while the desktop sidebar no longer draws them either: one window, zero
-surfaces, and no client-side filter can put back a row the server never sent.
-The asymmetry is the bug — the same controller's own moduledoc says everything
-with rows qualifies when no session is live, and its channel leg honours that
-while its query leg does not. Closing it is a server change (and this slice
-claims none), so it is written down here and carried to vjt rather than taken.
+**Queries were the third leg, and they ARE closed — with a server change this
+entry first said the slice would not make.** `build_active_keyset/3` composed
+the live session channels (empty when parked) with `open_query_targets/2`,
+which reads `QueryWindows.list_for_subject/1` — a DB read with no session
+gate. So a parked network's DM windows were excluded from the archive response
+by the SERVER while the desktop sidebar no longer drew them either: one
+window, zero surfaces, and no client-side filter can put back a row the server
+never sent.
+
+It was handed up rather than taken, and the call came back to take it, on a
+reason worth recording because it is the general rule and not a preference:
+**the asymmetry is pre-existing, but this slice is what turns it into a live
+hole, so shipping the first two legs without it ships a measured regression.**
+It is also not a product decision — it aligns `build_active_keyset/3` with the
+promise the module already makes in words (*"everything with rows qualifies
+for the archive when no session is live"*), which its channel arm kept and its
+query arm did not. Now one `case` over the session lookup answers for both
+arms, so there is a single place saying what an absent session means and they
+cannot drift apart again.
+
+The pair of tests is the point: without a session an open query window no
+longer hides its DM, and WITH a live session it still does. The second is the
+control — the fix must not become "the archive never subtracts queries", since
+while a session is live that window is one the operator can actually be in.
+
+### The two contract specs, and why a spec may be rewritten
+
+`cp15-b6-parked-disconnect-reconnect` and `issue100-reconnecting-badge`
+asserted the PRE-ruling contract: a parked network stays in the sidebar,
+greyed and navigable, and the reconnecting badge has that greyed row to appear
+on. They were left red for a while precisely because rewriting an assertion to
+make a branch pass is how a suite stops being evidence.
+
+**The bar they clear is the only one that licenses it: the product owner ruled
+the asserted behaviour wrong.** Not flaky, not slow, not inconvenient. The
+rewrite is written down in each spec at the assertion that changed, in those
+terms, so a later reader cannot mistake it for a relaxation. cp15-b6 now
+asserts the disappearance AND the return — a disappearance-only spec goes
+green on a sidebar that never recovers.
+
+`issue100` keeps its subject and gains the precondition it used to assume.
+Under the ruling the badge's host is absent for the whole park, so what makes
+the badge observable at all is an ORDERING: the reconnect PATCH spawns FIRST
+and commits `:connected` only on spawn success (`NetworksController`'s U-0
+ordering), and `Session.start_session/3` returns when the GenServer starts,
+not when the link registers — so the row is back within milliseconds while the
+`connecting` flag, which clears only on 001, is still set. The spec asserts
+that ordering now (section gone while parked, section back before the badge
+latch) instead of letting it be the unstated reason a latch fires or times
+out. If it ever stops holding, the failure names the broken link and becomes
+evidence for the badge question below rather than a mystery.
+
+Both specs also stopped reading `toHaveCount(0)` on the greyed child as proof
+a row is healthy: that assertion is satisfied by a row which never came back.
+It was fair while present-and-greyed was the only possible state, and it is a
+hole now that disappearance is real.
 
 ### Limits, stated
 
@@ -51044,5 +51089,8 @@ hosted the badge for exactly that window. Moving the badge, disabling the
 button for longer, or teaching `$home` the progress signal are all product
 calls; none is taken here.
 
-_Code + tests. No wire change, no protocol bump, no server change. Deploy:
-cic bundle only._
+_Code + tests. No wire change and no protocol bump — the archive response
+shape is untouched, only which entries qualify for it. It is NO LONGER cic
+bundle only: `ArchiveController` changed, so the deploy is cic bundle PLUS the
+server. One module body, no `VERSION` bump and no migration, so the server
+half is hot-reloadable; the preflight decides._

@@ -175,11 +175,19 @@ defmodule GrappaWeb.JoinSeedCostTest do
         end)
 
       # The measured shape of the red this file went to eleven times: the two
-      # `visitors` reads land beside `bulk_snapshot`'s own two and the arm
-      # below reads four. Nothing about the door changed; the window was
-      # simply open to the whole VM.
-      assert sources == ["read_cursors", nil], """
-      an ambient process's queries were counted as the subject's.
+      # `visitors` reads land beside `bulk_snapshot`'s own two and the last
+      # arm in this file reads four. Nothing about the door changed; the
+      # window was simply open to the whole VM.
+      #
+      # A multiset, not the observed sequence `["read_cursors", nil]` — same
+      # posture as the tally arms, and here for a sharper reason: this arm's
+      # job is to report on ATTRIBUTION, so it must not also go red when
+      # `bulk_snapshot/4` reorders its own two statements. A message that
+      # names a cause it did not establish is the failure mode this whole
+      # file is about.
+      assert Enum.frequencies(sources) == %{"read_cursors" => 1, nil => 1}, """
+      the window holds something other than `bulk_snapshot/4`'s own two reads
+      — an ambient process's queries were counted as the subject's.
         sources: #{inspect(sources)}
       """
     end

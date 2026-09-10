@@ -341,7 +341,9 @@ the operator is identified to NickServ arrives as one user-topic event:
 
 `identified` is the verdict and the ONLY thing to gate on; the server folds
 every flavour's evidence behind it (bahamut's `+r` umode, OFTC's `+R`,
-IRCv3 `account-notify`, numeric 330 RPL_WHOISLOGGEDIN). `account` is the
+IRCv3 `account-notify`, numeric 330 RPL_WHOISLOGGEDIN, and numeric 900
+RPL_LOGGEDIN — which on a SASL login is the only one of the four that
+arrives at all). `account` is the
 services account name when the ircd exposes one and `null` otherwise —
 including while `identified` is `true`, which is the normal bahamut case.
 It is display data; absence of an account is not absence of identity.

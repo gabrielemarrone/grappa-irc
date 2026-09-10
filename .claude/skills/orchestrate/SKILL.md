@@ -325,6 +325,21 @@ is DELETE-then-write, never append-only:
   pretende ovunque (il controllo DENTRO lo strumento, non accanto). ⇒ **Ordine giusto: `-d` nudo →
   se rc=1, misura l'upstream → puntalo a `origin/main` → `-d` NUDO di nuovo. `-D` resta l'ultima
   spiaggia, e chi lo usa deve portare l'`--is-ancestor` a parte.**
+  🔴🔴 **MA QUELLA RICETTA HA UN PRESUPPOSTO NASCOSTO CHE UN `gh pr merge --rebase` DISTRUGGE:
+  ASSUME CHE LE SHA DEL RAMO SIANO SOPRAVVISSUTE AL MERGE (orch, 2026-09-10, misurato su
+  `w1/2059-reconnect-race`).** Il rebase-merge **lato GitHub RISCRIVE i commit**, quindi il ramo
+  **non è antenato di nessun main, per COSTRUZIONE**: `-d` rispose `not fully merged` **anche con
+  `branch.<b>.merge` già `refs/heads/main`**, e ri-puntare l'upstream (rc=0) **non cambiò nulla** —
+  `-d` nudo di nuovo, rc=1 identico. **`--is-ancestor` fallirebbe allo stesso modo**, quindi il
+  paletto *"chi usa `-D` porti l'`--is-ancestor`"* qui **chiede una prova che non può esistere**.
+  🥇 **Il verdetto giusto è il CONTENUTO, e w1 lo ha portato senza che glielo chiedessi:** unico
+  file che differisce fra la head della PR e main = **il commit docs-only dell'orchestratrice**, i
+  suoi 6 file (5 cic + DN) **blob-identici** su main, **con controllo positivo** (il confronto
+  marca quel file come DIFFERENT ⇒ non è cieco). ⇒ **Dopo un rebase-merge lato GitHub `-D` è la via
+  NORMALE, non l'ultima spiaggia** — e chi lo autorizza deve dire **perché** `-d` non poteva
+  riuscire, o la worker successiva ripeterà i tre passi inutili.
+  🥇 **E w1 si è FERMATA prima di `-D` chiedendo la mia parola, invece di alzare da sola: è la
+  posizione giusta** — il divieto era mio, e togliere un divieto non è compito di chi lo subisce.
   ⚠️ **E `git worktree remove` senza `--force` rifiuta (rc=128, *"contains modified or untracked
   files"*) su una worktree sporca**: lì `--force` è **necessario**, non un'abitudine — ma solo dopo
   che lo sporco è stato misurato e preservato fuori.

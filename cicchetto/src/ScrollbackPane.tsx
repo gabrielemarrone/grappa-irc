@@ -417,6 +417,50 @@ const readMentionGeom = (listRef: HTMLDivElement): ScrollbackLineGeom[] => {
   return out;
 };
 
+// THE tail write, shared by the three appliers that mean "put the pane at the
+// tail": activation's no-marker branch, the settle-wait's tail-follow, and the
+// operator tail. One function because those three were three VERBATIM copies of
+// the same five lines (measured: one md5 once indentation is stripped), so the
+// defect below had to be found three times and fixed three times.
+//
+// Two steps, and both are load-bearing:
+//
+//  1. The native walk. UX-8(a3) chose `lastElementChild.scrollIntoView` over
+//     `scrollTop = scrollHeight` math because the browser scrolls the container
+//     from the element's real box — layout-aware even while scrollHeight
+//     bookkeeping is mid-update (the channel-back path: a cached window whose
+//     scrollback store reload races the key-effect even after rAF×2). It also
+//     walks scrollable ANCESTORS, which the setter does not. Both kept: this is
+//     the step that must NOT be traded away, and trading it away is exactly what
+//     "just use the setter, it reaches the real tail" would have done.
+//
+//  2. #2031 — but that walk aligns the ROW's bottom with the scrollport's bottom
+//     EDGE, and that is not the tail. `.scrollback` carries
+//     `padding: 0.5rem 1rem`, so the scroller's own 8px of bottom padding is
+//     left unscrolled: the row lands FLUSH against the edge with a fraction of a
+//     pixel clipped. Nothing repairs it afterwards, because ~7px is well inside
+//     `SCROLL_BOTTOM_THRESHOLD_PX` and so every "am I at the tail" reader — the
+//     #625 fail-safe included — answers yes and skips its write. Finish the job
+//     against the scroller's own maximum.
+//
+// The maximum is spelled `scrollHeight - clientHeight` rather than leaning on
+// the browser to clamp `scrollTop = scrollHeight`, which is the call #1121
+// already made for `restoreTo`: a number that has to be clamped before it is
+// true cannot be measured against.
+//
+// The top-up only ever scrolls DOWN, and that guard is step 1's insurance rather
+// than generic caution — a stale `scrollHeight` is the precise condition the
+// native walk exists to survive, so writing a stale maximum over a good walk
+// would undo it. `max <= scrollTop` means the read cannot be trusted (or we are
+// already there) and the walk stands. Down-only also keeps `followMode` out of
+// it: the pane leaves the tail only when scrollTop DECREASES (the #168 guard).
+const scrollToTail = (list: HTMLDivElement): void => {
+  const tail = list.lastElementChild as HTMLElement | null;
+  tail?.scrollIntoView?.({ block: "end" });
+  const max = list.scrollHeight - list.clientHeight;
+  if (max > list.scrollTop) list.scrollTop = max;
+};
+
 // Wire-shape source-of-truth: the server's `Grappa.Scrollback.Message.kind()`
 // enum is the canonical producer (lib/grappa/scrollback/message.ex).
 // `MessageKind` mirrors it; this switch must stay exhaustive over the
@@ -2503,13 +2547,14 @@ const ScrollbackPane: Component<Props> = (props) => {
     // skip — the length-effect below catches the bottom-snap on the
     // first non-empty length transition.
     //
-    // UX-8(a3): `lastElementChild?.scrollIntoView` is more reliable than
-    // `scrollTop = scrollHeight` math — the browser walks the element's
-    // box and scrolls its container natively, which is layout-aware even
-    // when scrollHeight bookkeeping is mid-update (channel-back path:
+    // UX-8(a3): the tail write is `scrollToTail`, and the reason it walks the
+    // element's box instead of doing `scrollTop = scrollHeight` math lives with
+    // it — the browser scrolls the container natively, which is layout-aware
+    // even when scrollHeight bookkeeping is mid-update (channel-back path:
     // query → #bofh cached, scrollback store reload races key-effect even
-    // after rAF×2). Fallback scrollHeight write is preserved if scrollback
-    // is empty (no element to scroll into view).
+    // after rAF×2). That property is exactly why #2031 COMPLETED that write
+    // rather than swapping it for the setter, which would have reached the true
+    // tail and lost the walk.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         // #130 — reveal in EVERY exit path so the pane is never stranded
@@ -2559,12 +2604,7 @@ const ScrollbackPane: Component<Props> = (props) => {
           // append preserves a scrolled-up viewport — guarded by the #535 gap
           // e2e case.)
         } else {
-          const tail = listRef.lastElementChild as HTMLElement | null;
-          if (tail?.scrollIntoView) {
-            tail.scrollIntoView({ block: "end" });
-          } else {
-            listRef.scrollTop = listRef.scrollHeight;
-          }
+          scrollToTail(listRef);
           setFollowMode(true);
           setAtBottomNow(true);
         }
@@ -3177,11 +3217,7 @@ const ScrollbackPane: Component<Props> = (props) => {
         const atTail =
           currScrollHeight - listRef.scrollTop - listRef.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
         if (settled || !atTail) {
-          if (tail?.scrollIntoView) {
-            tail.scrollIntoView({ block: "end" });
-          } else {
-            listRef.scrollTop = listRef.scrollHeight;
-          }
+          scrollToTail(listRef);
         }
         lastTailScrollHeight = listRef.scrollHeight;
         return;
@@ -3265,12 +3301,7 @@ const ScrollbackPane: Component<Props> = (props) => {
         // needed. Re-arm follow + geometry, exactly as the former scrollToBottom()
         // helper did; running SYNC keeps the caller's post-scroll
         // `lastFullyVisibleRowId` read on the pinned tail.
-        const tail = listRef.lastElementChild as HTMLElement | null;
-        if (tail?.scrollIntoView) {
-          tail.scrollIntoView({ block: "end" });
-        } else {
-          listRef.scrollTop = listRef.scrollHeight;
-        }
+        scrollToTail(listRef);
         setFollowMode(true);
         setAtBottomNow(true);
         return;

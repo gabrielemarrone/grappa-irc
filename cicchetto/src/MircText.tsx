@@ -6,6 +6,7 @@ import { classifyMediaLink, sameHostHref } from "./lib/mediaLink";
 import { openMediaViewer } from "./lib/mediaViewer";
 import { mircPlainRuns, parseMircFormat, type Run } from "./lib/mircFormat";
 import { maybeEscapePwaClick } from "./lib/platform";
+import { replyQuoteHeadLength } from "./lib/quotableBody";
 import { serverSettings } from "./lib/serverSettings";
 import { getStripFormatting } from "./lib/stripFormatting";
 
@@ -110,6 +111,53 @@ const renderChannel = (
   );
 };
 
+// issue 2086 — a run, plus whether it falls inside the quoted head of a reply.
+// The flag is the ONLY thing this layer adds to `Run`: `mircFormat` decodes the
+// wire and knows nothing about what cic's Reply verb emits, and keeping the
+// classification here is what stops the wire parser from growing a second job.
+type QuotedRun = Run & { quoted: boolean };
+
+// issue 2086 — split the runs at the end of the quoted head, so the head can be
+// dimmed and the answer cannot. vjt (#it-opers, 2026-09-11): "facciamo sì che
+// il colore della parte quotata sia più muted, cosi si vede di più il messaggio
+// inviato".
+//
+// The boundary comes from `replyQuoteHeadLength` — the SAME `PREVIOUS_QUOTE`
+// predicate a re-reply strips with — measured against the run texts joined
+// back, which IS the plain projection (`mircPlainText` is literally that
+// concatenation). So the dimmed region and the stripped region are one region
+// by construction: no second detector, and nothing to keep in step.
+//
+// `trimStart` because the requote path matches a `.trim()`ed body while the
+// renderer must keep every character it was given. Two lines to keep the two
+// answers identical on a body with leading whitespace; without them the render
+// would silently decline to dim a head the requote would still cut.
+//
+// The cut can land INSIDE a run (the common case: one plain run for the whole
+// body), so that run is split in two — which is also why this returns runs and
+// not an index. Emphasis and linkify then run per half; neither can span the
+// `<< ` boundary, because a space sits there.
+const splitReplyQuote = (runs: Run[]): QuotedRun[] => {
+  const plain = runs.map((run) => run.text).join("");
+  const lead = plain.length - plain.trimStart().length;
+  const head = replyQuoteHeadLength(plain.slice(lead));
+  if (head === 0) return runs.map((run) => ({ ...run, quoted: false }));
+  const cut = lead + head;
+  const out: QuotedRun[] = [];
+  let seen = 0;
+  for (const run of runs) {
+    const end = seen + run.text.length;
+    if (end <= cut) out.push({ ...run, quoted: true });
+    else if (seen >= cut) out.push({ ...run, quoted: false });
+    else {
+      out.push({ ...run, text: run.text.slice(0, cut - seen), quoted: true });
+      out.push({ ...run, text: run.text.slice(cut - seen), quoted: false });
+    }
+    seen = end;
+  }
+  return out;
+};
+
 // CP13 S10: render an IRC body string with mIRC formatting expanded into
 // per-run <span> elements. Plain text (no control chars) collapses into a
 // single Run and renders as one <span>; the no-formatting fast path is
@@ -117,7 +165,7 @@ const renderChannel = (
 // active toggle attribute + inline style for fg/bg colors (the palette is
 // 16 fixed values — we don't generate per-color CSS classes).
 const renderRun = (
-  run: Run,
+  run: QuotedRun,
   linkPolicy: LinkPolicy,
   emphasis: boolean,
   onChannelClick: ((channel: string) => void) | undefined,
@@ -154,6 +202,20 @@ const renderRun = (
         "scrollback-mirc-strikethrough": run.strikethrough,
         "scrollback-mirc-monospace": run.monospace,
         "scrollback-mirc-reverse": run.reverse && run.fg === undefined && run.bg === undefined,
+        // issue 2086 — the quoted head, dimmed to `--muted` (the token every
+        // theme already defines for secondary text, so the gallery themes and
+        // the theme editor follow for free; a literal grey would not).
+        //
+        // Withheld from a run that carries an EXPLICIT colour, on the same
+        // fg/bg test the reverse line above uses. The dimming must LOSE to a
+        // `\x03` the sender chose: a colour opened inside the quote keeps
+        // applying past `<< `, so the head is already part-coloured, and a dim
+        // that fought it would repaint characters the sender coloured on
+        // purpose. The inline `style` would win the cascade anyway on a plain
+        // fg run — stating it here also covers `reverse`, where fg lands on
+        // `background-color` and leaves `color` free for the class to take,
+        // and keeps the DOM from claiming "muted" where nothing is muted.
+        "scrollback-reply-quote": run.quoted && run.fg === undefined && run.bg === undefined,
       }}
       style={style}
     >
@@ -304,8 +366,14 @@ export const MircBody: Component<{
   // re-runs on `props.body`: toggling re-renders every open pane with no
   // reconnect and no refetch, because the raw body is untouched and only its
   // projection changed. That is the issue's own contract, not a nicety.
-  const runs = (): Run[] =>
-    getStripFormatting() ? mircPlainRuns(props.body) : parseMircFormat(props.body);
+  //
+  // issue 2086 rides the same chokepoint, and for the reason stated right
+  // above: a reply reads the same way on every surface that renders a body,
+  // and a per-surface opt-in list is the thing that rots. The classification
+  // is by SHAPE, so a hand-typed quote dims too — acceptable by the issue's
+  // own ruling, because it looks like a quote precisely because it is one.
+  const runs = (): QuotedRun[] =>
+    splitReplyQuote(getStripFormatting() ? mircPlainRuns(props.body) : parseMircFormat(props.body));
   // Default "navigate" is the genuine config default — correct
   // production behavior for every non-tappable-surface consumer.
   //

@@ -7509,3 +7509,57 @@ describe("#1914 /topic answer row", () => {
     expect(rows).toEqual(["scrollback-line", "topic-show-line", "scrollback-line"]);
   });
 });
+
+// issue 2086 — vjt (#it-opers, 2026-09-11): "sul reply facciamo sì che il
+// colore della parte quotata sia più muted, cosi si vede di più il messaggio
+// inviato". The dimming itself is proven at the renderer (MircText.test.tsx);
+// what belongs HERE is that a real scrollback row shows it — the pane is the
+// surface the operator actually looks at, and a class that never reaches a
+// message body would pass every unit test and change nothing on screen.
+describe("issue 2086 reply-quote dimming in the pane", () => {
+  const CHAN = "#t2086";
+  const KEY_2086 = `freenode ${CHAN}` as ChannelKey;
+
+  const msg = (id: number, body: string, kind: ScrollbackMessage["kind"]): ScrollbackMessage => ({
+    id,
+    network: "freenode",
+    channel: CHAN,
+    server_time: 1_700_000_000_000 + id,
+    kind,
+    sender: "alice",
+    body,
+    meta: {},
+  });
+
+  const mount = () =>
+    render(() => <ScrollbackPane networkSlug="freenode" channelName={CHAN} kind="channel" />);
+
+  beforeEach(() => {
+    setUserNick("vjt");
+    mockMembersByChannel.mockReturnValue({});
+  });
+
+  it("dims the quoted head of a message row and leaves the answer at full weight", () => {
+    setScrollback({ [KEY_2086]: [msg(1, "<bob> ciao mondo << sì certo", "privmsg")] });
+    mount();
+
+    const row = screen.getByTestId("scrollback-line");
+    const dimmed = Array.from(row.querySelectorAll(".scrollback-reply-quote"))
+      .map((el) => el.textContent)
+      .join("");
+    expect(dimmed).toBe("<bob> ciao mondo << ");
+    // Muted, not hidden: the whole line is still readable in the row.
+    expect(row).toHaveTextContent("<bob> ciao mondo << sì certo");
+  });
+
+  // The negative control that keeps this from becoming a `<<` search on the
+  // surface where ordinary prose actually arrives.
+  it("leaves an ordinary message that merely contains `<<` alone", () => {
+    setScrollback({ [KEY_2086]: [msg(2, "shift << 2 gives four", "privmsg")] });
+    mount();
+
+    const row = screen.getByTestId("scrollback-line");
+    expect(row.querySelector(".scrollback-reply-quote")).toBeNull();
+    expect(row).toHaveTextContent("shift << 2 gives four");
+  });
+});

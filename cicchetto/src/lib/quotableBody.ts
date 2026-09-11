@@ -98,6 +98,19 @@ function attributed(msg: ScrollbackMessage): { author: string | null; body: stri
   return { author: relay[1] ?? null, body: body.slice(relay[0].length).trim() };
 }
 
+// How far a quote-shaped head reaches into `text`, in UTF-16 units, or 0 when
+// the text is not quote-shaped. The count INCLUDES the tail's trailing space,
+// so `text.slice(headLength)` is exactly what `withoutPreviousQuote` keeps.
+//
+// issue 2086 — the RENDER dims that head, and it must dim the same region a
+// re-reply strips: a second detector would let the two drift, and then the
+// colour on screen would be describing a boundary the requote does not use.
+// The offset is the general answer here — a boolean cannot say WHERE — so the
+// two doors below are one `exec` and its `> 0`, never two regexes.
+export function replyQuoteHeadLength(text: string): number {
+  return PREVIOUS_QUOTE.exec(text)?.[0].length ?? 0;
+}
+
 // #1688 — the same question asked of a COMPOSE DRAFT rather than of a wire
 // body: does this string already open with a quote WE emitted?
 //
@@ -107,7 +120,7 @@ function attributed(msg: ScrollbackMessage): { author: string | null; body: stri
 // mis-classification is what decides whether the operator's own sentence gets
 // reordered. One nick charset, one anchor, one answer.
 export function startsWithReplyQuote(text: string): boolean {
-  return PREVIOUS_QUOTE.test(text);
+  return replyQuoteHeadLength(text) > 0;
 }
 
 // Only CONTENT kinds quote (`isContentKind` — privmsg/notice/action, the same

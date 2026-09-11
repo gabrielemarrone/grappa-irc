@@ -4,6 +4,7 @@ import type { ScrollbackMessage } from "../lib/api";
 import { channelKey } from "../lib/channelKey";
 import { getDraft, setDraft } from "../lib/compose";
 import { appendToCompose } from "../lib/composeAppend";
+import { quotableBody, replyQuoteHeadLength } from "../lib/quotableBody";
 import {
   REPLY_QUOTE_BODY_LIMIT,
   REPLY_QUOTE_ELLIPSIS,
@@ -597,5 +598,55 @@ describe("replyQuote — a bridged message quotes its AUTHOR, not the relay (iss
     expect(replyQuote(msg({ sender: "alice", body: "<bob> original<< answer" }))).toBe(
       "<alice> answer << ",
     );
+  });
+});
+
+// issue 2086 — the render dims the quoted head, and it must dim EXACTLY the
+// region a re-reply strips. `replyQuoteHeadLength` is the one door that answers
+// "how far does the quote reach"; `startsWithReplyQuote` is now derived from
+// it, so the boolean and the offset cannot come apart.
+//
+// The structural assertion is the last `it` below: what stays visible past the
+// dimmed head is byte-for-byte what `quotableBody` keeps. If the two ever
+// disagree, one of them is lying to the reader.
+describe("replyQuoteHeadLength — how far the quote reaches (issue 2086)", () => {
+  it("counts the head up to and including the tail's trailing space", () => {
+    const body = "<bob> ciao mondo << risposta";
+    expect(body.slice(0, replyQuoteHeadLength(body))).toBe("<bob> ciao mondo << ");
+  });
+
+  it("counts an action-shaped head the same way", () => {
+    const body = "* bob saluta << ricambio";
+    expect(body.slice(0, replyQuoteHeadLength(body))).toBe("* bob saluta << ");
+  });
+
+  it("lands on the LAST tail, so a chain sheds every hop", () => {
+    const body = "<a> uno << <b> due << tre";
+    expect(body.slice(0, replyQuoteHeadLength(body))).toBe("<a> uno << <b> due << ");
+  });
+
+  it("reaches the whole body when the sender wrote nothing past the tail", () => {
+    const body = "<bob> ciao mondo <<";
+    expect(replyQuoteHeadLength(body)).toBe(body.length);
+  });
+
+  it("answers 0 for the shapes that only LOOK like a quote", () => {
+    expect(replyQuoteHeadLength("shift << 2 gives four")).toBe(0);
+    expect(replyQuoteHeadLength("cat <<EOF > f")).toBe(0);
+    expect(replyQuoteHeadLength("<3 you << me")).toBe(0);
+    expect(replyQuoteHeadLength("bozza <bob> ciao<< risposta")).toBe(0);
+    expect(replyQuoteHeadLength("nessuna citazione qui")).toBe(0);
+  });
+
+  it("agrees with what quotableBody keeps — same region, by construction", () => {
+    for (const body of [
+      "<bob> ciao mondo << risposta",
+      "* bob saluta << ricambio",
+      "<a> uno << <b> due << tre",
+      "shift << 2 gives four",
+      "nessuna citazione qui",
+    ]) {
+      expect(body.slice(replyQuoteHeadLength(body)).trim()).toBe(quotableBody(msg({ body })));
+    }
   });
 });

@@ -330,3 +330,75 @@ describe("MircText strip-formatting preference (#2029)", () => {
     expect(link.href).toBe("https://example.com/x");
   });
 });
+
+// issue 2086 — the quoted head of a reply renders MUTED so the answer after
+// `<< ` carries the visual weight. The region is the one `PREVIOUS_QUOTE`
+// identifies (`lib/quotableBody`), the same predicate a re-reply strips with:
+// these tests assert the SEEN outcome, so a rendering that drifted from the
+// detector shows up as a wrong span boundary rather than as a passing mirror.
+describe("MircText reply-quote dimming (issue 2086)", () => {
+  const MUTED = ".scrollback-reply-quote";
+  const mutedText = (container: HTMLElement): string =>
+    [...container.querySelectorAll(MUTED)].map((el) => el.textContent).join("");
+
+  beforeEach(() => setStripFormatting(false));
+  afterEach(() => setStripFormatting(false));
+
+  it("dims the head up to and including the tail, and nothing of the answer", () => {
+    const { container } = render(() => <MircBody body="<vjt> ciao mondo << sì certo" />);
+    expect(mutedText(container)).toBe("<vjt> ciao mondo << ");
+  });
+
+  // Constraint 1: muted, never hidden. A sender can type the shape by hand and
+  // must still be able to read what they wrote.
+  it("hides nothing — every character of the body is still in the DOM", () => {
+    const { container } = render(() => <MircBody body="<vjt> ciao mondo << sì certo" />);
+    expect(container.textContent).toBe("<vjt> ciao mondo << sì certo");
+  });
+
+  it("dims an ACTION-shaped head too (`* nick …<< `)", () => {
+    const { container } = render(() => <MircBody body="* vjt saluta << ricambio" />);
+    expect(mutedText(container)).toBe("* vjt saluta << ");
+  });
+
+  // The detector is not a bare `<<` search, and the render must not become one:
+  // these are somebody's sentence, not a quote.
+  it("leaves a body that merely CONTAINS `<<` completely undimmed", () => {
+    for (const body of ["shift << 2 is a doubling", "cat <<EOF then the heredoc"]) {
+      const { container } = render(() => <MircBody body={body} />);
+      expect(container.querySelector(MUTED)).toBeNull();
+      expect(container.textContent).toBe(body);
+    }
+  });
+
+  // Constraint 2 — the one that breaks in silence. A colour opened INSIDE the
+  // quoted head keeps applying past `<< `, so the head is half-coloured and the
+  // answer is coloured. The dimming must LOSE to the explicit colour: the
+  // coloured characters keep the sender's colour on both sides of the boundary,
+  // and only the uncoloured head prefix is muted.
+  it("loses to an explicit mIRC colour that crosses the `<< ` boundary", () => {
+    const { container } = render(() => <MircBody body={"<vjt> ciao \x0304mondo << sì certo"} />);
+
+    // Only the run before the colour code is dimmed.
+    expect(mutedText(container)).toBe("<vjt> ciao ");
+    // The coloured run spans the boundary and is NOT dimmed anywhere.
+    for (const el of container.querySelectorAll(MUTED)) {
+      expect((el as HTMLElement).style.color).toBe("");
+    }
+    const coloured = [...container.querySelectorAll("span")].filter(
+      (el) => (el as HTMLElement).style.color !== "",
+    );
+    expect(coloured.length).toBeGreaterThan(0);
+    expect(coloured.map((el) => el.textContent).join("")).toBe("mondo << sì certo");
+    expect(container.textContent).toBe("<vjt> ciao mondo << sì certo");
+  });
+
+  // The head is a property of the TEXT, not of the decoration: #2029's strip
+  // takes the colours away and the quote is still a quote.
+  it("still dims the head with the strip-formatting preference ON", () => {
+    setStripFormatting(true);
+    const { container } = render(() => <MircBody body={"<vjt> ciao \x0304mondo << sì certo"} />);
+    expect(mutedText(container)).toBe("<vjt> ciao mondo << ");
+    expect(container.textContent).toBe("<vjt> ciao mondo << sì certo");
+  });
+});

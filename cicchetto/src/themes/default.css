@@ -4003,6 +4003,21 @@ button.topic-bar-windows-opener {
   filter: invert(1);
 }
 
+/* issue 2086 — the quoted head of a reply (`<nick> …body… << `), dimmed so the
+   answer typed after it carries the weight. `--muted` is the token every theme
+   already defines for secondary text, and it is the SAME pair timestamps run
+   against `--bg`, so the contrast floor is one that was already accepted — a
+   literal grey here would break the gallery themes and the theme editor, and
+   anything dimmer than `--muted` would owe a measurement.
+
+   Colour ONLY: muted, never hidden. A sender can type the shape by hand (the
+   detector says "quote-shaped", not "we emitted it") and must still be able to
+   read every character back. The renderer withholds this class from a run that
+   carries an explicit mIRC colour — see MircText's renderRun. */
+.scrollback-reply-quote {
+  color: var(--muted);
+}
+
 .scrollback-presence {
   color: var(--muted);
   font-style: italic;

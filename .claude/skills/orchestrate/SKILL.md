@@ -852,6 +852,14 @@ at that merge (#1632). ONE batched deploy (~4–5 already-closed issues), ONE du
   `priv/repo/migrations/` matched those names anywhere in a path, and the bare `.` matched any byte.
   ⚠️ In the same measurement I also read `$?` after a `| head` — that was **`head`'s** rc, not the
   grep's. **Read the rc of the GREP, never of a pipe.**
+  🥇🥇 **E LA REGOLA GENERALE CHE NE ESCE, PIÙ LARGA DEL PATTERN: LA CLASSE HOT/COLD LA DECIDE IL
+  CODICE CHE GIRA IN PROD **ADESSO**, NON QUELLO CHE STAI SPEDENDO.** `CLAUDE.md` su main può già
+  dire *"a `VERSION`-only bump is HOT on every substrate"* — quella frase descrive il `mix.exs` col
+  `@otp_vsn` congelato, e **prod gira ancora il `mix.exs` vecchio finché quel deploy non è passato**.
+  ⇒ **una cura che rende hot i deploy arriva SEMPRE su un deploy cold**, e leggere la regola nuova
+  sull'albero nuovo per classificare la spedizione che la porta è l'inversione che costa il giro.
+  **Classifica contro la prod VIVA (`/api/config`, `start_erl.data`, il lib_dir del nodo), mai
+  contro il diff da solo.**
 - 🔴 **PROVE A HOT DEPLOY** by the reload `{"failed":[]}` list + the served cic bundle hash (`curl
   https://irc.sindro.me/`). **`/api/config` stays STALE after a hot deploy** — valid for COLD only. A release `rpc`
   from root fails `:noconnection` — use `service grappa status` + `fetch http://127.0.0.1:4000/healthz`.

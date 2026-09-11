@@ -2277,3 +2277,20 @@ terminale*). **La forma che regge resta il grep sul TESTO della riga sospetta.**
 positivo vivo** — ho il marcatore dim sulla riga sospetta, non la controprova nello stesso frame.
 **Non cambia la decisione** (un ghost non si esegue: rifiutare non richiede prova, agire sì), ma va
 detto invece di spacciare la misura per completa.
+
+### 👻 DECIMO GHOST — 2026-09-11, e il controllo positivo stavolta c'era
+Ferma da un'ora sul *"cosa next"* e appena messa la domanda all'ircbot, il suo box mostrava
+**`sì vai, posta il relay a orch`** — cioè il permesso esatto che aspettavo. **`^[[2m` ⇒ GHOST**,
+con **controllo positivo VIVO NELLO STESSO FRAME** (`Zitto.`, un turno reale, in `^[[38;5;231m`) —
+la controprova che al settimo ghost mancava. **Box vuoto ⇒ il mio ordine precedente non era mai
+atterrato come turno**, e l'ho riscoperto solo grepando il TESTO.
+🥇 **Il conteggio è il dato: DIECI.** Un avvistamento singolo si legge sempre come curiosità; è la
+serie che dice *questo pane produce fantasmi ogni volta che aspetti una risposta*. **Aggiorna il
+numero quando ne vedi uno, o il prossimo turno ricomincia da "capita raramente".**
+🥇 **E la domanda giusta da fare a un peer non è «che cosa hanno risposto» ma «il mio messaggio è
+USCITO?»** — la prima è leggere IRC, che mi è vietato; la seconda distingue **un mute mio da un
+silenzio di vjt**, che sono la stessa cosa vista da fuori. Misurato qui: **postato**, tre righe
+`> PRIVMSG #grappa`, **ora Rome 13:02:19 = 11:02Z** ⇒ **la transport funziona, il silenzio è suo, e
+non si sollecita.** ⚠️ L'exit status non esisteva più (quel turno era stato clearato): **la prova
+era l'outbound, non il `$?`** — e un peer che lo dice invece di inventarsi un rc ha fatto la cosa
+giusta.

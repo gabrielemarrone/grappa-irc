@@ -1991,6 +1991,22 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   verde VUOTO non ne porta nessuna** — `"status":"passed"`, `lockstall=0`, `maxgap=0.0` non dicono
   niente che non si riottenga rigirando il gate. ⇒ **Nei brief chiedi «porta una misura che non
   esiste altrove?», MAI «e' stato letto?».**
+  🥇🥇 **E la PRIMA applicazione della regola nuova ha dato la risposta SBAGLIATA, perche' l'INPUT era
+  sbagliato — la stessa w1 l'ha ribaltata venti minuti dopo, contro una mia autorizzazione esplicita
+  a potare.** Il *"verde vuoto"* che avevo preso per buono era una **lettura parziale**: aveva letto
+  **5 righe su 14** di `gap-scan.tsv`, tutte a zero, e generalizzato. Girando
+  `grep -v '=0$' | wc -l` — cioe' un **conteggio positivo** invece di un'occhiata alle prime righe —
+  e' saltato fuori `maxgap=14.9 gaps_ge_10=1` con **`kept=no`** (la retention NON aveva conservato
+  quel run altrove), piu' **quattro snapshot FALLITI, due dei quali `@webkit`/iPhone, cioe' la
+  piattaforma del difetto stesso**. ⇒ misura che non esiste altrove ⇒ **TRATTIENI**.
+  🥇 **Due lezioni distinte, e vanno tenute separate:** (1) **la regola ha discriminato**, e' l'input
+  che mentiva — *"una ruling e' buona quanto la misura che le dai in pasto"*; (2) **un «tutte a zero»
+  letto sulle prime righe non e' uno zero misurato** — e' la famiglia dello zero falso e plausibile,
+  in costume di CAMPIONAMENTO invece che di strumento rotto.
+  🥇 **Cura migliore del trattenimento indefinito: ESTRARRE.** L'artefatto prezioso si tira fuori
+  (tar dei soli file portanti → `scp` sul Pi in `.orchestrate/artifacts/<slug>/`, verifica per
+  CONTENUTO con pos+neg ctrl) **e POI si pota** — cosi' la misura sopravvive senza tenere in vita una
+  worktree da centinaia di MB.
   🥇🥇 **E la ragione per cui questo si perde in silenzio: un avvistamento singolo si legge SEMPRE
   come flake isolato e viene lasciato cadere — e' il CONTEGGIO a separare flake da pattern.** Un
   `/clear` (o un auto-clear) fra due avvistamenti e' esattamente il meccanismo con cui un conteggio

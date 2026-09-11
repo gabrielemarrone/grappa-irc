@@ -1618,6 +1618,24 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   **l'ESTRATTORE** (delimitava a marcatore invece che a EOF), non il dato. **Un risultato uniforme su
   tutto il campione — 0/N o N/N — accusa lo strumento prima del codice.** Quinta istanza della stessa
   famiglia: `$h[...]` letto da zsh come SUBSCRIPT DI ARRAY ⇒ *"0 file"* dove i veri erano 12 e 8 (w1).
+- 🔴🔴 **ZSH DI NUOVO, FACCIA NUOVA, E STAVOLTA IL FALSO È UN *VERDE*: `for f in $files` NON FA
+  WORD-SPLITTING IN ZSH** ⇒ il ciclo gira **UNA volta sola**, con `$f` = **l'intero blob** dei path
+  (w1, 2026-09-11, verdetto di atterraggio della #2069, corretto da lei in corsa).
+  🔴 **E il moltiplicatore che lo rende letale: `git diff <ref> -- <path>` RISPONDE "IDENTICAL" PER
+  QUALUNQUE PATH CHE NON ESISTE** — nessun output, rc=0. ⇒ un ciclo di confronto per-file che itera
+  su un path spazzatura **stampa `IDENTICAL` e non ha guardato niente.** Le due cose insieme fanno
+  un verdetto *"13/13 file identici a main"* **senza aver confrontato un solo file**.
+  🥇 **Il controllo che lo becca costa una riga e va DENTRO lo strumento: un path FASULLO deve dare
+  DIFFERENT.** Se risponde `identical`, il ciclo è degenere ed esce **senza stampare numeri**.
+  (Su bash `IFS` salva la situazione per caso — **la forma portabile è iterare su righe**
+  (`while IFS= read -r f`) o su un array vero, mai su una variabile nuda.)
+- 🔴 **UN CONTROLLO NEGATIVO PUÒ CONTARE UN *COMMENTO* E ACCUSARE UNA CURA COMPLETA** (stessa fetta):
+  il conteggio di `contentDropped` dava **1** e sembrava una cura lasciata a metà — era **la riga di
+  commento che ne DOCUMENTA la cancellazione**. Raffinato ai soli **usi-come-codice**: **0**, con la
+  regex nuova **validata da un controllo positivo** (`measuredUnreadByChannel` → 1).
+  🥇 **Un grep su un identificatore misura le OCCORRENZE DEL TESTO, non gli USI**, e i commenti che
+  spiegano una rimozione sono esattamente dove quel testo sopravvive. *Gemello esatto di "un grep sul
+  NOME non misura la duplicazione", visto dall'altro lato: lì assolveva, qui accusa.*
 - 🔴🔴 **UN GREP SU `passed|failed` IN UN LOG PLAYWRIGHT MISURA I NOMI DEI TEST, NON GLI ESITI** (orch,
   2026-08-19). Ho dichiarato *"giro tagliato al test 383 di 756, zero rossi"*: **entrambi falsi.** Le parole
   `fail`/`failed` stanno dentro i NOMI (`issue38-...-rejoin-fail`, `issue511-failed-autojoin`,

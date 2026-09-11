@@ -1978,6 +1978,19 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   ⇒ **Letto e diagnosticato ⇒ smaltibile. MAI LETTO ⇒ e' l'unica copia di una misura che non sai di
   avere.** Le due regole non si contraddicono: **prima di potare una worktree, chiedi se i suoi log
   di gate sono stati LETTI**, non se sono vecchi.
+  🔴🔴 **MA «LETTO» E' INFALSIFICABILE, E BRIEFARLO COME CLAUSOLA BLOCCA UNA POTATURA SENZA TROVARE
+  NIENTE (w1, 2026-09-11, su un mio paletto).** Su `w1-2031` ha squalificato ogni clausola
+  MISURABILE — `gap-scan.tsv` lo scrive uno script tracciato, `playwright-report/` e `test-results/`
+  sono output standard, i certs hanno il `gen-cert.sh` accanto — e ha **trattenuto lo stesso**,
+  perche' *"un log di gate MAI LETTO"* non ha strumento: **su macOS non c'e' atime affidabile, e
+  comunque non distinguerebbe "letto da un umano" da "toccato da un `find`"**. Il trattenimento non
+  era un ritrovamento, era **un buco di misura mio**, e lei l'ha detto con quelle parole invece di
+  decidere al posto mio.
+  🥇 **Il discriminante che SI puo' misurare: l'artefatto porta una MISURA che non esiste altrove?**
+  Il log di `w2-1759` la portava (`samples: 1 collected / 515 expected`, `SAMPLER STARVED`); **un
+  verde VUOTO non ne porta nessuna** — `"status":"passed"`, `lockstall=0`, `maxgap=0.0` non dicono
+  niente che non si riottenga rigirando il gate. ⇒ **Nei brief chiedi «porta una misura che non
+  esiste altrove?», MAI «e' stato letto?».**
   🥇🥇 **E la ragione per cui questo si perde in silenzio: un avvistamento singolo si legge SEMPRE
   come flake isolato e viene lasciato cadere — e' il CONTEGGIO a separare flake da pattern.** Un
   `/clear` (o un auto-clear) fra due avvistamenti e' esattamente il meccanismo con cui un conteggio

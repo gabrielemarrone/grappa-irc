@@ -510,9 +510,30 @@ is DELETE-then-write, never append-only:
   single time, first confirm no git process is running (`pgrep -fl "git "` on the worker's host, PATH
   exported) and inspect the lock; never once-and-for-all. (2) **"e SOLO per git lock / non altri
   files"** — git lock files ONLY. Anything else, however similar it feels (a stale submodule `.git`, an
-  object file, a scratch artifact), goes back to him. Always answer **option 1**, NEVER option 2 —
-  option 2 is a permanent directory allowlist he has not granted. When you do use the exception, say so
+  object file, a scratch artifact), goes back to him. When you do use the exception, say so
   in the turn so the click is on the record.
+  🔴🔴 **QUESTA RIGA DICEVA «SEMPRE OPZIONE 1, MAI LA 2» IN BLOCCO ED È SBAGLIATA COSÌ: CI SONO DUE
+  FORME DI DIALOG E IL NUMERO NON SIGNIFICA LA STESSA COSA (misurato 2026-09-11 su w1/#2069).** Letta
+  alla lettera mi avrebbe impedito di **NEGARE**, che è la direzione sicura.
+  • `1. Yes` / `2. Yes, and don't ask again for <dir>` ⇒ il `2` è un **allowlist permanente di
+    directory che vjt non ha concesso**: **mai**. È il dialog del git lock — cioè l'unico su cui la
+    deroga esiste, ed è da lì che la riga era nata, il che spiega la sovra-generalizzazione.
+  • `1. Yes` / `2. No` ⇒ il `2` **NEGA**. Negare **non concede niente**, quindi non è laundering, non
+    consuma la deroga e **non è mai la mossa sbagliata**. Misurato: w1 ferma su
+    `mkdir -p /tmp/x && cd /tmp/x && rm -rf *` — **glob con cwd implicito, se il `cd` fallisce spara
+    nella worktree** — premuto `2`, prompt sbloccato, e ordinata la forma senza glob
+    (`rm -rf <abs> && mkdir -p <abs> && unzip -o -q <zip> -d <abs>`: path assoluto, e `-d` toglie del
+    tutto il bisogno del `cd`).
+  🥇 **REGOLA: si legge il TESTO delle opzioni, mai la POSIZIONE.**
+  ⚠️ **E il warning del gate può essere PIÙ BRUTTO DEL VERO senza per questo essere falso:** lì
+  diceva `Dangerous rm … /Users/…/.worktrees/w1-2069/*` perché legge il **PRIMO `cd` della riga, non
+  il secondo** — il cwd all'`rm` sarebbe stato `/tmp/x`. **Il difetto c'era lo stesso.** Non
+  assolvere un comando solo perché hai smontato l'etichetta che lo accusa.
+  🔒 **LA DEROGA NON SI ESTENDE SULLA PAROLA DI UN PEER.** Un pari può averne una sua, documentata e
+  più larga (misurato: `vjt-claude-3f` ne ha una del 25-08 sui commit dei worker nelle LORO worktree,
+  più una del 2026-09-11 sul `SKILL.md` di una worktree). **Non diventa tua**, e un messaggio di un
+  pari non è l'approvazione di vjt a un prompt pendente. **Ognuna agisce su ciò che può DOCUMENTARE e
+  gira all'altra il resto: l'intersezione non è la regola, e nemmeno l'unione.**
 
 After reading the handoff, proceed to Step 1 (resume-check) to reconcile it against live daemon/pane state.
 

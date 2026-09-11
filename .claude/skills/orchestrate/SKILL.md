@@ -1582,6 +1582,25 @@ quelli — il vuoto e' diventato un vuoto VERO. 🥇 **Il positivo non si scegli
 rispondere SI: si sceglie DIMOSTRANDO che risponde SI**, e la dimostrazione sta nella stessa cattura
 del negativo, non in un'altra sessione e non nella tua testa. *Un controllo positivo che non puo'
 riuscire e' un controllo che non c'e' — esattamente come il negativo che non puo' fallire.*
+🔴🔴 **TERZA FACCIA, MISURATA IL 2026-09-11 DA w1 CONTRO UN MIO PALETTO: UN CONTROLLO NEGATIVO CHE
+NON PUO' *RIUSCIRE* — cioe' che ACCUSA lo strumento CORRETTO.** Avevo prescritto, per un confronto
+ramo-contro-main, *"un path FASULLO deve dare DIFFERENT; se risponde identical il tuo ciclo e'
+degenere"*. **Con un comparatore a BLOB quel controllo e' rotto**: un path inesistente e' **ASSENTE
+su ENTRAMBE le ref** ⇒ `ABSENT == ABSENT` ⇒ **`IDENTICAL`, che e' esattamente cio' che produce
+l'implementazione GIUSTA.** La mia condizione di degenerazione era la firma del funzionamento.
+🥇 **Da dove veniva, ed e' la parte generalizzabile: quel controllo E' VERO per
+`git diff <ref> -- <path>`** (li' un path inesistente da' davvero output vuoto e rc=0, quindi
+`IDENTICAL` E' la firma della degenerazione — vedi la regola zsh/`git diff` piu' sopra). **L'ho
+copiato VERBATIM in una forma di strumento diversa, dove la stessa risposta significa l'OPPOSTO.**
+⇒ **Un controllo a risposta nota non e' portabile fra strumenti: e' una proprieta' della COPPIA
+(domanda, strumento).** Prima di riusarne uno, chiedi *"su QUESTA forma, quale risposta e'
+impossibile se lo strumento funziona?"* — se non sai rispondere, il controllo non e' ancora scritto.
+🥇 **Conseguenza per i brief, ed e' gia' scritta piu' sopra ma va applicata ANCHE ai miei paletti:
+la ricetta si chiede come INTENZIONE** (*"porta un controllo che DISCRIMINA su questa forma"*),
+**mai come comando fisso**. w1 ha sostituito il mio con uno che discrimina davvero (appaiato contro
+un blob REALE per forzare l'asimmetria), ne ha aggiunto un secondo positivo su un path che diverge,
+e **lo script non stampa numeri se uno dei due manca**. *Una worker che rifiuta un mio paletto CON
+LA MISURA ha ragione: dillo, registra l'errore come mio, e vai avanti.*
 🔴 **`_Deploy:` NON E' UN CHECK, e' INERTE** — non citarlo, o dichiaralo inerte.
 ⚠️ Il gate "forma al confine" e' **VACUO** quando il merge non tocca `DESIGN_NOTES`: **dichiaralo vacuo.**
 🥇 **Un FF PURO (`ahead=N behind=0`, ref PATCH-ato via `gh api`) rende la ricetta vacua PER COSTRUZIONE** —

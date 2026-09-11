@@ -354,6 +354,15 @@ not the surrounding code.**
 - **Ask before building.** Before implementing anything substantial:
   (1) Does the infrastructure already provide this? (2) Is there a
   10x simpler approach? (3) Will this still exist in two weeks?
+- **LESS CODE IS BETTER CODE (vjt, 2026-09-11).** Deleting old and
+  useless code is the work, not a side quest. A branch that a change
+  renders dead goes away in the SAME commit — not commented out, not
+  kept "just in case": git remembers it. A refactor is expected to end
+  with LESS code as well as a better architecture; one that ends with
+  more owes an explanation. **The pruning is for DEAD code only.**
+  Input validation, security checks and test assertions are never
+  "excess code": see "Ecto.Changeset for ALL user input" below, and no
+  assert gets weakened to turn a red green.
 - **Design discipline.** Before proposing recovery mechanisms,
   tracking structures, or escalation ladders:
   (1) Don't duplicate state that already exists — derive it. Every

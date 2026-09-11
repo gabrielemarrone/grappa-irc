@@ -2004,9 +2004,37 @@ nessuna riscrittura possibile. Misurala lo stesso se costa due comandi, ma dichi
   letto sulle prime righe non e' uno zero misurato** — e' la famiglia dello zero falso e plausibile,
   in costume di CAMPIONAMENTO invece che di strumento rotto.
   🥇 **Cura migliore del trattenimento indefinito: ESTRARRE.** L'artefatto prezioso si tira fuori
-  (tar dei soli file portanti → `scp` sul Pi in `.orchestrate/artifacts/<slug>/`, verifica per
+  (tar dei soli file portanti → il Pi lo TIRA in `.orchestrate/artifacts/<slug>/`, verifica per
   CONTENUTO con pos+neg ctrl) **e POI si pota** — cosi' la misura sopravvive senza tenere in vita una
   worktree da centinaia di MB.
+  🔑 **DIREZIONE DEL TRASFERIMENTO, misurata: da voyager NON SI ESCE verso nessun host** (`id_rsa`
+  EPERM, nessun agent) ⇒ **un `scp` worker→Pi muore `rc=255`**. La worker consegna **path assoluto +
+  byte + sha256**, e **il Pi TIRA**. Ordinare il push e' un ordine ineseguibile: la worker costruisce
+  il tar e scopre all'ultimo di non poterlo spedire.
+- 🔴🔴 **«COSA HA IN PIU' DEL MAIN» NON DISTINGUE *NON MERGIATO* DA *SUPERATO*, E IL FALSO E'
+  PLAUSIBILE (w2, 2026-09-11, correggendo un mio brief).** Avevo definito il verdetto di atterraggio
+  come *"guarda solo cio' che il RAMO ha in piu'"* — fedele alla lettera, e sbagliato: un tree-diff
+  `git diff origin/main <ref>` conta come *"contenuto che main non ha"* anche **la versione VECCHIA
+  di un file che main ha nel frattempo riscritto**. Misurato: la #2046 aveva riscritto
+  `channel_directory.ex` (234 → 331 righe) quella mattina ⇒ **nove rami su undici "UNLANDED" con una
+  lista di file IDENTICA**, fra cui uno gia' provato atterrato poche ore prima. **A fermarla e' stata
+  l'implausibilita' del numero, NON un controllo.**
+  🥇 **Il verdetto sano si prende sui COMMIT** (`git cherry`), **pinnati sul `refs/remotes/origin/<b>`
+  verificato uguale alla sha che `ls-remote` riporta ADESSO** — cioe' la forma POST-rebase: sui ref
+  LOCALI si prendono falsi positivi.
+  🥇 **E la premessa che avevo dato io — «dopo un `--rebase` `git cherry` fallisce per COSTRUZIONE» —
+  e' FALSIFICATA come regola generale**: undici rami mergiati `--rebase` leggono tutti `-`, perche'
+  **il patch-id sopravvive a un replay pulito** (controllo FABBRICATO apposta: un commit con lo stesso
+  albero e lo stesso genitore di `origin/main~1` ⇒ 0 unlanded). **Il modo di failure vero non e' il
+  rebase, e' la DERIVA DI CONTESTO**, e colpisce esattamente le entry appese in coda a un file con
+  `merge=union`: il suo stesso ramo leggeva `+` mentre le righe erano **byte-identiche** a quelle su
+  main (152/0 dai due lati, `diff` rc=0).
+  🔴🔴 **E il difetto piu' istruttivo e' nel mio CONTROLLO NEGATIVO: passava per la RAGIONE
+  SBAGLIATA.** Avevo specificato *"il ramo non atterrato DEVE dare >= 1 addizione"*, e lo strumento
+  rotto gli dava **+4447** ⇒ **verde**. ⇒ **Un controllo negativo si asserisce ESATTO** (li': *"1
+  commit non a monte"*, non *">= 1"*): una soglia lasca assolve lo strumento proprio quando e' rotto,
+  che e' la stessa famiglia del controllo positivo che non riproduce la feature decisiva del caso
+  vero.
   🥇🥇 **E la ragione per cui questo si perde in silenzio: un avvistamento singolo si legge SEMPRE
   come flake isolato e viene lasciato cadere — e' il CONTEGGIO a separare flake da pattern.** Un
   `/clear` (o un auto-clear) fra due avvistamenti e' esattamente il meccanismo con cui un conteggio

@@ -54057,3 +54057,83 @@ write-on-change with no dirty state, and the two whitelist TEXT fields keep
 their own signals (seeded only by the drawer's own load), so nothing being
 typed can be clobbered — the drawer shows what the server says, which is
 the posture cic holds everywhere else.
+<!-- entry #2086 -->
+
+---
+
+## 2026-09-11 — issue 2086: the quoted head dims by losing, and it dims the region a re-reply strips
+
+vjt, #it-opers 18:47: *"sul reply.. facciamo sì che il colore della parte
+quotata sia più 'muted' cosi si vede di più il messaggio inviato"*. A reply
+is plain wire text — `<nick> …body… << ` then the answer — so in cic's own
+scrollback the two halves render as one undifferentiated run, and the quote
+is the longer half (up to 100 body characters since #1277 raised the #1235
+cap). Render-side only: nothing on the wire, nothing in what gets quoted, no
+new persisted field.
+
+### One detector, and the offset is the general door
+
+`PREVIOUS_QUOTE` (`quotableBody.ts`) already answers "is this quote-shaped",
+and it is the predicate a re-reply strips with. The render needs the same
+answer plus WHERE, which a boolean cannot say, so `startsWithReplyQuote/1`
+is now derived from a new `replyQuoteHeadLength/1` — one `exec`, and its
+`> 0`. The count includes the tail's trailing space, so `slice(headLength)`
+is exactly what `withoutPreviousQuote` keeps.
+
+That sharing is structural, not thrift. If the styled region and the
+stripped region were computed twice they would drift, and then the colour on
+screen would be describing a boundary the requote does not use — one of the
+two would be lying to the reader about what "the quote" is.
+
+The boundary is measured against the run texts joined back, which IS the
+plain projection: `mircPlainText` is literally that concatenation, and
+`mircPlainRuns` (#2029's strip) keeps the same text. So the same offset
+holds with the strip preference on or off. One correction the requote path
+forces: it matches a `.trim()`ed body while the renderer must keep every
+character it was handed, so the render measures from `trimStart`. Without
+those two lines a body with leading whitespace would be dimmed by nobody and
+cut by the requote.
+
+### The dimming LOSES, and it is withheld rather than out-cascaded
+
+Constraint the issue names and the one that breaks in silence: a `\x03`
+opened INSIDE the quoted head keeps applying past `<< `. The head is
+therefore already part-coloured, and a dim that fought the colour would
+repaint characters the sender chose on purpose.
+
+So the class is withheld from any run carrying an explicit fg or bg — the
+same `run.fg === undefined && run.bg === undefined` test the reverse line one
+row above already uses. Relying on inline-style-beats-class would have been
+true for a plain coloured run and FALSE for `reverse`, where the parser puts
+fg on `background-color` and leaves `color` free for a class to take. It also
+keeps the DOM from claiming `muted` on a span where nothing is muted, which
+is what the test asserts against.
+
+### `--muted`, and the chokepoint
+
+`--muted` is the token every theme already defines for secondary text, so
+the gallery themes and the theme editor follow for free; a literal grey would
+break both. It is also the same pair timestamps run against `--bg`, so the
+contrast floor is one already accepted — anything dimmer would owe a
+measurement, not a taste call.
+
+Applied at `MircBody`'s single `runs()` accessor, with no per-surface prop,
+for the reason #2029 wrote three lines above it: a reply reads the same way
+on every surface that renders a body, and a per-surface opt-in list is the
+thing that rots. The classification is by SHAPE, so a head somebody typed by
+hand dims too — acceptable by the issue's own ruling, because it looks like a
+quote precisely because it is one. Colour only: muted, never hidden.
+
+### What this does NOT claim
+
+- No contrast measurement was taken. The claim is inheritance — `--muted` on
+  `--bg` is the timestamp pair — not a fresh ratio.
+- Nothing was looked at in a browser. The evidence is jsdom: the dimmed span
+  boundary, the colour crossing it, and the full text still present.
+- #455's emphasis markers cannot pair across the `<< ` boundary any more,
+  because the run is split there. Neither can linkify join a URL across it —
+  but a space sits at that boundary, so no URL could span it anyway, and a
+  marker pair spanning quote-head-to-answer is not a shape anyone writes.
+- Out of scope, as the issue says: turning the reply into a structured field
+  with its own wire representation. This is a colour on a region that was
+  already identified.

@@ -855,6 +855,16 @@ at that merge (#1632). ONE batched deploy (~4–5 already-closed issues), ONE du
 - 🔴 **PROVE A HOT DEPLOY** by the reload `{"failed":[]}` list + the served cic bundle hash (`curl
   https://irc.sindro.me/`). **`/api/config` stays STALE after a hot deploy** — valid for COLD only. A release `rpc`
   from root fails `:noconnection` — use `service grappa status` + `fetch http://127.0.0.1:4000/healthz`.
+  🔴🔴 **MA QUELLA REGOLA È PER-SUBSTRATO, E SU STAGING È FALSA — misurato 2026-09-10.** *"`/api/config`
+  resta stantio dopo un hot"* è misurato sul substrato **RELEASE di m42**, dove la vsn sta nel path
+  (`lib/grappa-<vsn>`). **Staging è il container docker `grappa` sul Pi** (`https://grappa.bad.ass`, CA
+  interna ⇒ `curl -k`), substrato `:docker` che gira `exec mix phx.server` su un albero **bind-montato**:
+  **nessuna release, nessuna vsn nel path** ⇒ lì un bump `VERSION` è visibile **senza restart**. Misurato:
+  container `StartedAt` **~37,5 h PRIMA** che `1.5.5` esistesse, **`RestartCount = 0`**, `/api/config` →
+  `1.5.5`. 🥇 **Prima di citare una regola di deploy, dì su quale SUBSTRATO è stata misurata** — m42
+  (release), Pi (docker) e il jail non rispondono alla stessa domanda allo stesso modo.
+  ⚠️ **Limite dichiarato: manca una lettura di `/api/config` PRIMA** — la conclusione poggia
+  sull'aritmetica `StartedAt`/`RestartCount`/data del commit, non su un before/after.
 - 🔴 **`grappa.chat` is the MARKETING SITE; the APP is `irc.sindro.me`.**
 - 🔴 **main MOVED FIVE TIMES tonight under in-flight branches** (a THIRD session pushes `shottino` every few minutes,
   authored **`Your Name <you@example.com>`** — an unconfigured git identity landing on main; worth telling vjt).

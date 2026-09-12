@@ -54137,3 +54137,109 @@ quote precisely because it is one. Colour only: muted, never hidden.
 - Out of scope, as the issue says: turning the reply into a structured field
   with its own wire representation. This is a colour on a region that was
   already identified.
+<!-- entry #2088 -->
+
+---
+
+## 2026-09-12 — #2088: the fourth forgotten allowlist entry, and the walk that ends the class
+
+`cicchetto/public/sounds/` shipped with #1480 and every one of its five
+file-backed samples answered `200 text/html; charset=utf-8` — the SPA shell,
+under an `.mp3` URL. `@cic_static_only` in `lib/grappa_web/endpoint.ex`
+matches the first path segment and did not name `sounds`.
+
+That is the FOURTH time: #485 (the icon set), #1739 (`radio-logos/`), #1906
+(`badge-96.png`), now this. All four are the same move — add something under
+`cicchetto/public/`, leave the allowlist alone — and all four were measured
+with the same fingerprint. A list forgotten four times is the defect; the
+missing word is the symptom, so the line was worth about a minute and the
+rest of this entry is about the other half.
+
+### The discriminant is the content-type, never the status
+
+The SPA history fallback answers `200` to any path it has never heard of,
+and owes it: a hard refresh on `/theme/:id` must get the shell. So a probe
+that checks `200` reads GREEN on a broken asset. Staging measured a
+non-existent path and a real mp3 as byte-identical answers — same status,
+same length, same content-type. Only `content-type` separates them.
+
+This is why the new walk is rooted at a COPY of `cicchetto/public/` plus a
+synthetic `index.html`, rather than at `cicchetto/public/` itself. That
+directory has no `index.html`, so a missing allowlist entry there would
+surface as a `404` — and the test would then be pinning a mechanism
+production does not have, quietly moving the discriminant back onto the
+status. The copy reproduces the real shape: allowlisted → own bytes,
+forgotten → `200 text/html`.
+
+### The walk
+
+`spa_serving_test.exs` now walks every regular file under
+`cicchetto/public/` and fails on any that does not come back `200` with a
+non-HTML content-type. The failure names each path and what it actually got,
+so the message is the staging table.
+
+`Path.wildcard/1` skips dotfiles, which keeps a stray `.DS_Store` from
+failing the walk. An empty walk is refuted explicitly: a missing bind mount
+or a moved directory would otherwise read GREEN while proving nothing. The
+per-asset tests above it stay — they pin EXACT content types
+(`image/svg+xml`, `font/woff2`, `application/manifest+json`) where the walk
+only pins "not the shell", and the two vite-GENERATED top-level entries
+(`assets/`, `manifest.webmanifest`) have no counterpart under `public/` at
+all, so only the named tests reach them.
+
+### The bind mount is load-bearing
+
+`cicchetto/public` had to join `WORKTREE_VOLUMES` in `scripts/_lib.sh`. The
+walk's INPUT SET is that directory, and a worktree run bind-mounts only an
+enumerated list on top of main's `./:/app`. Without the override, a branch
+that adds a public asset walks MAIN's older tree: the new entry is invisible
+and the lockstep test reads GREEN on the very branch introducing the drift.
+Same failure `Dockerfile.release` hit in #1945, in the opposite direction.
+The red proved the mount: `sounds/` exists only on this branch, and the
+failure named all six files under it.
+
+### MEASURED: this fix is inert on a hot deploy
+
+The issue flagged, explicitly unproven, that `Plug.Static.init/1`'s compiled
+matcher is cached in `:persistent_term` keyed on the ROOT and not on the
+allowlist. Measured, in-process, against the real endpoint:
+
+```
+A current allowlist:              200 ["audio/mpeg"]
+B cache entry keyed on root:      true
+C stale matcher, same root:       200 ["text/html; charset=utf-8"]
+D :code.load_file(Endpoint) = {:module, _}; cache survived reload: true
+E after that reload:              200 ["text/html; charset=utf-8"]
+```
+
+C seeds the cache with opts compiled from an older `:only` at the SAME root
+while the loaded module already carries `sounds` — and the URL goes straight
+back to the shell. D and E show a beam reload does not disturb the entry.
+`HotReload.reload_from/1` only purges and loads beams (it names
+`persistent_term` nowhere), and `Cic.Bundle.boot/1` writes only the ROOT key,
+so even `/admin/cic-bundle-changed` re-booting the same path leaves the stale
+matcher in place.
+
+**So an allowlist change needs a RESTART, or it ships and does nothing.**
+The two-line cure — fold the list (or a compile-time `phash2` of it) into the
+cache key so a reloaded module misses and rebuilds — was deliberately NOT
+taken here: it is a hot-path change to a shared caching seam, it is the same
+shape as `cached_session_opts/0` next door, and it wants its own slice rather
+than riding a one-word allowlist fix.
+
+### What this does NOT claim
+
+- Nothing was verified on production or staging after the fix. The cure is
+  measured only in the unit suite.
+- The service-worker question is still open and still unmeasured.
+  `vite.config.ts` precaches `**/*.{...,mp3,...}` and its `globIgnores` names
+  only `radio-logos/**`, so the five samples ARE in the precache manifest. A
+  client that installed a worker while those URLs answered `text/html` may
+  therefore hold the shell cached under an `.mp3` key, and because workbox
+  revisions are content-derived and the bytes did not change, it is not
+  obvious that a new build evicts it. That is a mechanism sketched from the
+  config, not an observation — no browser was involved.
+- Whether the client falls back to a synthesised voice when a sample fails to
+  decode was not investigated.
+- The walk proves the endpoint serves the bytes. It says nothing about
+  whether any of them is a playable mp3.

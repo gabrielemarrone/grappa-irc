@@ -54243,3 +54243,97 @@ than riding a one-word allowlist fix.
   decode was not investigated.
 - The walk proves the endpoint serves the bytes. It says nothing about
   whether any of them is a playable mp3.
+<!-- entry #2091 -->
+
+---
+
+## 2026-09-12 — issue 2091: a programmatic scroll is not paging intent, and what one tap actually costs
+
+vjt, from a live client: tapping the floating scroll-to-bottom arrow on a
+channel with thousands of unread "causes hundreds of requests". The arrow is
+the jump-to-mention control (#360) and keeps that role; the animation may
+stay. What had to stop was the fetching.
+
+**The defect is an asymmetry inside ONE function body.** In
+`ScrollbackPane.onScroll`, the cursor-settle block is gated on recent operator
+input (`lastInputEventAtMs`) precisely because "programmatic scrolls fired by
+`scrollToActivation` emit DOM `scroll` events but no preceding pointerdown /
+wheel / touchmove / keydown". Three lines above it, the two blocks that FETCH
+— `maybeLoadOlder()` and the `loadNewer` forward pager under
+`distance <= LOAD_MORE_THRESHOLD_PX` — had no such gate. A smooth
+`scrollIntoView` emits one native `scroll` per animation frame, so every frame
+landing inside a pager's threshold band called a pager with nobody behind it.
+The precedent for the fix was already three lines below the bug.
+
+**The cure is the POSITIVE half of the question the settle block asks.**
+`lastInputEventAtMs` infers "not the operator" from the ABSENCE of an input
+event, which is enough for the cursor but not for the pagers: an operator who
+wheels and then taps the button inside the 1500ms recency window still looks
+like input, so reusing that gate would have suppressed nothing in the commonest
+real sequence. Instead `applyMentionJump` CLAIMS the scroll it is about to
+cause; both paging blocks honour the claim; it is released by the operator
+taking over (`on(lastInputEventAtMs)`, beside the marker-authority hand-back it
+mirrors), by the key-change cancel, and by its own quiescence timer. The gate
+is on WHO scrolled and never on the thresholds, so a human scrolling the same
+region pages exactly as before.
+
+**The altitude was decided by measurement, not by taste, and the first answer
+was wrong.** The claim was first made at `dispatchScrollWrite`, to cover the
+whole applier dispatch surface rather than one example of it — "fix root
+causes, not examples". On the full cic unit suite that moved three
+previously-green specs (#608 + #1094, the `applyPrependPreserve` cases): base
+7118 passed / 0 failed, seam 3 failed, narrow 7123 passed / 0 failed. The cause
+is the claim's LIFETIME rather than its breadth — those cases dispatch a bare
+`scroll` with no preceding input event, so a mount-time tail-follow write left
+a claim standing that swallowed the operator's very next scroll-to-top.
+Covering the dispatch surface honestly needs the claim correlated to the write
+that made it, not a time window. **Apply:** when a gate is widened to a shared
+seam, the thing that breaks is rarely the seam's breadth — it is how long the
+state the seam sets is allowed to stand. Measure the blast radius before
+believing the altitude argument; the rule that says to fix the class does not
+say the class is reachable with the mechanism in hand.
+
+**The reported magnitude is NOT reproduced, and that is a result.** The cost
+does not scale with the buffer: it is bounded by how many animation frames fall
+inside a 200px band. Measured on a frame-replay bench, one tap costs 5 pager
+CALLS in the worst geometry (anchor near the loaded tail), 1 when the animation
+starts near the top of the buffer, and **0** with the anchor mid-buffer — and
+the verbs' own in-flight guard plus exhausted latch collapse a burst further
+before it reaches the wire. The issue itself declares the "hundreds" figure
+unmeasured. The defect does not depend on it: the asymmetry is read in the
+code and stands on its own.
+
+**Left OPEN, deliberately: the forward-pager ratchet.** `loadNewer` merges a
+page, which grows `rows()`, which can fire the length-effect's tail-follow,
+which scrolls, which can page again. It is the one plausible route to a large
+number. On the bench it self-limited at 2 pages, which is evidence it exists
+and no evidence about where it stops in the field; this change does not address
+it, and the tail-follow write is exactly the one the narrow claim does not
+cover.
+
+**Two benches, two different quantities — and only one of them
+discriminates.** The vitest bench counts the PANE'S CALLS to the paging verbs
+against a mocked store, with the animation's frames replayed by hand because
+jsdom animates nothing; it goes red without the cure and is the evidence the
+fix works. The e2e
+(`e2e/tests/issue2091-jump-does-not-page.spec.ts`) counts HTTP REQUESTS in
+chromium, which is the issue's own acceptance wording, and its answer is
+**ZERO ON BOTH SIDES** — measured by reverting the cure and re-running, on a
+3000-row corpus with both pagers still armed. The pane's 5 calls do not become
+5 requests: a smooth scroll across tens of thousands of pixels moves far enough
+per frame that no `scroll` event lands inside a 200px band, and the verbs'
+in-flight guard plus exhausted latch absorb the rest. **So the acceptance
+number exists and it is zero, before the fix as well.** The spec is kept, and
+says so in its own header, because it still guards the property and because its
+positive control catches the cure's worst failure mode — gating the THRESHOLDS
+instead of the CALLER.
+
+**Apply, and it cost three fixtures to learn:** a spec that counts something
+must be shown to be capable of counting it, and the only proof is running it
+against the defect. Two of the three fixtures here were green for reasons that
+had nothing to do with the code under test — the first drained its own 200-row
+corpus during setup and latched both pagers before the gesture, and the second
+asserted a precondition (`scrollTop <= 200` after a human wheel) that is
+UNREACHABLE while the backfill pager is armed, since every page it pulls is
+prepended and `applyPrependPreserve` pushes scrollTop back down by a page.
+Neither would have announced itself; both reported green.

@@ -54425,3 +54425,48 @@ third control on a dialog that already gained one.
 No server change. The ladder cic offers for the embedded host IS
 `@allowed_ttl_seconds` spelled in seconds, and the wire shape is unmoved — no
 `protocol_version` implication.
+
+### Playwright cannot read an upload request's body — measured, and it decided the oracle
+
+The e2e for this went red twice on the same line, and the second red is the
+interesting one. The spec asserted on the multipart body of the real
+`POST /api/uploads`, read off the intercepted request. It came back EMPTY.
+
+The first cure was wrong in an instructive way. `postData()` returns the body
+decoded as UTF-8 and answers `null` when that fails, which a body carrying PNG
+bytes guarantees — a correct mechanism, correctly described, and **not the one
+operating**. Swapping in `postDataBuffer()?.toString("latin1")` did not move
+the symptom: empty before, empty after. The displacement test came back
+negative, which is what retracts a diagnosis.
+
+**What is actually true** (vjt's lead, measured here rather than left as a
+guess — standalone Playwright 1.59.1 driving Chrome 152 on Windows via
+`executablePath`, three POSTs through ONE collector):
+
+| body | `postData()` | `postDataBuffer()` |
+|---|---|---|
+| multipart **with a `File`** | `null` | `null` |
+| multipart, text parts only | `string(244)` | `buffer(244)` |
+| plain `expire=3600` | `string(11)` | `buffer(11)` |
+
+The two controls read fine through the same listener, so the collector works
+and the `File` is the variable. Chromium hands a body assembled from a file to
+the network stack as a data pipe and never gives the bytes to the Network
+domain, so there is nothing to decode and **no amount of decoding is a cure**.
+Declared limit: this is the host's Chrome and not CI's bundled Chromium build,
+and one Playwright version — but the mechanism is the browser's, and CI's two
+reds are the same symptom.
+
+**So the oracle moved from the request to the CONSEQUENCE**, which is the
+better one anyway: the 201's `expires_at` is what the SERVER decided, so the
+spec now asserts the file really will be deleted an hour from now rather than
+that cic spelled a form field correctly. It is a window (30 min .. 2 h), not
+an equality, because the timestamp carries the server's clock and is read
+against the runner's; the thing it must be distinguished from is the 24-hour
+default, which is nowhere near either edge.
+
+**General rule for a new e2e: an upload request body is not observable — assert
+on the response, or on server state.** And the reason the second red could be
+read at all is that the stages had been split one commit earlier (vjt's
+review): one collapsed assertion had reported "no upload happened", "the answer
+could not be read" and "the answer was wrong" with the same empty string.

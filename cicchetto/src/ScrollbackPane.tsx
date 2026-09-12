@@ -1477,6 +1477,40 @@ const ScrollbackPane: Component<Props> = (props) => {
   // NOT inherit the leaving pane's input timestamp).
   const [lastInputEventAtMs, setLastInputEventAtMs] = createSignal<number | null>(null);
 
+  // issue 2091 — the sibling of the gate above, for the scrolls WE cause.
+  // `lastInputEventAtMs` answers "did the operator drive this scroll?" from the
+  // ABSENCE of an input event, which is enough for the cursor-settle block but
+  // not for the pagers: an operator who wheels and then taps the floating button
+  // inside the recency window would still look like input. This is the positive
+  // half — "the scroll events arriving right now are the applier's own" — made
+  // by `applyMentionJump` (the only writer that animates, see there) and read by
+  // both paging blocks in `onScroll`. An animated jump is never paging intent:
+  // the anchor it flies to is already rendered, so nothing between here and
+  // there needs loading to complete it.
+  const [programmaticScrollAtMs, setProgrammaticScrollAtMs] = createSignal<number | null>(null);
+  let programmaticScrollTimer: number | undefined;
+  // Re-armed by each frame of the animation it covers, so the flag lives exactly
+  // as long as the scroll it describes and needs no duration guessed up front.
+  // `SCROLL_SETTLE_DEBOUNCE_MS` is reused rather than minting a second number:
+  // it already names "scroll has gone quiet" and the operator-input clear below
+  // makes an over-long tail harmless — the operator's own first event takes the
+  // pagers back before the timer would.
+  const armProgrammaticScroll = (): void => {
+    setProgrammaticScrollAtMs(Date.now());
+    if (programmaticScrollTimer !== undefined) window.clearTimeout(programmaticScrollTimer);
+    programmaticScrollTimer = window.setTimeout(
+      () => setProgrammaticScrollAtMs(null),
+      SCROLL_SETTLE_DEBOUNCE_MS,
+    );
+  };
+  const releaseProgrammaticScroll = (): void => {
+    if (programmaticScrollTimer !== undefined) {
+      window.clearTimeout(programmaticScrollTimer);
+      programmaticScrollTimer = undefined;
+    }
+    setProgrammaticScrollAtMs(null);
+  };
+
   // BUGHUNT-2 B7: per-window visible-tail snapshot, captured on every
   // onScroll. The leave-arm in `on(key, …)` below reads from this map
   // for `prevKey` — by the time that effect fires, Solid has already
@@ -2362,6 +2396,9 @@ const ScrollbackPane: Component<Props> = (props) => {
       if (scrollSettleTimer !== undefined) {
         window.clearTimeout(scrollSettleTimer);
       }
+      // issue 2091 — the claim's own timer, cleared beside the settle timer it
+      // borrows its duration from.
+      releaseProgrammaticScroll();
     });
   });
 
@@ -3539,6 +3576,10 @@ const ScrollbackPane: Component<Props> = (props) => {
     if (!listRef) return;
     logScrollDecision("interrupt-smooth", [], null, "interrupt-smooth");
     listRef.scrollTo({ top: listRef.scrollTop });
+    // issue 2091 — the animation this claim covered has just been cancelled, so
+    // the claim goes with it. Releasing here rather than letting it lapse matters
+    // because the arriving pane re-anchors immediately after this point.
+    releaseProgrammaticScroll();
   };
 
   // #608 — the W8 mention-jump applier entrypoint. Tapping the floating button
@@ -3556,7 +3597,24 @@ const ScrollbackPane: Component<Props> = (props) => {
     const intent: ScrollIntent = { kind: "mention-jump", key: k, lifetime: "one-shot" };
     const { winner, reason } = resolveIntent([intent], k);
     logScrollDecision("mention-jump", [intent], winner, reason);
-    if (winner) anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (!winner) return;
+    // issue 2091 — the ONE claim, and this is the only writer that makes it.
+    // A smooth scroll emits one native `scroll` per frame, so without it every
+    // frame landing inside a pager's threshold band fetches with nobody behind
+    // it. Every other applier write is instant: one event, no sweep.
+    //
+    // The claim was first tried at `dispatchScrollWrite`, to cover the whole
+    // dispatch surface in one place rather than one example of it. MEASURED, it
+    // moved 3 previously-green specs (#608 + #1094, the `applyPrependPreserve`
+    // cases) and the cause is the claim's LIFETIME, not its breadth: those cases
+    // dispatch a bare `scroll` with no preceding input event, so a mount-time
+    // tail-follow write left a claim standing that swallowed the operator's very
+    // next scroll-to-top. Covering the dispatch surface therefore needs the claim
+    // correlated to the write that made it, not a time window — more than the one
+    // clear exception that would have been worth it here. Narrowed back to the
+    // animated writer, which is the only one that sweeps a band at all.
+    armProgrammaticScroll();
+    anchor.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
   // #608 (STEP 3) — the window-activation applier entrypoint (W2/W3), the LAST
@@ -3692,7 +3750,13 @@ const ScrollbackPane: Component<Props> = (props) => {
   // and the initial-mount run.
   createEffect(
     on(lastInputEventAtMs, (ts) => {
-      if (ts !== null) setMarkerActivationPending(false);
+      if (ts === null) return;
+      setMarkerActivationPending(false);
+      // issue 2091 — the operator taking over ends our claim on the scroll, for
+      // the same reason it hands back marker authority one line above: from here
+      // the events are theirs and the pagers are theirs. This is what keeps the
+      // claim from outliving the animation and swallowing a real scroll.
+      releaseProgrammaticScroll();
     }),
   );
 
@@ -3905,11 +3969,23 @@ const ScrollbackPane: Component<Props> = (props) => {
     // changes.
     recomputeMentionsBelow();
 
+    // issue 2091 — is this event OURS? The applier claimed the write that caused
+    // it; re-arm here so the claim spans the whole animation (one `scroll` per
+    // frame keeps it alive) and lapses on its own once the frames stop. The badge
+    // recompute above stays OUTSIDE the gate on purpose: it is a geometry read
+    // with no fetch, and the badge must keep decrementing as the jump clears its
+    // target past the fold — that is the gesture's visible outcome.
+    const programmatic = programmaticScrollAtMs() !== null;
+    if (programmatic) armProgrammaticScroll();
+
     // CP14 B2: scroll-up triggers loadMore. Delegated to the shared
     // `maybeLoadOlder` closure (also used by the #230 wheel-underfill path)
     // — the top-of-buffer gate + loadMore call + scroll-position preservation
     // on prepend all live there (CLAUDE.md implement-once).
-    maybeLoadOlder();
+    // issue 2091 — skipped while the scroll is ours. NOT a threshold change: the
+    // gate is on WHO scrolled, so the operator's own scroll-to-top through the
+    // same band pages exactly as before.
+    if (!programmatic) maybeLoadOlder();
 
     // #161: scroll-to-bottom triggers forward-paging — the mirror image of
     // the scroll-to-top loadMore above. After #156's anchored fetch a
@@ -3924,7 +4000,9 @@ const ScrollbackPane: Component<Props> = (props) => {
     // viewport, so the operator's view doesn't shift (loadMore prepends
     // above the viewport, which is why it needs the height-delta correction
     // and this does not).
-    if (distance <= LOAD_MORE_THRESHOLD_PX) {
+    // issue 2091 — same gate as loadMore above, same reason: an animated jump
+    // sweeping into this band is not the operator arriving at the tail.
+    if (!programmatic && distance <= LOAD_MORE_THRESHOLD_PX) {
       // loadNewer appends below the fold and preserves the view. We do NOT clear
       // the marker latch here (unlike loadMore): this BOTTOM boundary is hit by
       // a cold-mount's own tail scroll before the cursor hydrates, and clearing
@@ -3946,8 +4024,16 @@ const ScrollbackPane: Component<Props> = (props) => {
     //
     // forward-only gate in setCursorIfAdvances (selection.ts) drops
     // the POST when candidate <= current cursor — scroll-up from the
-    // tail is harmless. loadMore block above runs independently on
-    // the same scroll event; the two are unrelated.
+    // tail is harmless.
+    //
+    // issue 2091 — this note used to end "loadMore block above runs
+    // independently on the same scroll event; the two are unrelated". They are
+    // related now, and the asymmetry between them WAS the defect: both blocks
+    // ask "did the operator cause this scroll?", this one from the absence of a
+    // recent input event, the pagers from the applier's positive claim. Two
+    // gates rather than one because they answer for different windows of time —
+    // this one spans a gesture (1500ms of recency), theirs spans a single
+    // animation — but neither may fire on a scroll the pane caused itself.
     const inputAt = lastInputEventAtMs();
     const recentInput = inputAt !== null && Date.now() - inputAt < INPUT_EVENT_RECENCY_MS;
     if (!recentInput) return;

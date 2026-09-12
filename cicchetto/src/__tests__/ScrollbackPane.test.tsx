@@ -22,7 +22,7 @@ import {
 import { readingAtTailKey } from "../lib/readingAtTail";
 // #230 — the mocked `loadMore` (see vi.mock("../lib/scrollback")) so the
 // wheel-up-on-underfill trigger can be asserted directly.
-import { loadMore } from "../lib/scrollback";
+import { loadMore, loadNewer } from "../lib/scrollback";
 // #1156 — the shared point-carrying touch helper (the #230 block below has its
 // own clientY-only one, scoped to that describe).
 import { fireTouch as fireTouchPoint } from "./helpers/touchEvents";
@@ -2294,6 +2294,155 @@ describe("ScrollbackPane", () => {
       screen.getByTestId("scroll-to-bottom").click();
 
       expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+    });
+  });
+
+  // issue 2091 — a PROGRAMMATIC scroll must not be read as paging intent.
+  //
+  // The defect is an asymmetry inside ONE `onScroll` body: the cursor-settle
+  // block is gated on recent operator input (`lastInputEventAtMs`), while the
+  // two blocks that FETCH — `maybeLoadOlder()` and the `loadNewer` forward
+  // pager under `distance <= LOAD_MORE_THRESHOLD_PX` — are not. A smooth
+  // mention-jump emits one native `scroll` per animation frame, so every frame
+  // that lands inside a threshold band calls a pager with no operator behind it.
+  //
+  // The band is what bounds the cost, which is why these cases drive the
+  // animation ACROSS it rather than asserting a total: an anchor mid-buffer
+  // never crosses one and was never expensive. The pos ctrl is the other half —
+  // the cure must gate on WHO scrolled, never on the thresholds themselves, so
+  // the identical frame sequence with an operator behind it must still page.
+  describe("issue 2091 — a programmatic jump does not drive the scroll pager", () => {
+    const ROWS = 400;
+    const SCROLL_HEIGHT = 4000;
+    let origScrollIntoView: typeof Element.prototype.scrollIntoView;
+
+    beforeEach(() => {
+      origScrollIntoView = Element.prototype.scrollIntoView;
+    });
+    afterEach(() => {
+      Element.prototype.scrollIntoView = origScrollIntoView;
+    });
+
+    const seedRows = (n: number): ScrollbackMessage[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: i + 1,
+        network: "freenode",
+        channel: "#grappa",
+        server_time: i + 1,
+        kind: "privmsg" as const,
+        // The second-to-last row mentions the own nick, so the #360 msg+1
+        // anchoring has a row AFTER it to anchor on (its real shape).
+        sender: i === n - 2 ? "bob" : "alice",
+        body: i === n - 2 ? "hey vjt" : "filler",
+        meta: {},
+      }));
+
+    // A real browser emits ONE native `scroll` per animation frame; jsdom emits
+    // none. Replaying the frames by hand is what puts the animation's re-entry
+    // into `onScroll` under test at all.
+    const animate = (list: HTMLDivElement, from: number, to: number, frames: number): void => {
+      for (let f = 1; f <= frames; f++) {
+        list.scrollTop = Math.round(from + ((to - from) * f) / frames);
+        list.dispatchEvent(new Event("scroll"));
+      }
+    };
+
+    // Overflowing pane, scrolled up (so the floating button renders), with the
+    // mention below the fold and its anchor near the LOADED tail — the #156
+    // shape, where the forward pager's band actually sits.
+    const mountScrolledUp = async (startTop: number): Promise<HTMLDivElement> => {
+      setUserNick("vjt");
+      setScrollback({ "freenode #grappa": seedRows(ROWS) });
+      render(() => <ScrollbackPane networkSlug="freenode" channelName="#grappa" kind="channel" />);
+      const list = screen.getByTestId("scrollback") as HTMLDivElement;
+      Object.defineProperty(list, "clientHeight", { value: 100, configurable: true });
+      Object.defineProperty(list, "scrollHeight", { value: SCROLL_HEIGHT, configurable: true });
+      Object.defineProperty(list, "scrollTop", {
+        value: startTop + 50,
+        writable: true,
+        configurable: true,
+      });
+      const mention = list.querySelector<HTMLElement>(
+        `.scrollback-line[data-msg-id="${ROWS - 1}"]`,
+      );
+      const anchor = list.querySelector<HTMLElement>(`.scrollback-line[data-msg-id="${ROWS}"]`);
+      if (mention === null || anchor === null) throw new Error("mention rows not rendered");
+      Object.defineProperty(mention, "offsetTop", { value: 3800, configurable: true });
+      Object.defineProperty(anchor, "offsetTop", { value: 3810, configurable: true });
+      // Scroll DOWN (establishes lastScrollTop) then UP → the button renders.
+      list.dispatchEvent(new Event("scroll"));
+      list.scrollTop = startTop;
+      list.dispatchEvent(new Event("scroll"));
+      await waitFor(() => expect(screen.queryByTestId("scroll-to-bottom")).not.toBeNull());
+      return list;
+    };
+
+    it("does not forward-page while the mention-jump animation sweeps the tail band", async () => {
+      const list = await mountScrolledUp(1000);
+      vi.mocked(loadMore).mockClear();
+      vi.mocked(loadNewer).mockClear();
+      Element.prototype.scrollIntoView = () => {
+        animate(list, 1000, SCROLL_HEIGHT - 100, 60);
+      };
+
+      screen.getByTestId("scroll-to-bottom").click();
+
+      expect(vi.mocked(loadNewer)).not.toHaveBeenCalled();
+      expect(vi.mocked(loadMore)).not.toHaveBeenCalled();
+    });
+
+    // The OTHER pager. A jump that begins near the top of the buffer sweeps the
+    // scroll-to-top band on its first frames, so the backfill needs the same
+    // gate — without this case that leg of the cure ships untested.
+    it("does not backfill while the animation leaves the scroll-to-top band", async () => {
+      const list = await mountScrolledUp(100);
+      vi.mocked(loadMore).mockClear();
+      Element.prototype.scrollIntoView = () => {
+        animate(list, 100, SCROLL_HEIGHT - 100, 60);
+      };
+
+      screen.getByTestId("scroll-to-bottom").click();
+
+      expect(vi.mocked(loadMore)).not.toHaveBeenCalled();
+    });
+
+    it("still backfills when a HUMAN scrolls into the scroll-to-top band", async () => {
+      const list = await mountScrolledUp(1000);
+      vi.mocked(loadMore).mockClear();
+
+      list.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+      animate(list, 1000, 0, 30);
+
+      expect(vi.mocked(loadMore)).toHaveBeenCalled();
+    });
+
+    it("still forward-pages when a HUMAN scrolls through the same band", async () => {
+      const list = await mountScrolledUp(1000);
+      vi.mocked(loadMore).mockClear();
+      vi.mocked(loadNewer).mockClear();
+
+      // The operator's own wheel stamps `lastInputEventAtMs`; the frames that
+      // follow are the SAME ones the animation replays above.
+      list.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
+      animate(list, 1000, SCROLL_HEIGHT - 100, 60);
+
+      expect(vi.mocked(loadNewer)).toHaveBeenCalled();
+    });
+
+    it("resumes paging when the operator takes over mid-animation", async () => {
+      const list = await mountScrolledUp(1000);
+      vi.mocked(loadNewer).mockClear();
+      Element.prototype.scrollIntoView = () => {
+        // Half the animation, then the operator grabs the pane and drives the
+        // rest themselves — from there on the pager is theirs again.
+        animate(list, 1000, 3400, 30);
+        list.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
+        animate(list, 3400, SCROLL_HEIGHT - 100, 30);
+      };
+
+      screen.getByTestId("scroll-to-bottom").click();
+
+      expect(vi.mocked(loadNewer)).toHaveBeenCalled();
     });
   });
 

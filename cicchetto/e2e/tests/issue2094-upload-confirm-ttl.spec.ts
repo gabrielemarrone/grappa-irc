@@ -84,16 +84,32 @@ test("2094 — the chosen duration is the one the server is asked for", async ({
   await sendPickedFiles(page);
 
   await expect(scrollbackLine(page, "privmsg", "📸").first()).toBeVisible({ timeout: 15_000 });
-  await expect.poll(() => bodies().length, { timeout: 15_000 }).toBe(1);
+
   // The wire, not the intent: the multipart body carries the `expire` field
   // the controller parses. A UI that changed its own label and posted the
-  // default anyway would be green everywhere else and red here. Read the
-  // field's own segment rather than the whole body — the PNG bytes are in
-  // there too, and "contains 3600 somewhere" is not evidence.
+  // default anyway would be green everywhere else and red here.
+  //
+  // FOUR stages, each naming its own cause (vjt's review of this spec's first
+  // red). A single `?? ""` collapsed worlds with opposite causes into one empty
+  // string: no POST captured at all, a POST whose body could not be read, and a
+  // body carrying no `expire` part all reported identically, and the reader was
+  // handed `Received string: ""` for any of them.
+  await expect
+    .poll(() => bodies().length, { message: "no POST to /api/uploads was seen", timeout: 15_000 })
+    .toBe(1);
+
   const body = bodies()[0] ?? "";
-  // Fail on the READ before failing on the value: an unreadable body makes
-  // every assertion below vacuously about an empty string.
-  expect(body).toContain('name="expire"');
+  // Stage 2 — the body was READABLE. This is the one that actually fired:
+  // `postData()` returns null on a body that is not valid UTF-8, which a
+  // multipart carrying PNG bytes never is, so the collector pushed "" while
+  // the upload itself had gone through (the scrollback link above proves it).
+  expect(body.length, "the upload POST body was captured but could not be read").toBeGreaterThan(0);
+  // Stage 3 — the request builder put an `expire` part in it at all.
+  expect(body, "the upload POST carried no expire field").toContain('name="expire"');
+
+  // Stage 4 — and its value is the one the operator picked. Read the field's
+  // own segment rather than the whole body: the PNG bytes are in there too, and
+  // "contains 3600 somewhere" is not evidence.
   const expireField = body.split('name="expire"')[1]?.slice(0, 120) ?? "";
   expect(expireField).toContain("3600");
   expect(expireField).not.toContain("86400");

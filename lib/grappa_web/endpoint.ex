@@ -74,7 +74,22 @@ defmodule GrappaWeb.Endpoint do
   # glyph on, and the platform's answer to an HTML document where it expected
   # an image is to draw its own fallback in the status bar. Measured before
   # this line existed: `text/html; charset=utf-8`, index.html.
-  @cic_static_only ~w(assets backgrounds fonts radio-logos manifest.webmanifest
+  #
+  # issue 2088 added `sounds/` — the five file-backed notification samples
+  # #1480 ships (the four synthesised presets are oscillator recipes and
+  # fetch nothing, which is why only five of nine went silent). FOURTH
+  # instance of the class, measured on staging exactly like the three
+  # above: `/sounds/xp-ding.mp3` -> `200 text/html; charset=utf-8`, and a
+  # path that exists nowhere answered the same 200 — the status never
+  # discriminated, only the content-type did.
+  #
+  # A list forgotten four times is itself the defect, so the lockstep is
+  # no longer a promise in this comment: `spa_serving_test.exs` walks
+  # every file under `cicchetto/public/` and fails on the first one that
+  # comes back as the shell. A fifth entry added below without that walk
+  # going green is a contradiction the suite will not let through.
+  @cic_static_only ~w(assets backgrounds fonts radio-logos sounds
+                      manifest.webmanifest
                       icon.svg icon-192.png icon-512.png
                       icon-192-maskable.png icon-512-maskable.png
                       apple-touch-icon.png favicon.ico badge-96.png)

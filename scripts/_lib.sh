@@ -114,10 +114,17 @@ if [ "$SRC_ROOT" != "$REPO_ROOT" ]; then
         -v "$SRC_ROOT/Dockerfile.release:/app/Dockerfile.release:ro"
         #   bin/         → operator_help_drift_test.exs (#1086)
         -v "$SRC_ROOT/bin:/app/bin:ro"
-        #   cicchetto/e2e/ → keepalive_idle_ordering_test.exs (#1030). The
-        #   only cic path a server-side test reads; cicchetto/src above is
-        #   mounted for a different reason and does not cover it.
+        #   cicchetto/e2e/ → keepalive_idle_ordering_test.exs (#1030).
+        #   cicchetto/src above is mounted for a different reason and does
+        #   not cover it.
         -v "$SRC_ROOT/cicchetto/e2e:/app/cicchetto/e2e:ro"
+        #   cicchetto/public/ → spa_serving_test.exs (issue 2088). The walk
+        #   that keeps the endpoint's static allowlist in lockstep reads THIS
+        #   directory as its input set, so without the override a worktree
+        #   adding a new public asset walks MAIN's older tree instead: the
+        #   new entry is invisible and the lockstep test reads GREEN on the
+        #   very branch that introduced the drift.
+        -v "$SRC_ROOT/cicchetto/public:/app/cicchetto/public:ro"
     )
 fi
 

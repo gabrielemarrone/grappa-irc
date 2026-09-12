@@ -20,6 +20,12 @@ defmodule GrappaWeb.SpaServingTest do
   # `:cic_dist_root`. Booted at app start like the real dist dir.
   defp html_conn, do: put_req_header(build_conn(), "accept", "text/html")
 
+  # The source of truth for "a root-level public asset": vite copies this
+  # tree into the dist verbatim, so every file under it becomes a URL.
+  # Needs its own worktree bind in `scripts/_lib.sh` — without it a
+  # worktree run walks MAIN's copy.
+  @public_root Path.expand("../../cicchetto/public", __DIR__)
+
   describe "static asset serving (Plug.Static from the cic dist)" do
     test "GET /assets/<hashed>.js serves the built asset" do
       conn = get(build_conn(), "/assets/index-TESTHASH.js")
@@ -139,6 +145,87 @@ defmodule GrappaWeb.SpaServingTest do
       assert conn.resp_body =~ "test service worker"
       assert [cache_control] = get_resp_header(conn, "cache-control")
       assert cache_control =~ "no-cache"
+    end
+  end
+
+  describe "the allowlist stays in lockstep with cicchetto/public/ (issue 2088)" do
+    # The per-asset tests above each pin ONE entry, which is why the same
+    # regression has now landed four times: #485 (the icon set),
+    # #1739 (`radio-logos/`), #1906 (`badge-96.png`), issue 2088
+    # (`sounds/`). Every one of them added something to
+    # `cicchetto/public/`, left `@cic_static_only` alone, and shipped the
+    # asset as `content-type: text/html`. The defect is the LIST, not the
+    # entry — so this walks the whole of `cicchetto/public/` and requires
+    # each file to come back as its own bytes.
+    #
+    # Rooted at a COPY of `cicchetto/public/` plus a synthetic
+    # `index.html`, because the shell is what makes the symptom
+    # `200 text/html` instead of `404`: rooting straight at
+    # `cicchetto/public/` (no index.html of its own) would turn a missing
+    # allowlist entry into a 404 and quietly move the discriminant from
+    # the content-type onto the status, which is the one reading the
+    # production measurement rules out.
+    #
+    # Not covered here, on purpose: the top-level entries vite GENERATES
+    # rather than copies (`assets/`, `manifest.webmanifest`) have no
+    # counterpart under `cicchetto/public/`. They are pinned by name in
+    # the per-asset tests above.
+    setup do
+      original = Bundle.root()
+      root = Path.join(System.tmp_dir!(), "cic-public-#{System.unique_integer([:positive])}")
+      File.cp_r!(@public_root, root)
+      File.write!(Path.join(root, "index.html"), ~s(<!doctype html><div id="cic-app-root">))
+
+      on_exit(fn ->
+        Bundle.boot(original)
+        File.rm_rf!(root)
+      end)
+
+      Bundle.boot(root)
+      :ok
+    end
+
+    test "every file under cicchetto/public/ is served as its own bytes, not the SPA shell" do
+      paths = public_asset_paths()
+
+      # An empty walk would read GREEN while proving nothing — the shape a
+      # missing bind mount or a moved directory takes.
+      refute paths == []
+
+      served =
+        Map.new(paths, fn path ->
+          conn = get(build_conn(), path)
+          {path, {conn.status, conn |> get_resp_header("content-type") |> List.first()}}
+        end)
+
+      shell =
+        Map.filter(served, fn {_, {status, content_type}} ->
+          status != 200 or String.starts_with?(content_type || "", "text/html")
+        end)
+
+      assert shell == %{}, """
+      These files exist under cicchetto/public/ — so vite copies them into
+      the dist and a browser can request them — but the endpoint answers
+      with the SPA shell instead of the file:
+
+      #{Enum.map_join(shell, "\n", fn {path, {status, ctype}} -> "  #{path} -> #{status} #{ctype}" end)}
+
+      Their first path segment is missing from `@cic_static_only` in
+      lib/grappa_web/endpoint.ex. Add it there, with a comment saying what
+      the asset is for.
+      """
+    end
+
+    test "a path with no public/ entry behind it still gets the shell (the control)" do
+      # Proves the assertion above discriminates: 200 is NOT the signal.
+      # This path is answered with the same 200 as a working asset, and
+      # that is CORRECT — the history fallback owes a shell to any
+      # client-side route it has never heard of.
+      conn = get(build_conn(), "/zzz-no-such-public-entry/nope.mp3")
+
+      assert conn.status == 200
+      assert ["text/html" <> _] = get_resp_header(conn, "content-type")
+      assert conn.resp_body =~ "cic-app-root"
     end
   end
 
@@ -285,5 +372,18 @@ defmodule GrappaWeb.SpaServingTest do
       # where the operator can read it and an anonymous client cannot.
       refute conn.resp_body =~ tmp
     end
+  end
+
+  # Every URL `cicchetto/public/` contributes to the dist, as the endpoint
+  # sees it: a leading-slash path per regular file, recursively.
+  # `Path.wildcard/1` skips dotfiles, which keeps a stray `.DS_Store` from
+  # failing the walk.
+  defp public_asset_paths do
+    @public_root
+    |> Path.join("**/*")
+    |> Path.wildcard()
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.map(&("/" <> Path.relative_to(&1, @public_root)))
+    |> Enum.sort()
   end
 end

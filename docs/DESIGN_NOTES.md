@@ -54337,3 +54337,91 @@ asserted a precondition (`scrollTop <= 200` after a human wheel) that is
 UNREACHABLE while the backfill pager is armed, since every page it pulls is
 prepended and `applyPrependPreserve` pushes scrollTop back down by a page.
 Neither would have announced itself; both reported green.
+<!-- entry #2094 -->
+
+---
+
+## 2026-09-12 — #2094: the upload TTL is chosen where the files are shown
+
+The per-request `expire` has been on the wire since the embedded host landed
+— `UploadsController.parse_ttl/1` takes it from a closed ladder
+(`@allowed_ttl_seconds [3600, 43_200, 86_400, 259_200]`) and 400s anything
+else. Nothing in cic could reach it. The only way to say how long an upload
+lives was `upload_ttl_seconds`, a per-user preference set once in the settings
+drawer, translated to a host token at dispatch
+(`pickHostTokenFromSeconds/2`). So retention was decided in advance, for every
+future file, by an operator who at that moment had no file in front of them.
+
+**The knob moved to the pre-send confirm (#1964), and that is the whole
+change.** vjt's ruling on the three options in the issue was option 1: the TTL
+picker lives inside the confirm modal and nowhere else. The known cost is
+stated rather than worked around — the confirm is OPT-IN (#1883,
+`upload_confirm_enabled`, default `false`), so an operator who never switched
+it on cannot choose per upload and keeps exactly the behaviour they have
+today. That is a real limitation, and it is the same shape as the one #1883
+already accepted when it put the confirm toggle inside the TTL fieldset.
+
+### The store learned a CHOICE, not a TTL
+
+`ConfirmRequest` gains `choice: ConfirmChoice | null` beside `alternative` and
+`attachments`, on identical terms: a pre-formatted label, pre-formatted
+options, a reactive `value()` and an `onSelect` closure. `confirmDialog.ts`
+does not know what is being chosen, and the modal only decides where the
+control sits. Ten call sites spell `choice: null` explicitly — the same
+explicit-`null` contract the two neighbours carry, so a reader sees at the
+call site that a dialog asks nothing beyond yes/no.
+
+Deliberately ONE choice and not a list of them. A confirm asks one question; a
+second control on it would be a form wearing a modal's chrome.
+
+Placement is below the file list and above the buttons, and that order is the
+sentence the dialog makes: *this happens, to these, on these terms — answer*.
+Above the list it would be a setting read before knowing what it applies to;
+inside the list it would scroll out of sight on a twelve-file batch (the list
+is capped at `40vh`).
+
+Unlike the SettingsDrawer ladder, the control carries a VISIBLE label. #1227
+removed the visible label there because a `<legend>` already named the group
+and the second name ate the width; in a dialog there is no legend, and a bare
+dropdown reading "24 hours" says nothing about what happens then. The `<label>`
+wraps the `<select>`, so the visible name IS the accessible name — one name,
+not two.
+
+### The answer rides the QUEUE, not a module-level signal
+
+`QueuedUpload` and `lastAttempt` both gain `ttlSeconds: number | null`. The
+selection is a signal created PER REQUEST inside `openSendConfirm`, so a
+displaced or cancelled dialog takes its half-made choice with it and the next
+drop starts from the preference again.
+
+Three layers at dispatch, and each one is load-bearing: the batch's own answer
+first, the stored preference behind it, the host default last. An operator who
+never opens the confirm still gets their preference (the opt-out path enqueues
+`null`, which is the whole of the pre-#2094 behaviour); one who opens it and
+leaves the dropdown alone gets the value the dropdown was showing them.
+
+The seconds are resolved to a host token at DISPATCH, never in the dialog. A
+token picked when the operator dropped the file would be a token for whichever
+host was active then, and `activeHost()` is a reactive read of an admin
+setting.
+
+A RETRY re-sends on the terms that were chosen, which is why `lastAttempt`
+carries the field: re-reading the preference there would silently change the
+answer the operator gave, in the one path where they never see the dialog
+again.
+
+The seed is checked against the ACTIVE host's ladder rather than taken at face
+value. `upload_ttl_seconds` is a bare integer with no host attached, so a
+preference the current host cannot serve would seed the dropdown with an
+option that is not in it — a control showing a selection it does not have.
+
+### What was deliberately NOT built
+
+The choice is not written back to `upload_ttl_seconds`. A one-off stays
+one-off, and a dialog opened to LOOK at the files is not where a durable
+preference should change by accident. No "remember this" checkbox: that is a
+third control on a dialog that already gained one.
+
+No server change. The ladder cic offers for the embedded host IS
+`@allowed_ttl_seconds` spelled in seconds, and the wire shape is unmoved — no
+`protocol_version` implication.

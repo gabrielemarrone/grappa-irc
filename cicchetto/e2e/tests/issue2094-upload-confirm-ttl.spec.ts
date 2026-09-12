@@ -63,7 +63,7 @@ test("2094 — the chosen duration is the one the server is asked for", async ({
   // The control is named in words. A bare dropdown reading "24 hours" says
   // nothing about what happens then, which is the whole reason it carries a
   // visible label rather than only an accessible one.
-  await expect(page.getByTestId("confirm-modal-choice")).toContainText("Expires after");
+  await expect(page.getByTestId("confirm-modal-choice")).toContainText("Delete after");
 
   const select = page.getByTestId("confirm-modal-choice-select");
   // The embedded host's ladder, which is the server's own `@allowed_ttl_seconds`

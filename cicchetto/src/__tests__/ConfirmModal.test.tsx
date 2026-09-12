@@ -487,7 +487,7 @@ describe("ConfirmModal (#195)", () => {
         onConfirm: vi.fn(),
         alternative: null,
         choice: {
-          label: "Expires after",
+          label: "Delete after",
           options: [
             { value: "3600", label: "1 hour" },
             { value: "86400", label: "24 hours" },
@@ -530,8 +530,8 @@ describe("ConfirmModal (#195)", () => {
       render(() => <ConfirmModal />);
       openWithChoice(() => "3600", vi.fn());
 
-      expect(screen.getByTestId("confirm-modal-choice").textContent).toContain("Expires after");
-      expect(screen.getByLabelText("Expires after")).toBe(
+      expect(screen.getByTestId("confirm-modal-choice").textContent).toContain("Delete after");
+      expect(screen.getByLabelText("Delete after")).toBe(
         screen.getByTestId("confirm-modal-choice-select"),
       );
     });

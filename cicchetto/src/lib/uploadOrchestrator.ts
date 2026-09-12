@@ -901,7 +901,7 @@ export function triggerUploads(
         batchTtlSeconds() === null
           ? null
           : {
-              label: "Expires after",
+              label: "Delete after",
               options: confirmHost.ttlOptions.map((opt) => ({
                 value: String(opt.seconds),
                 label: opt.label,

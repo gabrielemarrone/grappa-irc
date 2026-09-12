@@ -32,11 +32,17 @@ const png = (name: string) => ({
 // Collect the multipart bodies of real POSTs to the embedded host. Same
 // same-origin constraint as #1883's counter — a `page.route()` stub would
 // block cic's own bootstrap — so the request is observed, never intercepted.
+//
+// `postDataBuffer()`, not `postData()`: the latter returns the body decoded as
+// UTF-8 and answers NULL when it is not valid UTF-8, which a multipart body
+// carrying PNG bytes never is. Measured — the first run of this spec read `""`
+// and failed on an empty haystack. latin1 is the lossless byte-per-char
+// decode, and the field being read is ASCII.
 function collectUploadBodies(page: Page): () => string[] {
   const bodies: string[] = [];
   page.on("request", (req) => {
     if (req.method() === "POST" && req.url().endsWith("/api/uploads")) {
-      bodies.push(req.postData() ?? "");
+      bodies.push(req.postDataBuffer()?.toString("latin1") ?? "");
     }
   });
   return () => bodies;
@@ -84,7 +90,11 @@ test("2094 — the chosen duration is the one the server is asked for", async ({
   // default anyway would be green everywhere else and red here. Read the
   // field's own segment rather than the whole body — the PNG bytes are in
   // there too, and "contains 3600 somewhere" is not evidence.
-  const expireField = bodies()[0]?.split('name="expire"')[1]?.slice(0, 120) ?? "";
+  const body = bodies()[0] ?? "";
+  // Fail on the READ before failing on the value: an unreadable body makes
+  // every assertion below vacuously about an empty string.
+  expect(body).toContain('name="expire"');
+  const expireField = body.split('name="expire"')[1]?.slice(0, 120) ?? "";
   expect(expireField).toContain("3600");
   expect(expireField).not.toContain("86400");
 });

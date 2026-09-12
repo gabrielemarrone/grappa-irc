@@ -10,8 +10,20 @@
 //
 // Why a real browser and not jsdom: the unit tests prove the orchestrator
 // hands the chosen seconds to the host, which is a statement about a function
-// call. What has to be true is that the CHOICE reaches the SERVER, and the
-// only honest witness to that is the multipart body of the real POST.
+// call. What has to be true is that the choice reaches the SERVER AND IS
+// APPLIED BY IT, and the witness for that is the 201's own `expires_at`.
+//
+// It is NOT the request body, and that is measured rather than preferred.
+// Twice: `postData()` returns null on a body that is not valid UTF-8, and
+// `postDataBuffer()` is null too — Chromium hands a multipart body containing
+// a FILE to the network stack as a data pipe, and Playwright never sees the
+// bytes. The second red said so in its own words once the stages were split
+// ("the upload POST body was captured but could not be read", run
+// 34705910842). So the request body cannot be an oracle here at all.
+//
+// The response is the better one regardless: `expires_at` is what the SERVER
+// decided, so this asserts the file really will be deleted an hour from now
+// rather than that cic spelled a form field correctly.
 
 import type { Page } from "@playwright/test";
 import { TINY_PNG_HEX } from "../fixtures/bytes";
@@ -29,27 +41,34 @@ const png = (name: string) => ({
   buffer: Buffer.from(TINY_PNG_HEX, "hex"),
 });
 
-// Collect the multipart bodies of real POSTs to the embedded host. Same
-// same-origin constraint as #1883's counter — a `page.route()` stub would
-// block cic's own bootstrap — so the request is observed, never intercepted.
+// What the server answered the upload POST with. Same same-origin constraint
+// as #1883's counter — a `page.route()` stub would block cic's own bootstrap —
+// so the exchange is observed, never intercepted.
 //
-// `postDataBuffer()`, not `postData()`: the latter returns the body decoded as
-// UTF-8 and answers NULL when it is not valid UTF-8, which a multipart body
-// carrying PNG bytes never is. Measured — the first run of this spec read `""`
-// and failed on an empty haystack. latin1 is the lossless byte-per-char
-// decode, and the field being read is ASCII.
-function collectUploadBodies(page: Page): () => string[] {
-  const bodies: string[] = [];
-  page.on("request", (req) => {
-    if (req.method() === "POST" && req.url().endsWith("/api/uploads")) {
-      bodies.push(req.postDataBuffer()?.toString("latin1") ?? "");
+// Two buckets, not one, because "no 201 arrived" and "a 201 arrived whose body
+// would not parse" have opposite causes and must not share a failure message.
+type UploadCreated = { slug: string; url: string; expires_at: string };
+
+function collectUploadResponses(page: Page): {
+  created: () => UploadCreated[];
+  unparsed: () => number;
+} {
+  const created: UploadCreated[] = [];
+  let unparsed = 0;
+  page.on("response", async (res) => {
+    if (res.request().method() !== "POST" || !res.url().endsWith("/api/uploads")) return;
+    if (res.status() !== 201) return;
+    try {
+      created.push((await res.json()) as UploadCreated);
+    } catch {
+      unparsed += 1;
     }
   });
-  return () => bodies;
+  return { created: () => created, unparsed: () => unparsed };
 }
 
 test("2094 — the chosen duration is the one the server is asked for", async ({ page }) => {
-  const bodies = collectUploadBodies(page);
+  const { created, unparsed } = collectUploadResponses(page);
 
   // The choice lives in the confirm, so the operator this spec describes has
   // opted into it; the privacy notice is pre-acked because it is one-shot per
@@ -81,36 +100,46 @@ test("2094 — the chosen duration is the one the server is asked for", async ({
   await expect(select).toHaveValue("86400");
 
   await select.selectOption("3600");
+  // Read before the send, so the window below brackets the whole exchange
+  // rather than starting after it.
+  const sentAt = Date.now();
   await sendPickedFiles(page);
 
   await expect(scrollbackLine(page, "privmsg", "📸").first()).toBeVisible({ timeout: 15_000 });
 
-  // The wire, not the intent: the multipart body carries the `expire` field
-  // the controller parses. A UI that changed its own label and posted the
-  // default anyway would be green everywhere else and red here.
+  // Stages, each naming its own cause (vjt's review of this spec's first red):
+  // a single collapsed oracle reported "no upload happened", "the answer could
+  // not be read" and "the answer was wrong" with the same message.
   //
-  // FOUR stages, each naming its own cause (vjt's review of this spec's first
-  // red). A single `?? ""` collapsed worlds with opposite causes into one empty
-  // string: no POST captured at all, a POST whose body could not be read, and a
-  // body carrying no `expire` part all reported identically, and the reader was
-  // handed `Received string: ""` for any of them.
+  // Stage 1 — the server accepted an upload at all.
   await expect
-    .poll(() => bodies().length, { message: "no POST to /api/uploads was seen", timeout: 15_000 })
+    .poll(() => created().length + unparsed(), {
+      message: "no 201 from POST /api/uploads was seen",
+      timeout: 15_000,
+    })
     .toBe(1);
+  // Stage 2 — and its body parsed as the documented `{slug, url, expires_at}`.
+  expect(unparsed(), "the upload POST was answered with a body that would not parse").toBe(0);
 
-  const body = bodies()[0] ?? "";
-  // Stage 2 — the body was READABLE. This is the one that actually fired:
-  // `postData()` returns null on a body that is not valid UTF-8, which a
-  // multipart carrying PNG bytes never is, so the collector pushed "" while
-  // the upload itself had gone through (the scrollback link above proves it).
-  expect(body.length, "the upload POST body was captured but could not be read").toBeGreaterThan(0);
-  // Stage 3 — the request builder put an `expire` part in it at all.
-  expect(body, "the upload POST carried no expire field").toContain('name="expire"');
+  const row = created()[0];
+  // Stage 3 — the field this whole feature ends in is present.
+  expect(row?.expires_at, "the 201 carried no expires_at").toBeTruthy();
 
-  // Stage 4 — and its value is the one the operator picked. Read the field's
-  // own segment rather than the whole body: the PNG bytes are in there too, and
-  // "contains 3600 somewhere" is not evidence.
-  const expireField = body.split('name="expire"')[1]?.slice(0, 120) ?? "";
-  expect(expireField).toContain("3600");
-  expect(expireField).not.toContain("86400");
+  // Stage 4 — and the server put the deletion an HOUR out, not a day. This is
+  // the claim: not that cic spelled a form field, but that the file the
+  // operator just posted really does go away when they said.
+  //
+  // A window rather than an equality, because `expires_at` is stamped with the
+  // server's clock and read against the runner's. ±30 min is wider than any
+  // skew between two containers on one host and nowhere near the 24-hour
+  // default this spec exists to distinguish it from.
+  const lifetimeSeconds = (Date.parse(row?.expires_at ?? "") - sentAt) / 1000;
+  expect(
+    lifetimeSeconds,
+    "expires_at is not an hour out — the choice was not applied",
+  ).toBeGreaterThan(1_800);
+  expect(
+    lifetimeSeconds,
+    "expires_at is not an hour out — the choice was not applied",
+  ).toBeLessThan(7_200);
 });
